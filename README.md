@@ -1,0 +1,2 @@
+# stcode
+Terminal Coding Agent
