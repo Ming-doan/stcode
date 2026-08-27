@@ -13,6 +13,8 @@ from stcode.core.providers.base import BaseModelProvider
 from stcode.core.providers.types import (
     Message,
     MessageStop,
+    ReasoningDelta,
+    ReasoningEffort,
     StopReason,
     StreamEvent,
     TextBlock,
@@ -49,6 +51,9 @@ class OpenAIProvider(BaseModelProvider):
     async def list_models(self) -> list[str]:
         return [model.id async for model in self._client.models.list()]
 
+    async def aclose(self) -> None:
+        await self._client.close()
+
     async def stream(
         self,
         messages: list[Message],
@@ -57,10 +62,30 @@ class OpenAIProvider(BaseModelProvider):
         system: str | None = None,
         tools: list[ToolDefinition] | None = None,
         max_tokens: int = 8192,
+        reasoning_effort: ReasoningEffort | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
+        """`reasoning_effort` maps 1:1 onto Chat Completions' own `reasoning_effort`
+        field — OpenAI already uses this exact seven-value scale. Support for
+        each value is model-dependent; the API rejects a value the target model
+        doesn't recognize rather than us pre-validating it here.
+        """
         kwargs: dict[str, Any] = {}
         if tools:
             kwargs["tools"] = [self._to_tool(tool) for tool in tools]
+            if parallel_tool_calls is not None:
+                kwargs["parallel_tool_calls"] = parallel_tool_calls
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+        if stop is not None:
+            kwargs["stop"] = stop
 
         # index -> accumulated call state, for pairing deltas back to a call
         pending_calls: dict[int, dict[str, Any]] = {}
@@ -89,6 +114,12 @@ class OpenAIProvider(BaseModelProvider):
             if delta.content:
                 yield TextDelta(text=delta.content)
 
+            # Not a Chat Completions field — some OpenAI-compatible routers (e.g.
+            # reasoning-model proxies) bolt it onto the delta as an extra attribute.
+            reasoning = getattr(delta, "reasoning", None)
+            if reasoning:
+                yield ReasoningDelta(text=reasoning)
+
             for tool_call_delta in delta.tool_calls or []:
                 index = tool_call_delta.index
                 if tool_call_delta.id is not None:
@@ -106,12 +137,15 @@ class OpenAIProvider(BaseModelProvider):
 
             if choice.finish_reason is not None:
                 stop_reason = _FINISH_REASON_MAP.get(choice.finish_reason, "end_turn")
+                # Some OpenAI-compatible routers repeat finish_reason on a trailing
+                # usage-only chunk — clear so that chunk doesn't re-flush stale calls.
                 for call in pending_calls.values():
                     yield ToolCallEnd(
                         id=call["id"],
                         name=call["name"],
                         input=json.loads(call["json"]) if call["json"] else {},
                     )
+                pending_calls.clear()
 
         yield MessageStop(stop_reason=stop_reason, usage=usage)
 

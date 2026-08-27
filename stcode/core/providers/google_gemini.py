@@ -14,6 +14,8 @@ from stcode.core.providers.base import BaseModelProvider
 from stcode.core.providers.types import (
     Message,
     MessageStop,
+    ReasoningDelta,
+    ReasoningEffort,
     StopReason,
     StreamEvent,
     TextBlock,
@@ -28,6 +30,17 @@ from stcode.core.providers.types import (
 )
 
 DEFAULT_MODEL = "gemini-3.7-flash"
+
+# ThinkingConfig.thinking_level tops out at HIGH — there's no xhigh/max rung,
+# so both clamp down to it. "none" is handled separately via thinking_budget=0.
+_EFFORT_TO_GEMINI_THINKING_LEVEL: dict[str, str] = {
+    "minimal": "MINIMAL",
+    "low": "LOW",
+    "medium": "MEDIUM",
+    "high": "HIGH",
+    "xhigh": "HIGH",
+    "max": "HIGH",
+}
 
 _ROLE_MAP = {"user": "user", "assistant": "model"}
 
@@ -51,6 +64,9 @@ class GoogleGenAIProvider(BaseModelProvider):
     async def list_models(self) -> list[str]:
         return [model.name.removeprefix("models/") async for model in self._client.aio.models.list()]
 
+    async def aclose(self) -> None:
+        await self._client.aio.aclose()
+
     async def stream(
         self,
         messages: list[Message],
@@ -59,11 +75,40 @@ class GoogleGenAIProvider(BaseModelProvider):
         system: str | None = None,
         tools: list[ToolDefinition] | None = None,
         max_tokens: int = 8192,
+        reasoning_effort: ReasoningEffort | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
+        """`reasoning_effort="none"` sets `thinking_budget=0` (thinking off);
+        any other value maps onto `thinking_config.thinking_level`, clamped to
+        Gemini's four-level scale (`xhigh`/`max` both become `HIGH`). Thoughts
+        are always requested (`include_thoughts=True`) so a thinking-capable
+        model's reasoning surfaces as `ReasoningDelta` regardless of level —
+        it's a no-op on models that don't support thinking.
+
+        `parallel_tool_calls` has no Gemini equivalent exposed by this SDK and
+        is accepted but ignored.
+        """
+        thinking_config = (
+            types.ThinkingConfig(thinking_budget=0)
+            if reasoning_effort == "none"
+            else types.ThinkingConfig(
+                include_thoughts=True,
+                thinking_level=(
+                    _EFFORT_TO_GEMINI_THINKING_LEVEL[reasoning_effort] if reasoning_effort else None
+                ),
+            )
+        )
         config = types.GenerateContentConfig(
             system_instruction=system,
             max_output_tokens=max_tokens,
             tools=[self._to_tool(tools)] if tools else None,
+            thinking_config=thinking_config,
+            temperature=temperature,
+            top_p=top_p,
+            stop_sequences=stop,
         )
 
         has_tool_call = False
@@ -83,7 +128,10 @@ class GoogleGenAIProvider(BaseModelProvider):
                     continue
                 for part in candidate.content.parts:
                     if part.text:
-                        yield TextDelta(text=part.text)
+                        if part.thought:
+                            yield ReasoningDelta(text=part.text)
+                        else:
+                            yield TextDelta(text=part.text)
                     elif part.function_call is not None:
                         has_tool_call = True
                         call = part.function_call

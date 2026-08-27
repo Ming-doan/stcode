@@ -24,6 +24,7 @@ stcode = "stcode.cli.main:cli"
 
 [dependency-groups]
 dev = [
+    "pytest>=9.1.1",
     "textual-dev>=1.7.0",
 ]
 

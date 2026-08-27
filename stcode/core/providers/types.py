@@ -13,6 +13,12 @@ from pydantic import BaseModel
 
 Role = Literal["user", "assistant"]
 
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+"""Union of every provider's effort scale, widest first. Providers with a
+narrower scale (Anthropic has no `none`/`minimal`; Gemini's `thinking_level`
+tops out at `high`) clamp or remap at their boundary — see each provider's
+`stream()` docstring."""
+
 StopReason = Literal[
     "end_turn",
     "tool_use",
@@ -69,6 +75,14 @@ class TextDelta(BaseModel):
     text: str
 
 
+class ReasoningDelta(BaseModel):
+    """Incremental reasoning/thinking text — model's internal deliberation, not the
+    final answer. Never sent back to the provider as conversation history."""
+
+    type: Literal["reasoning_delta"] = "reasoning_delta"
+    text: str
+
+
 class ToolCallStart(BaseModel):
     """A new tool call began; its input will arrive via ToolCallDelta events."""
 
@@ -102,4 +116,4 @@ class MessageStop(BaseModel):
     usage: Usage
 
 
-StreamEvent = Union[TextDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageStop]
+StreamEvent = Union[TextDelta, ReasoningDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageStop]

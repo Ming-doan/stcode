@@ -12,6 +12,8 @@ from stcode.core.providers.base import BaseModelProvider
 from stcode.core.providers.types import (
     Message,
     MessageStop,
+    ReasoningDelta,
+    ReasoningEffort,
     StopReason,
     StreamEvent,
     TextBlock,
@@ -27,6 +29,18 @@ from stcode.core.providers.types import (
 
 DEFAULT_MODEL = "claude-opus-5"
 
+# Anthropic's output_config.effort has no "none"/"minimal" rung — "none" instead
+# turns thinking off outright (handled separately in stream()), and "minimal"
+# has no closer match than "low".
+_EFFORT_TO_ANTHROPIC: dict[str, str] = {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+}
+
 
 class AnthropicProvider(BaseModelProvider):
     def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
@@ -36,6 +50,9 @@ class AnthropicProvider(BaseModelProvider):
     async def list_models(self) -> list[str]:
         return [model.id async for model in self._client.models.list()]
 
+    async def aclose(self) -> None:
+        await self._client.close()
+
     async def stream(
         self,
         messages: list[Message],
@@ -44,12 +61,45 @@ class AnthropicProvider(BaseModelProvider):
         system: str | None = None,
         tools: list[ToolDefinition] | None = None,
         max_tokens: int = 8192,
+        reasoning_effort: ReasoningEffort | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        parallel_tool_calls: bool | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
+        """`reasoning_effort="none"` sends `thinking: {"type": "disabled"}`; any
+        other value turns on adaptive thinking and sets `output_config.effort`
+        (Anthropic's `budget_tokens` token-ceiling style is a 400 on current
+        models, so this provider never uses it). Leaving `reasoning_effort`
+        unset omits `thinking` entirely, matching current models' own default
+        (adaptive thinking already on).
+
+        `temperature`/`top_p` are passed straight through — on Claude Opus 5,
+        Sonnet 5, Fable 5, and Opus 4.7/4.8, the API itself returns 400 if
+        either is combined with adaptive thinking, i.e. whenever
+        `reasoning_effort` is anything but `"none"`.
+        """
         kwargs: dict[str, Any] = {}
         if system:
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = [self._to_tool(tool) for tool in tools]
+            if parallel_tool_calls is not None:
+                kwargs["tool_choice"] = {
+                    "type": "auto",
+                    "disable_parallel_tool_use": not parallel_tool_calls,
+                }
+        if reasoning_effort == "none":
+            kwargs["thinking"] = {"type": "disabled"}
+        elif reasoning_effort is not None:
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["output_config"] = {"effort": _EFFORT_TO_ANTHROPIC[reasoning_effort]}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+        if stop is not None:
+            kwargs["stop_sequences"] = stop
 
         # index -> tool_use block id, for pairing content_block_delta/_stop back to a call
         pending_calls: dict[int, str] = {}
@@ -72,6 +122,8 @@ class AnthropicProvider(BaseModelProvider):
                 elif event.type == "content_block_delta":
                     if event.delta.type == "text_delta":
                         yield TextDelta(text=event.delta.text)
+                    elif event.delta.type == "thinking_delta":
+                        yield ReasoningDelta(text=event.delta.thinking)
                     elif event.delta.type == "input_json_delta":
                         call_id = pending_calls.get(event.index)
                         if call_id is not None:
