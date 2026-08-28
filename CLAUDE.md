@@ -64,23 +64,25 @@ feature parity with Claude Code. Simplicity beats coverage.
 It has **no direct tools**. If you are tempted to give the main agent a tool, you are
 undoing the architecture. Route it through a sub-agent instead.
 
-**Python REPL** — a *persistent* IPython kernel (one per session), not `exec()` per turn.
-It holds:
+**Python REPL** (`core/kernel/`) — a *persistent* IPython kernel (one per session), not
+`exec()` per turn. It holds:
 - `tool_out["<id>"]` — raw tool results, spilled to `.pkl` above the size threshold
 - `session_ctx` — shared knowledge injected into sibling sub-agents
 - `answer = {"content": "", "ready": False}` — the only channel for the final response
 - `harness` — CRUD surface over prompts / memories / skills / sub-agent specs
 - `agent`, `agent_message`, `compact`, `refine` — pre-imported at kernel init
 
-**Agent Pool** — bounded queue with an `asyncio.Semaphore`. Enforces `max_concurrent`,
-`max_subagents_per_turn`, `max_depth`, and a recursive token budget.
+**Agent Pool** (`core/agent/`) — bounded queue with an `asyncio.Semaphore`. Enforces
+`max_concurrent`, `max_subagents_per_turn`, `max_depth`, and a recursive token budget.
 
 **Sub-Agent** — a full agent session (own model, own kernel, own history) with a *narrow*
-slice of parent context. Owns the real tools. Returns a short synthesis, never raw output.
+slice of parent context. Owns the real tools (`core/harness/`). Returns a short
+synthesis, never raw output.
 
-**LLM Gateway** — `difficulty` → model tier mapping, retry with backoff, provider fallback
-chain, circuit breaker, and cost accounting. Provider-specific streaming/tool-call formats
-are normalized here and nowhere else.
+**LLM Gateway** (`core/providers/gateway.py`) — `difficulty` → model tier mapping, retry
+with backoff, provider fallback chain, circuit breaker, and cost accounting.
+Provider-specific streaming/tool-call formats are normalized in `core/providers/` and
+nowhere else.
 
 ### 2.2 Hard rules
 
@@ -106,7 +108,9 @@ dependency runs one way: `cli` → `core`, never back.** If `core` ever needs to
 from `cli`, something display-shaped has ended up in the engine — move it, don't wire
 the arrow backwards.
 
-Present tense — what exists today is marked, the rest is the target shape.
+Present tense — what exists today is marked, the rest is the target shape. Everything
+non-CLI nests under `core/` — if you're adding a top-level `stcode/` directory that
+isn't `cli/`, you're probably one level too shallow; it belongs under `core/`.
 
 ```
 stcode/
@@ -119,15 +123,27 @@ stcode/
   core/                the agent engine — no UI knowledge
     configs.py       ✓ config location, schema, load/save, .env loading
     approvals.py     ✓ approval-mode vocabulary + ordering
-    llm_gateway.py   ✓ difficulty routing, retry, credential resolution
-    providers/       ✓ adapters, unified types, provider registry + metadata
-    agents.py          agent loop, turn state machine, compaction trigger
-    agent_pool.py      queue, semaphore, budget accounting, depth guard
-  kernel/              jupyter_client wrapper, output capture, truncation, snapshot
-  tools/               read, write, edit, bash, glob, grep, ls, todo, web_*
-  harness/             prompts, memories, skills, subagent specs (CRUD + disk)
-  session/             JSONL store, leaf pointer, tree ops, resume
-  daemon/              unix socket server, A2A routing, session registry
+    providers/       ✓ provider adapters + the LLM gateway built on them
+      types.py       ✓ unified Message/StreamEvent/ToolDefinition — the wire format
+                        every adapter translates to/from
+      base.py        ✓ BaseModelProvider — the adapter contract (stream(), aclose())
+      anthropic_claude.py / openai_gpt.py / google_gemini.py
+                     ✓ one adapter per SDK; normalize that SDK's wire format here
+                        and nowhere else
+      registry.py    ✓ provider lookup by name + static metadata (default model,
+                        conventional key env var)
+      gateway.py     ✓ LLMGateway — difficulty routing, retry, credential
+                        resolution (`ProviderConfig`/`RouteConfig`/`RetryConfig`
+                        are its own domain vocabulary, not a fact about files)
+    agent/              turn loop + state machine, agent pool (queue, semaphore,
+                        depth guard, token budget), session state (JSONL store,
+                        leaf pointer, tree ops, resume) — the workflow that drives
+                        harness + providers + kernel each turn
+    kernel/             jupyter_client wrapper, output capture, truncation, snapshot
+    harness/            harness definition, built-in tools (read/write/edit/bash/
+                        glob/grep/ls/todo/web_*), prompt management, MCP connection
+    daemon/             unix socket server, A2A routing, session registry, plus a
+                        websocket channel for control over the internet
 tests/
 docs/
 ```
@@ -144,8 +160,8 @@ docs/
 The split shows up most clearly in approval modes: `core/approvals.py` owns the names
 and their order (config validates against it, the tool layer will enforce it),
 `cli/labels.py` owns the help text and the status-bar colours. Same for providers —
-`core/providers` knows `gpt-5.6` is OpenAI's default, `cli/labels.py` decides that
-renders as `optional — e.g. gpt-5.6`.
+`core/providers/registry.py` knows `gpt-5.6` is OpenAI's default, `cli/labels.py`
+decides that renders as `optional — e.g. gpt-5.6`.
 
 Conditional copy lives in `labels.py` as a *function*, not as an `if` in a screen: the
 decision about which wording applies is itself part of the wording.
@@ -170,8 +186,10 @@ or TOML.
 
 **Credentials resolve env-first.** `api_key_env` names an environment variable,
 `api_key` is a literal fallback, and the variable wins whenever it's set
-(`configs.resolve_secret`). Files stcode writes are chmod 0600 because the literal may
-be in them. When the user types a key into the UI we clear that provider's
+(`providers.resolve_secret`, defined in `core/providers/gateway.py` — it's the LLM
+Gateway's own domain vocabulary, `core/configs.py` only composes `ProviderConfig`
+into the on-disk `GatewayConfig` shape). Files stcode writes are chmod 0600 because the
+literal may be in them. When the user types a key into the UI we clear that provider's
 `api_key_env`, so a stale exported variable can't shadow the key they just entered.
 The API key field is write-only: blank means "keep what's stored", never "erase it".
 
@@ -374,7 +392,7 @@ premise is programmatic control over context; a framework that owns the loop def
    This is the most common place to get stuck. Read the spec before writing kernel code.
 2. **SSE streaming + tool-call delta accumulation.** OpenAI streams
    `tool_calls[].function.arguments` in fragments; Anthropic uses `content_block_delta`.
-   Normalize both in `gateway/adapters/`, never above it.
+   Normalize both in `core/providers/`, never above it.
 3. **Async lifecycle** — cancellation, timeouts, graceful shutdown. Ctrl-C with five
    sub-agents in flight must leave no orphans and no half-written files.
 4. **Token counting** — `tiktoken` for OpenAI-family; Anthropic exposes a count endpoint.
@@ -419,13 +437,13 @@ Structured logging and a trajectory viewer are Phase 1 requirements, not nice-to
 
 ## 10. Roadmap
 
-| Phase | Scope | Done when |
-| --- | --- | --- |
-| 0 | Shell: gateway + providers, config, CLI, chat/settings UI | ✓ done — `stcode` runs, configures itself, and streams a flat reply |
-| 1 | Single agent + IPython kernel + 6 core tools + 1 provider. `depth=0` | Can complete a two-file change end-to-end with a trajectory log |
-| 2 | Async `agent()`, pool, gateway with fallback, `difficulty` routing | Parallel fan-out works under a concurrency cap and a token budget |
-| 3 | Daemon, socket IPC, A2A messaging, persistent sub-agents, agents view | Detach/reattach mid-run; child survives parent compaction |
-| 4 | Continual Harness — prompt/memory/skill/subagent CRUD, `/refine` | A repeated failure is promoted to a skill and reused next session |
+| Phase | Scope | Folders | Done when |
+| --- | --- | --- | --- |
+| 0 | Shell: gateway + providers, config, CLI, chat/settings UI | `core/providers/`, `core/configs.py` | ✓ done — `stcode` runs, configures itself, and streams a flat reply |
+| 1 | Single agent + IPython kernel + 6 core tools + 1 provider. `depth=0` | `core/kernel/`, `core/harness/` | Can complete a two-file change end-to-end with a trajectory log |
+| 2 | Async `agent()`, pool, gateway with fallback, `difficulty` routing | `core/agent/`, `core/providers/gateway.py` | Parallel fan-out works under a concurrency cap and a token budget |
+| 3 | Daemon, socket IPC, A2A messaging, persistent sub-agents, agents view | `core/daemon/` | Detach/reattach mid-run; child survives parent compaction |
+| 4 | Continual Harness — prompt/memory/skill/subagent CRUD, `/refine` | `core/harness/` | A repeated failure is promoted to a skill and reused next session |
 
 Read the `prime-agent` source before starting Phase 2. It will save days.
 
