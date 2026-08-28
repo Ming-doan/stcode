@@ -11,6 +11,28 @@ from typing import Any, Literal, Union
 
 from pydantic import BaseModel
 
+from stcode.core.common.tools import ToolDefinition
+
+__all__ = [
+    "ContentBlock",
+    "Message",
+    "MessageStop",
+    "ReasoningDelta",
+    "ReasoningEffort",
+    "Role",
+    "StopReason",
+    "StreamEvent",
+    "TextBlock",
+    "TextDelta",
+    "ToolCallDelta",
+    "ToolCallEnd",
+    "ToolCallStart",
+    "ToolDefinition",
+    "ToolResultBlock",
+    "ToolUseBlock",
+    "Usage",
+]
+
 Role = Literal["user", "assistant"]
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
@@ -57,10 +79,9 @@ class Message(BaseModel):
     content: str | list[ContentBlock]
 
 
-class ToolDefinition(BaseModel):
-    name: str
-    description: str
-    input_schema: dict[str, Any]
+# `ToolDefinition` is re-exported, not defined here: three packages need it now, so it
+# lives in `core/common/tools.py`. Importing it from this module still works — every
+# provider adapter already does — but new code should reach for `core.common`.
 
 
 class Usage(BaseModel):

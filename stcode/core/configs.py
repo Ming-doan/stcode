@@ -1,9 +1,11 @@
 """
 Config — locate, load, validate, save, and (if missing) scaffold the stcode config.
 
-Owns everything about *where* config and credentials live and *how* config is
-structured. `llm_gateway.py` only consumes the resulting `GatewayConfig` — it doesn't
-know about file paths, TOML, or .env files.
+Owns everything about *where* config and credentials live and *how the file on disk*
+is structured — paths, TOML, `.env` loading. `GatewayConfig` here is that on-disk
+shape; it composes `ProviderConfig`/`RouteConfig`/`RetryConfig`, which are the LLM
+Gateway's own domain vocabulary and live in `core/providers/gateway.py` — this module
+doesn't redefine them, only assembles and (de)serializes them.
 
 Credentials can come from either side of `resolve_secret`: an environment variable
 named by `api_key_env` (preferred — nothing secret touches disk), or a literal
@@ -17,57 +19,12 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
-from typing import Literal
 
 import tomli_w
 from pydantic import BaseModel, Field
 
-from stcode.core.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
-from stcode.core.providers import default_model_for
-
-Difficulty = Literal["low", "medium", "high"]
-
-
-class ProviderConfig(BaseModel):
-    """A provider's main credentials — the fallback for any tier that doesn't override them.
-
-    `api_key_env` names an environment variable to read the key from at request time;
-    `api_key` is a literal fallback for people who'd rather keep it in the config file.
-    The env var wins when both are set and the variable is actually present.
-
-    `base_url`/`base_url_env` are for talking to anything that speaks the provider's wire
-    protocol but isn't the vendor's own endpoint (a proxy, router, or self-hosted gateway),
-    and follow the same env-wins-over-literal rule.
-    """
-
-    api_key_env: str | None = None
-    api_key: str | None = None
-    base_url: str | None = None
-    base_url_env: str | None = None
-
-
-class RouteConfig(BaseModel):
-    """A difficulty tier's target model, with optional credential overrides.
-
-    `api_key_env`/`api_key`/`base_url`/`base_url_env` are optional: when unset, the tier
-    falls back to its provider's main config above — set them only when a tier needs
-    different credentials or a different endpoint (e.g. a higher-quota key reserved
-    for `high`).
-    """
-
-    provider: str
-    model: str
-    api_key_env: str | None = None
-    api_key: str | None = None
-    base_url: str | None = None
-    base_url_env: str | None = None
-
-
-class RetryConfig(BaseModel):
-    max_attempts: int = 3
-    base_delay: float = 1.0
-    max_delay: float = 20.0
-    jitter: bool = True
+from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
+from stcode.core.providers import Difficulty, ProviderConfig, RetryConfig, RouteConfig, default_model_for
 
 
 class DefaultsConfig(BaseModel):
@@ -88,16 +45,6 @@ class GatewayConfig(BaseModel):
     routing: dict[Difficulty, RouteConfig] = Field(default_factory=dict)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
-
-
-def resolve_secret(env_name: str | None, literal: str | None) -> str | None:
-    """An env-var name wins over a literal value when the variable is actually set —
-    shared resolution rule for both api keys and base URLs."""
-    if env_name:
-        value = os.environ.get(env_name)
-        if value:
-            return value
-    return literal
 
 
 DEFAULT_CONFIG_TOML = """\

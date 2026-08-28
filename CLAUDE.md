@@ -122,10 +122,12 @@ stcode/
     labels.py        ✓ every user-facing string, in one place
   core/                the agent engine — no UI knowledge
     configs.py       ✓ config location, schema, load/save, .env loading
-    approvals.py     ✓ approval-mode vocabulary + ordering
+    common/          ✓ vocabulary shared across core/ subpackages, importing none of
+                        them — ToolDefinition, ToolResult
     providers/       ✓ provider adapters + the LLM gateway built on them
-      types.py       ✓ unified Message/StreamEvent/ToolDefinition — the wire format
-                        every adapter translates to/from
+      types.py       ✓ unified Message/StreamEvent shapes — the wire format every
+                        adapter translates to/from (ToolDefinition is re-exported
+                        from core/common, which has three consumers now)
       base.py        ✓ BaseModelProvider — the adapter contract (stream(), aclose())
       anthropic_claude.py / openai_gpt.py / google_gemini.py
                      ✓ one adapter per SDK; normalize that SDK's wire format here
@@ -140,8 +142,19 @@ stcode/
                         leaf pointer, tree ops, resume) — the workflow that drives
                         harness + providers + kernel each turn
     kernel/             jupyter_client wrapper, output capture, truncation, snapshot
-    harness/            harness definition, built-in tools (read/write/edit/bash/
-                        glob/grep/ls/todo/web_*), prompt management, MCP connection
+    harness/         ✓ the tools, prompts, and skills an agent works with
+      harness.py     ✓ Harness — the facade the agent loop talks to. Per *agent*, not
+                        per process: for_subagent() narrows scope and tools
+      approvals.py   ✓ approval-mode vocabulary + ToolPermission + the mode policy
+      errors.py      ✓ ToolError family. A leaf, so context and tools can share it
+      context.py     ✓ HarnessContext — cwd, write scope, read tracking, todos; the
+                        `T` in Runtime[T]
+      registry.py    ✓ which tools exist, and which an agent may see
+      mcp.py         ✓ MCP servers from .mcp.json, adapted to the Tool interface
+      tools/         ✓ base.py (@tool, Runtime), schema.py (signature → JSON Schema),
+                        files/search/shell/repl/todo/web/interact/skill
+      prompts/       ✓ plan + execute modes, orchestrator + worker roles
+      skills/        ✓ SKILL.md discovery from ~/.agents/skills, loaded on demand
     daemon/             unix socket server, A2A routing, session registry, plus a
                         websocket channel for control over the internet
 tests/
@@ -154,12 +167,13 @@ docs/
 | --- | --- | --- |
 | A word the user reads | `cli/labels.py` | `"read-only — no writes, no commands"` |
 | A value the engine branches on | `core/` | `ApprovalMode`, `APPROVAL_MODES` order |
+| A type more than two packages need | `core/common/` | `ToolDefinition`, `ToolResult` |
 | A fact about a provider | `core/providers/` | default model, conventional key env var |
 | How a fact is *displayed* | `cli/labels.py` | `"OpenAI (also any OpenAI-compatible endpoint)"` |
 
-The split shows up most clearly in approval modes: `core/approvals.py` owns the names
-and their order (config validates against it, the tool layer will enforce it),
-`cli/labels.py` owns the help text and the status-bar colours. Same for providers —
+The split shows up most clearly in approval modes: `core/harness/approvals.py` owns the
+names, their order, and the permission policy the tool layer enforces; `cli/labels.py`
+owns the help text and the status-bar colours. Same for providers —
 `core/providers/registry.py` knows `gpt-5.6` is OpenAI's default, `cli/labels.py`
 decides that renders as `optional — e.g. gpt-5.6`.
 
@@ -207,10 +221,23 @@ deliberately pinned to a third provider is left alone.
 | `/help`, `/quit` | |
 
 **Approval modes** (least → most permissive): `plan`, `suggest`, `auto-edit`,
-`full-auto`. Names and ordering in `core/approvals.py`, help text and colours in
-`cli/labels.py`. They are declared and persisted but **not yet enforced** — no tool
-layer consults them. When one lands it must use this vocabulary rather than inventing
-its own. `full-auto` is the mode §9 says never to run un-containerized.
+`full-auto`. Names, ordering, and policy in `core/harness/approvals.py`; help text and
+colours in `cli/labels.py`. `full-auto` is the mode §9 says never to run
+un-containerized.
+
+They are **enforced** by the tool layer. A tool declares a `ToolPermission` once, at
+definition (`@tool(permission=...)`), and `requires_approval(mode, permission)` decides
+whether that class runs unattended — the tool never tests the mode itself, because a
+tool that knows about `full-auto` is a tool that will disagree with the next one about
+what it means. `is_forbidden` is separate from `requires_approval` on purpose: "ask
+first" is a pause a human can resolve, while `plan` mode simply does not have the
+capability, and the agent should be told which one it hit. Tools a mode forbids are
+never advertised — being offered a tool and then refused it wastes a turn.
+
+`NETWORK` is gated on its own line rather than wedged into the ordering: the mode
+ordering is about workspace mutation, and network egress is a disclosure risk, not a
+corruption risk. `plan` therefore *asks* for network access rather than refusing it —
+refusing research in the mode that exists for research would be backwards.
 
 **Warn, don't guess.** An empty `defaults.model` means "not chosen yet". The status bar
 says so and sending is refused. Never silently substitute a default model — the user
@@ -252,7 +279,11 @@ Tools are **only available to sub-agents**. The main agent reaches them by deleg
 | `grep` | `grep(pattern, path=".", ...)` | Shells out to `ripgrep`. Do not hand-roll |
 | `ls` | `ls(path)` | `.gitignore`-aware |
 | `todo_write` | `todo_write(items)` | Not a real tool — a device to keep the plan in context. Keep it |
-| `web_search` / `web_fetch` | | Sub-agent only. Output is always huge |
+| `bash_output` | `bash_output(shell_id, kill=False)` | Drains a `background=True` shell. Returns only what is new since the last read |
+| `web_search` | `web_search(query=None, url=None, ...)` | Tavily. `query` searches, `url` extracts, both crawl. Sub-agent only; output is always huge |
+| `ask_user_question` | `ask_user_question(question, options=None, ...)` | Pauses the turn. Fails clearly when no user is attached, rather than hanging |
+| `skill` | `skill(name)` | Loads a `SKILL.md` body on demand |
+| `repl` | `repl(code, timeout=120)` | The *main* agent's only tool. Runs in the session kernel |
 
 REPL-only primitives (main agent side):
 
@@ -265,7 +296,13 @@ await compact.run()
 await refine.run("promote the retry-on-flaky-test pattern to a skill")
 ```
 
-**Deferred to later phases:** MCP client, notebook editing, multi-edit, image input.
+Tools are ordinary Python functions. `@tool` derives the JSON Schema from the signature
+and the description from the docstring, so a tool is described exactly once. A parameter
+annotated `Runtime[T]` is hidden from the model and injected at call time — it carries
+identity, the approval mode, the cancellation flag, the output store, and the progress /
+approval / ask callbacks. See `core/harness/tools/base.py`.
+
+**Deferred to later phases:** notebook editing, multi-edit, image input.
 
 **A2A scope:** messaging is restricted to the *nuclear family* — parent, sibling, child.
 This is deliberate; it prevents N² message storms across sessions.
@@ -380,7 +417,10 @@ Route this decision explicitly in `agent/router.py`. Do not let it be implicit.
 | CLI | `typer` | |
 | Config | `tomllib` (read) + `tomli-w` (write) | The UI writes config back; stdlib is read-only |
 | Sandbox | `docker` SDK / devcontainer CLI | Phase 2+ |
-| Search | `ripgrep`, `fd` (subprocess) | Faster and more correct than anything hand-written |
+| Search | `ripgrep` (pip wheel), `fd` (subprocess, optional) | Faster and more correct than anything hand-written. `ripgrep` is a declared dependency — the wheel drops an `rg` binary next to the interpreter, so `grep` works on a fresh checkout with no system packages. `fd` has no such wheel, so `glob` falls back to `rg --files` then `pathlib` |
+| Tool schemas | `docstring-parser` | Signature + `Args:` block → JSON Schema, so a tool is described once |
+| MCP | `mcp` (official SDK) | We adapt it; we do not reimplement the protocol |
+| Web | `tavily` REST via `httpx` | No extra SDK — three endpoints behind one tool |
 | Packaging | `uv` | |
 
 **Explicitly not used: LangChain.** Also avoid LangGraph, CrewAI, and AutoGen. The whole
@@ -440,7 +480,7 @@ Structured logging and a trajectory viewer are Phase 1 requirements, not nice-to
 | Phase | Scope | Folders | Done when |
 | --- | --- | --- | --- |
 | 0 | Shell: gateway + providers, config, CLI, chat/settings UI | `core/providers/`, `core/configs.py` | ✓ done — `stcode` runs, configures itself, and streams a flat reply |
-| 1 | Single agent + IPython kernel + 6 core tools + 1 provider. `depth=0` | `core/kernel/`, `core/harness/` | Can complete a two-file change end-to-end with a trajectory log |
+| 1 | Single agent + IPython kernel + 6 core tools + 1 provider. `depth=0` | `core/kernel/` ✓, `core/harness/` ✓ | Can complete a two-file change end-to-end with a trajectory log — kernel and harness are in; the turn loop that drives them (`core/agent/`) is not |
 | 2 | Async `agent()`, pool, gateway with fallback, `difficulty` routing | `core/agent/`, `core/providers/gateway.py` | Parallel fan-out works under a concurrency cap and a token budget |
 | 3 | Daemon, socket IPC, A2A messaging, persistent sub-agents, agents view | `core/daemon/` | Detach/reattach mid-run; child survives parent compaction |
 | 4 | Continual Harness — prompt/memory/skill/subagent CRUD, `/refine` | `core/harness/` | A repeated failure is promoted to a skill and reused next session |
