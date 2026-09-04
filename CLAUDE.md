@@ -121,9 +121,9 @@ flowchart TB
 
     subgraph container["One container = one agent = one role"]
         daemon["<b>Daemon</b> ✗<br/>socket · JSONL · session registry"]
-        agent["<b>Agent</b> ✗<br/>the turn loop"]
+        agent["<b>Agent</b> ✓<br/>the turn loop"]
         sup["<b>Supervisor</b> ✗<br/>stagnation detection"]
-        sess["<b>Session</b> ✗<br/>JSONL append-only"]
+        sess["<b>Session</b> ✓<br/>JSONL append-only"]
         harn["<b>Harness</b> ✓<br/>tools · role prompt · approvals"]
         gw["<b>LLMGateway</b> ✓<br/>difficulty routing · retry"]
         repl["<b>PyREPL</b> ⟳<br/>subprocess + JSONL"]
@@ -182,7 +182,7 @@ result  = await harness.invoke("read", {"path": ...}, tool_call_id=call.id)
 bug inside the tool all come back as `ToolResult(is_error=True)`. The loop's only move
 after a tool call is to hand a `tool_result` back to the model; a raise takes down the turn.
 
-**`Session`** ✗ step 2, `core/session/` — append-only JSONL. One file serving three
+**`Session`** ✓ `core/session/` — append-only JSONL. One file serving three
 readers: model history, your trajectory log, and the supervisor's input.
 
 ```py
@@ -192,7 +192,7 @@ s.messages()                            # -> list[Message] for the gateway
 s.tail(30)                              # -> raw records for the supervisor
 ```
 
-**`Agent`** ✗ step 3, `core/agent/` — the turn loop, ~45 lines. Message in, events out.
+**`Agent`** ✓ `core/agent/` — the turn loop. Message in, events out.
 
 ```py
 agent = await Agent.create(config, cwd=..., role=...)
@@ -204,10 +204,11 @@ await agent.interrupt();  await agent.aclose()
 `run(text)` is a shortcut: `push()` then `events()` until the first `TurnFinished`.
 One machine, two doors — do not write a second loop.
 
-**`PyREPL`** ⟳ step 7, `core/repl/` — a `python -u` subprocess speaking JSONL on
+**`PyREPL`** ✗ step 7, `core/repl/` — a `python -u` subprocess speaking JSONL on
 stdin/stdout. Persistent namespace, top-level `await` via
 `compile(..., PyCF_ALLOW_TOP_LEVEL_AWAIT)`, SIGINT to interrupt, and an `inject` message
-that pushes `tool_out` across. Replaces `core/kernel/` (jupyter) and its two dependencies.
+that pushes `tool_out` across. `core/kernel/` (jupyter) is already gone; until this
+lands, the `repl` tool is registered but advertised to nobody.
 
 **`Daemon`** ✗ step 5, `core/daemon/` — **one daemon, many sessions**, addressed by id.
 Solo mode runs a single daemon for every project you work on, one session per repo — not
@@ -237,9 +238,9 @@ Seven. Each one exists because violating it produced a specific, known failure.
 1. **Tool output is elided at 8192 chars, never LLM-summarised.** Summarising loses
    information; eliding does not — *provided the full value is somewhere the model can
    actually reach*. The elision hint may only name a real location: `tool_out["..."]`
-   once the REPL bridge exists (step 7), otherwise "call again with a narrower
-   `offset`/`limit`". Promising a variable that isn't there is the bug described in
-   `EXPECTED.md` §4.1.
+   once the REPL bridge exists (step 7), and until then `NARROW_REQUEST_HINT` — "call
+   again with a narrower offset/limit". Promising a variable that isn't there is the bug
+   described in `EXPECTED.md` §4.1, and it is fixed.
 2. **One agent = one role = one checkout = one merge boundary.** If two agents need to
    write the same file, the roles are split wrong. That is a design error, not a signal
    to add locking.
@@ -264,39 +265,41 @@ Seven. Each one exists because violating it produced a specific, known failure.
 stcode/
   cli/                    what the user sees or types
     main.py            ✓  typer entrypoint (`stcode`, `stcode config`)
-    app.py             ⟳  chat screen → becomes a daemon client (step 6)
+    app.py             ⟳  chat screen, still a flat gateway call → daemon client (step 6)
     settings.py        ✓  first-run wizard + /model page
     banner.py          ✓  ASCII wordmark
     labels.py          ✓  every user-facing string, in one place
   core/
-    configs.py         ⟳  config location, schema, load/save, .env (+ new sections, step 5)
+    configs.py         ⟳  location, schema, load/save, .env, [agent]/[session]
+                          (+ [daemon]/[team], step 5)
     common/            ✓  vocabulary shared across core/ — ToolDefinition, ToolResult
-      truncate.py      ✗  moves here from core/kernel/ (step 1)
+      truncate.py      ✓  elide() and the 8192 cap
     providers/         ✓  adapters + gateway
       types.py         ✓  unified Message/StreamEvent — the wire format
       base.py          ✓  BaseModelProvider contract
       anthropic_claude.py / openai_gpt.py / google_gemini.py
-                       ⟳  one adapter per SDK (+ cache_control, step 4)
+                       ✓  one adapter per SDK; cache_control lives in the
+                          anthropic one and nowhere else
       registry.py      ✓  provider lookup + static metadata
-      gateway.py       ⟳  LLMGateway (+ config fallback in _resolve_route, step 1)
+      gateway.py       ✓  LLMGateway, with config fallback in _resolve_route
     harness/           ✓  the tools, prompts and skills an agent works with
-      harness.py       ⟳  facade (+ role=, drop namespace(), step 1/10)
+      harness.py       ⟳  facade (+ role=, step 10)
       approvals.py     ✓  ApprovalMode, ToolPermission, mode policy
       errors.py        ✓  ToolError family
-      context.py       ⟳  HarnessContext — cwd, scope, read tracking, todos (+ written_files)
+      context.py       ⟳  HarnessContext — cwd, scope, reads, todos, git
+                          (+ written_files, later)
       registry.py      ✓  which tools exist, which an agent may see
       mcp.py           ⟳  MCP servers → generates mcp_servers/*.py (step 8)
       tools/           ✓  base.py (@tool, Runtime), schema.py, files/search/shell/repl/…
-      prompts/         ⟳  trim to one prompt + mode note
+      prompts/         ✓  one prompt + mode note + sub-agent briefing
         roles/         ✗  ba.md, frontend-dev.md, backend-dev.md, devops.md (step 10)
       skills/          ✓  SKILL.md discovery, loaded on demand
-    session/           ✗  JSONL store, resume, messages()/tail() — step 2
-    agent/             ✗  the turn loop, events, task tool — step 3
+    session/           ✓  JSONL store, resume, messages()/tail()
+    agent/             ✓  the turn loop, events, task tool
     daemon/            ✗  socket server, protocol, registry, autonomy guard — step 5
     repl/              ✗  _worker.py subprocess + JSONL client — step 7
       supervisor.py    ✗  (lives in agent/) stagnation detection — step 9
     team/              ✗  Mailbox, send_message, shared-volume conventions — step 10
-    kernel/            ✂  jupyter wrapper — delete in step 1, replaced by core/repl/
 Dockerfile             ✗  one image, all roles — step 10 (§9.4)
 docs/
   EXPECTED.md          ✓  the architecture decision (Vietnamese) — the authority
@@ -306,9 +309,10 @@ No `docker-compose.yml`, no k8s manifests. The repo ships an image and an enviro
 contract; how you bring up N containers is yours, and orchestration opinions do not
 belong in a Python package.
 
-**Deleted in step 1:** `core/kernel/` (jupyter, ~750 lines), `core/kernel/store.py`
+**Deleted in step 1, done:** `core/kernel/` (jupyter, ~750 lines), `core/kernel/store.py`
 (`ToolOutStore` — a dict with a wrapper), `Harness.namespace()` (only meaningful with the
-RPC bridge we are not building), `stcode/platform/` (empty, unreferenced).
+RPC bridge we are not building), `stcode/platform/` (empty, unreferenced), and the
+`orchestrator`/`worker` prompt axis that went with the RLM design.
 
 ### 5.1 Where a given thing goes
 
@@ -341,7 +345,7 @@ See `core/harness/tools/base.py`.
 | `read` | `read(path, offset=0, limit=None)` | ✓ line-numbered; elides over 8 KB |
 | `write` | `write(path, content)` | ✓ scope-gated; requires a prior read of an existing file |
 | `edit` | `edit(path, old, new)` | ✓ exact unique match; fails loudly on 0 or >1 |
-| `bash` | `bash(cmd, timeout=120, background=False)` | ⟳ add `cwd=`; **each call is a fresh process** (step 4) |
+| `bash` | `bash(cmd, timeout=120, background=False, cwd="")` | ✓ **each call is a fresh process**, and the docstring says so |
 | `bash_output` | `bash_output(shell_id, kill=False)` | ✓ drains a background shell, new output only |
 | `glob` | `glob(pattern, path=".")` | ✓ `fd`, falls back to `rg --files` then `pathlib` |
 | `grep` | `grep(pattern, path=".", ...)` | ✓ ripgrep. Do not hand-roll |
@@ -349,15 +353,17 @@ See `core/harness/tools/base.py`.
 | `todo_write` | `todo_write(items)` | ✓ not a real tool — a device to keep the plan in context. Keep it |
 | `ask_user_question` | `ask_user_question(question, options=None)` | ✓ fails clearly with no user attached, rather than hanging |
 | `skill` | `skill(name)` | ✓ loads a `SKILL.md` body on demand |
-| `repl` | `repl(code, timeout=120)` | ⟳ backend swaps to `core/repl/` (step 7) |
-| `web_search` | `web_search(query=None, url=None)` | ✂ deferred — needs a second API key; MCP can cover it |
-| `task` | `task(prompt, name, tools=None, scope=None, difficulty=...)` | ✗ step 3 — sub-agent, solo mode only |
+| `repl` | `repl(code, timeout=120)` | ✗ registered, advertised to nobody until its backend lands (step 7) |
+| `web_search` | `web_search(query=None, url=None)` | ✂ deferred, same as `repl`: registered, unadvertised |
+| `task` | `task(prompt, name, tools=None, scope=None, difficulty=...)` | ✓ sub-agent, solo mode only; lives in `core/agent/` |
 | `send_message` | `send_message(to, subject, body, refs=None)` | ✗ step 10 — team mode only |
 
-**Named sets** (`core/harness/tools/__init__.py`): `WORKER_TOOLS` is what a sub-agent
-gets — no `repl`, no `task`, because a sub-agent that can spawn is a sub-agent for which
-`max_depth` stops bounding anything. `READ_ONLY_TOOLS` is derived from declared
-permissions, not hand-listed, so it cannot drift.
+**Named sets** (`core/harness/tools/__init__.py`): `MAIN_TOOLS` is a top-level agent's
+allowance and `WORKER_TOOLS` is a sub-agent's — no `repl`, no `task`, because a sub-agent
+that can spawn is a sub-agent for which `max_depth` stops bounding anything.
+`READ_ONLY_TOOLS` is derived from declared permissions, not hand-listed, so it cannot
+drift. Registered is not advertised: a tool with no working backend stays out of every
+set, because being offered a capability and then refused it wastes a turn.
 
 **Permissions are declared once and enforced elsewhere.** `@tool(permission=...)` states
 the class of side effect; `requires_approval(mode, permission)` and
@@ -549,7 +555,7 @@ Recorded here so nobody later mistakes the leaning for a decision.
 | Sandbox | Docker | Team mode; also what makes `full-auto` legal (rule 5) |
 | Packaging | `uv` | |
 
-**Removed in step 1:** `ipykernel`, `jupyter-client`.
+**Removed in step 1:** `ipykernel`, `jupyter-client`. Done.
 
 **Explicitly not used: LangChain.** Also LangGraph, CrewAI, AutoGen. The premise is
 programmatic control over context and the loop; a framework that owns the loop defeats it.
@@ -615,16 +621,19 @@ The full table with estimates is `EXPECTED.md` §15.
 Providers + gateway, config, CLI, chat/settings UI, harness tools, approval modes.
 `stcode` runs, configures itself, streams a flat reply. **~9k lines, and no turn loop.**
 
-### Phase 1 — The loop (steps 1–4)
+### Phase 1 — The loop (steps 1–4) ✓ code done
 > *Done when: a two-file change completes end to end with a readable session log.*
+> **Not yet demonstrated** — no client drives `Agent` until step 6, so the loop is
+> covered by tests against a scripted gateway rather than by a real task.
 
-1. **Cleanup, ~2h.** Delete `core/kernel/`, `store.py`, `namespace()`, `stcode/platform/`;
-   move `truncate.py` → `core/common/`. Fix the elide hint (rule 1). Add config fallback
-   to `_resolve_route`. Drop `ipykernel` + `jupyter-client`.
-2. **`core/session/`, ~120 lines.** Create → append → resume → `messages()` round-trips.
-3. **`core/agent/`, ~250 lines.** The turn loop; no supervisor, no mailbox yet.
-4. **Prompt caching + git context + `bash(cwd=)`, ~65 lines.** Turn 2 onward ~10× cheaper;
-   the agent knows its branch and `git status`.
+1. **Cleanup ✓.** `core/kernel/`, `store.py`, `namespace()`, `stcode/platform/` deleted;
+   `truncate.py` → `core/common/`; elide hint fixed (rule 1); `_resolve_route` falls back;
+   `ipykernel` + `jupyter-client` dropped.
+2. **`core/session/` ✓.** Create → append → resume → `messages()` round-trips.
+3. **`core/agent/` ✓.** The turn loop and `task`; no supervisor, no mailbox yet.
+4. **Prompt caching + git context + `bash(cwd=)` ✓.** Three cache breakpoints (last tool,
+   last system block, last message — the third is what makes the saving real); git state
+   sampled once at startup; `bash` takes a `cwd`.
 
 ### Phase 2 — Daemon and client (steps 5–6)
 > *Done when: detach/re-attach mid-run works, and `full-auto` refuses to start on the host.*
