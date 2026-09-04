@@ -2,7 +2,7 @@
 Harness — the tools, prompts, and skills an agent works with.
 
     harness = await Harness.create(cwd=project_root, approval_mode="auto-edit")
-    system  = harness.system_prompt(role="worker")
+    system  = harness.system_prompt()
     tools   = harness.tool_definitions()
     result  = await harness.invoke("read", {"path": "src/main.py"})
 
@@ -16,7 +16,7 @@ Layout, and why each piece is where it is:
 * `context.py` — `HarnessContext`, the workspace state tools share and the `T` above.
 * `registry.py` — which tools exist and which an agent may see.
 * `skills/` — `SKILL.md` discovery, loaded on demand rather than upfront.
-* `prompts/` — plan and execute prompts, orchestrator and worker roles.
+* `prompts/` — the plan and execute prompts, and the sub-agent briefing.
 * `mcp.py` — external tool servers, adapted to the same `Tool` interface.
 * `harness.py` — the facade that composes all of it.
 """
@@ -34,12 +34,12 @@ from stcode.core.harness.approvals import (
 from stcode.core.harness.context import HarnessContext, TodoItem
 from stcode.core.harness.harness import Harness, read_project_instructions
 from stcode.core.harness.mcp import MCPManager, MCPServerConfig, load_mcp_config
-from stcode.core.harness.prompts import AgentRole, PromptMode, build_system_prompt, mode_for
+from stcode.core.harness.prompts import PromptMode, build_system_prompt, mode_for
 from stcode.core.harness.registry import ToolRegistry
 from stcode.core.harness.skills import Skill, SkillRegistry
 from stcode.core.harness.tools import (
     BUILTIN_TOOLS,
-    ORCHESTRATOR_TOOLS,
+    MAIN_TOOLS,
     READ_ONLY_TOOLS,
     WORKER_TOOLS,
     ApprovalRequest,
@@ -56,10 +56,9 @@ __all__ = [
     "APPROVAL_MODES",
     "BUILTIN_TOOLS",
     "DEFAULT_APPROVAL_MODE",
-    "ORCHESTRATOR_TOOLS",
+    "MAIN_TOOLS",
     "READ_ONLY_TOOLS",
     "WORKER_TOOLS",
-    "AgentRole",
     "ApprovalMode",
     "ApprovalRequest",
     "Harness",

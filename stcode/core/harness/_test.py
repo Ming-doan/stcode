@@ -6,7 +6,7 @@ the behaviour that matters. The parts worth catching here — an edit that match
 a scope check that lets a path through, a denylist that refuses `rm -rf build/` — all
 live in exactly the code a mock would replace.
 
-One event loop for the module, as in `kernel/_test.py`: subprocess transports bind to
+One event loop for the module: subprocess transports bind to
 the loop that created them, and `asyncio.run()` per test leaves them talking to a
 closed one.
 """
@@ -529,12 +529,12 @@ def test_plan_prompt_forbids_and_execute_prompt_instructs() -> None:
     assert "## How to work" in execute and "## Verifying" in execute
 
 
-def test_orchestrator_and_worker_prompts_differ() -> None:
-    orchestrator = build_system_prompt("execute", role="orchestrator")
-    worker = build_system_prompt("execute", role="worker")
-    assert "exactly one tool" in orchestrator
-    assert "## Using tools" not in orchestrator  # it has no direct tools to use
-    assert "## Using tools" in worker
+def test_subagent_prompt_adds_the_one_shot_briefing() -> None:
+    top = build_system_prompt("execute")
+    child = build_system_prompt("execute", subagent=True)
+    assert "## Your role: sub-agent" not in top
+    assert "## Your role: sub-agent" in child
+    assert "## Using tools" in top and "## Using tools" in child
 
 
 def test_session_state_stays_at_the_end_of_the_prompt() -> None:
@@ -608,13 +608,23 @@ def test_subagents_get_isolated_contexts_but_share_the_registry(tmp_path: Path) 
     assert left.outputs is parent.outputs  # one output store for the whole session
 
 
-def test_namespace_exposes_bound_tools_for_the_repl(tmp_path: Path, run: Any) -> None:
+def test_bind_makes_tools_callable_without_plumbing(tmp_path: Path, run: Any) -> None:
+    """`namespace()` is gone with the RPC bridge it existed for; `bind()` is what is
+    left, and it is what an in-process caller or a test actually needs."""
     harness = Harness(HarnessContext(cwd=tmp_path), approval_mode="full-auto")
     (tmp_path / "f.txt").write_text("hi\n")
-    namespace = harness.namespace()
-    assert "tool_out" in namespace and "session_ctx" in namespace
-    # Bound tools are called without any plumbing, which is what REPL code relies on.
-    assert "hi" in run(namespace["read"]("f.txt"))
+    with harness.bind():
+        assert "hi" in run(read("f.txt"))
+
+
+def test_backendless_and_keyless_tools_are_registered_but_not_advertised() -> None:
+    """`repl` has no backend until step 7 and `web_search` needs a second API key.
+    Advertising either costs a turn to discover it does not work."""
+    harness = Harness(approval_mode="full-auto")
+    assert "repl" in harness.registry and "web_search" in harness.registry
+    assert "repl" not in harness.tool_names()
+    assert "web_search" not in harness.tool_names()
+    assert "read" in harness.tool_names()
 
 
 def test_asking_with_no_user_attached_fails_clearly(tmp_path: Path, run: Any) -> None:

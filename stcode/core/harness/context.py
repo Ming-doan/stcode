@@ -33,7 +33,6 @@ from stcode.core.harness.errors import ToolError
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, fine for type checkers
     from stcode.core.harness.skills import SkillRegistry
     from stcode.core.harness.tools.shell import BackgroundShell
-    from stcode.core.kernel import PythonKernel
 
 TodoStatus = Literal["pending", "in_progress", "completed"]
 
@@ -105,8 +104,18 @@ class HarnessContext:
     """Background processes started by `bash(..., background=True)`, by shell id."""
 
     skills: "SkillRegistry | None" = None
-    kernel: "PythonKernel | None" = None
-    """The session's REPL, when one is running. `repl()` needs it; nothing else does."""
+
+    repl: Any = None
+    """The session's persistent Python REPL, when one is running. `repl()` needs it and
+    nothing else does. Untyped because `core/repl/` does not exist until step 7 — the
+    tool is registered but kept out of `MAIN_TOOLS` until then, so this stays None and
+    `repl()` says so rather than failing obscurely."""
+
+    git: str = ""
+    """A one-shot summary of the repository: branch, status, recent commits. Sampled at
+    `Harness.create` by `git_context()` and never refreshed, because the system prompt
+    is the cached prefix and re-sampling it per turn would invalidate that every turn
+    (EXPECTED.md §14 item 2). A turn that needs current state runs `git status`."""
 
     env: dict[str, str] = field(default_factory=dict)
     """Extra environment for spawned processes, layered over `os.environ`."""

@@ -16,6 +16,8 @@ dynamic value to an early section silently doubles the cost of every turn.
 
 from __future__ import annotations
 
+from datetime import date
+
 IDENTITY = """\
 You are stcode, a coding agent working in a terminal alongside a software engineer.
 
@@ -123,13 +125,28 @@ def environment_section(
     approval_note: str = "",
     todos: str = "",
     scope: str = "",
+    git: str = "",
 ) -> str:
-    """The turn-varying tail of the prompt. Keep it last — see the module docstring."""
-    lines = ["## This session", "", f"Working directory: {cwd}", f"Approval mode: {approval_mode}"]
+    """The turn-varying tail of the prompt. Keep it last — see the module docstring.
+
+    `git` is sampled once per session rather than per turn (`context.git_context`), so
+    it does not move within a session either — but it belongs down here anyway, because
+    it is a fact about *this* workspace and putting it above the static sections would
+    make the cached prefix differ between two agents running the same prompt.
+    """
+    lines = [
+        "## This session",
+        "",
+        f"Today: {date.today().isoformat()}",
+        f"Working directory: {cwd}",
+        f"Approval mode: {approval_mode}",
+    ]
     if approval_note:
         lines.append(approval_note)
     if scope:
         lines.append(f"You may only write inside: {scope}")
+    if git:
+        lines += ["", git]
     if todos:
         lines += ["", "Current plan:", todos]
     return "\n".join(lines)

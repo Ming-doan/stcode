@@ -1,21 +1,21 @@
 """
-`repl` — the main agent's only tool, and the whole reason this project exists.
+`repl` — a persistent Python interpreter for the session.
 
-CLAUDE.md §2.1: the main agent has no direct tools. It writes Python; the Python calls
-tools, spawns sub-agents, and holds results in variables. Everything else in
-`harness/tools/` is what a *sub-agent* gets. This is what the orchestrator gets.
+**Not advertised yet.** It is registered so step 7 is a one-line change to `MAIN_TOOLS`,
+but its backend (`core/repl/`) does not exist: the jupyter kernel this used to drive was
+deleted in step 1, and nothing replaces it until then. A tool that is offered and then
+refuses wastes a whole turn, so until the backend lands this stays out of every named
+set and `runtime.context.repl` stays None.
 
-Why a tool at all, when a REPL is not really one: the provider wire format only has
-tool calls, so `repl(code)` is how a model reaches the kernel. But the semantics are
-inverted from every other tool here. A normal tool returns its output into the context;
-this one returns *a view of* its output, capped at 8192 chars, with the real value left
-behind in the kernel as a variable. That inversion is the architecture — see
-`kernel/truncate.py` for why eliding beats summarizing.
+What it will be for, and why it is worth keeping at all: MCP-as-code (CLAUDE.md §2.1).
+Tool *definitions* in the prompt prefix cost 10–30k tokens per turn forever; the same
+servers written to `.stcode/mcp_servers/<server>/<tool>.py` cost a `grep` and an
+`import`. That needs somewhere to run the import and hold the result across turns, and
+this is it.
 
-The docstring below is doing more work than most. §9 warns that no model has been
-trained on this scaffold, and the observed failure is under-using `agent()` and
-over-using plain REPL code; the strategy notes are there to push back on that, and they
-are the first thing to revise if the agent behaves badly.
+The docstring below used to describe an `answer = {"ready": True}` protocol and an
+in-REPL `agent()`. Both are gone (EXPECTED.md §16): a turn ends when the model stops
+calling tools, and sub-agents are the `task` tool.
 """
 
 from __future__ import annotations
@@ -24,15 +24,16 @@ from typing import Annotated
 
 from pydantic import Field
 
+from stcode.core.common.truncate import DEFAULT_VIEW_LIMIT
 from stcode.core.harness.approvals import ToolPermission
 from stcode.core.harness.context import HarnessContext
 from stcode.core.harness.tools.base import Runtime, ToolError, tool
-from stcode.core.kernel import DEFAULT_TIMEOUT, DEFAULT_VIEW_LIMIT
+
+DEFAULT_TIMEOUT = 120.0
 
 REPL_MAX_OUTPUT = DEFAULT_VIEW_LIMIT
-"""Exactly the kernel's own view limit. `ExecResult.view()` has already budgeted the
-traceback and the trailing expression against this number, so a second, tighter cap in
-the tool layer would cut what the kernel deliberately kept."""
+"""The same cap every other tool gets. The REPL has no claim to a bigger one — the whole
+point of a persistent namespace is that the bulk stays in a variable."""
 
 
 @tool(permission=ToolPermission.EXECUTE, max_output=REPL_MAX_OUTPUT, spill=False)
@@ -41,55 +42,34 @@ async def repl(
     timeout: Annotated[float, Field(gt=0, le=900)] = DEFAULT_TIMEOUT,
     runtime: Runtime[HarnessContext] = None,  # type: ignore[assignment]
 ) -> str:
-    """Run Python in this session's persistent REPL and return what it printed.
+    """Run Python in this session's persistent interpreter and return what it printed.
 
     The namespace persists for the whole session: a variable you set now is still there
     twenty turns from now. Use that. Assign results to names, and print only the part
-    you need to reason about — output is capped at 8192 characters, and anything beyond
-    that is elided, *not* lost, because the variable is still in the kernel.
+    you need to reason about — output is capped at 8192 characters, and the variable
+    holding the rest is still there to slice.
 
     Top-level `await` works.
 
-    Available without importing anything:
-
-    - `tool_out` — raw tool results by id, for slicing later.
-    - `session_ctx` — a dict of knowledge shared into sub-agents you spawn.
-    - `answer = {"content": ..., "ready": True}` — the only way to finish. Setting
-      `ready` is what commits your final response.
-    - `agent(...)`, `agent_message`, `compact`, `refine` — see below.
-
-    How to work here, in the order it usually goes:
-
-    1. **Orient cheaply.** One or two small calls to see the shape of the problem.
-       Print little — `head`, a count, a list of paths.
-    2. **Delegate anything token-heavy.** `await agent(prompt, difficulty=..., name=...,
-       tools=[...], scope=...)` runs a sub-agent with its own context. It reads the
-       twenty files; you get back the paragraph. This is the point of the whole
-       architecture and the thing most easily forgotten — if you are about to read four
-       files to answer one question, spawn an agent instead.
-    3. **Fan out, then gather.** `agent()` returns as soon as the child is admitted, so
-       start several and `await gather(h1, h2)` once. Sequential spawns waste the only
-       real advantage you have.
-    4. **Give writers disjoint scopes.** Two agents must never be able to write the same
-       file. Pass `scope="src/api/"` and `scope="tests/"`, never both to both.
-    5. **Verify by running something.** Tests, a build, an import. A change you have not
-       executed is a change you are guessing about.
-    6. **Commit the answer.** Set `answer["content"]` and `answer["ready"] = True`,
-       including what you did *not* do and where you left it.
+    Reach for this when a result is too big to want in full, or when you need to compute
+    over something rather than read it: parse a large JSON payload and print three
+    fields, filter ten thousand rows down to the four that matter, call an MCP tool from
+    `.stcode/mcp_servers/`. For editing files and running commands, use the dedicated
+    tools — they are shorter and their output is shaped for you.
 
     Args:
         code: Python to execute. Multi-line is normal; this is a cell, not a line.
         timeout: Seconds before the cell is interrupted. The namespace survives a
             timeout, so whatever the cell managed to build is still inspectable.
     """
-    kernel = runtime.context.kernel
-    if kernel is None:
+    backend = runtime.context.repl
+    if backend is None:
         raise ToolError(
             "This session has no REPL attached, so `repl` cannot run. Use the direct "
             "tools (read/write/edit/bash/glob/grep) instead."
         )
 
-    result = await kernel.execute(code, timeout=timeout, on_stream=_stream_to(runtime))
+    result = await backend.execute(code, timeout=timeout, on_stream=_stream_to(runtime))
     view = result.view(REPL_MAX_OUTPUT)
 
     if result.ok:
@@ -103,9 +83,9 @@ async def repl(
 def _stream_to(runtime: Runtime[HarnessContext]):  # type: ignore[no-untyped-def]
     """Forward the cell's output to the UI as it arrives.
 
-    §9 calls a session that looks hung a real UX problem, and a REPL cell that spawns
-    three sub-agents is the longest thing in a turn. Progress here is the difference
-    between "working" and "frozen".
+    CLAUDE.md §11 calls a session that looks hung a real UX problem, and a REPL cell is
+    the longest thing a turn can contain. Progress here is the difference between
+    "working" and "frozen".
     """
 
     async def on_stream(name: str, text: str) -> None:
@@ -114,4 +94,4 @@ def _stream_to(runtime: Runtime[HarnessContext]):  # type: ignore[no-untyped-def
     return on_stream
 
 
-__all__ = ["repl"]
+__all__ = ["DEFAULT_TIMEOUT", "REPL_MAX_OUTPUT", "repl"]

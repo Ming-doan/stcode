@@ -1,13 +1,21 @@
 """
 Built-in tools, and the named sets an agent is spawned with.
 
-The sets matter as much as the tools. CLAUDE.md §5 says tools are only available to
-sub-agents and the main agent reaches them by delegating, so `ORCHESTRATOR_TOOLS` is
-`repl` and nothing else — if you find yourself adding a second entry to it, the
-architecture is being undone rather than extended. Route it through a sub-agent.
+The sets matter as much as the tools.
 
-`READ_ONLY_TOOLS` is the set a scout gets: it is defined by permission, not by taste,
-so a tool that later gains the ability to write cannot quietly stay on the list.
+`MAIN_TOOLS` is what a top-level agent gets. `WORKER_TOOLS` is what `task` hands a
+sub-agent, and it is deliberately smaller: no `task` and no `repl`, because a sub-agent
+that can spawn is a sub-agent for which `max_depth = 1` stops bounding anything
+(CLAUDE.md §4 rule 3).
+
+`READ_ONLY_TOOLS` is defined by permission rather than by taste, so a tool that later
+gains the ability to write cannot quietly stay on the list.
+
+Two tools are registered but in no set. `repl` has no backend until step 7 and
+`web_search` needs a second API key that MCP can cover instead (CLAUDE.md §6). Both are
+in `BUILTIN_TOOLS` so a caller can opt in explicitly and so turning them on later is a
+one-line change; neither is advertised, because being offered a capability and then
+refused it costs the model a whole turn.
 """
 
 from stcode.core.harness.tools.base import (
@@ -53,15 +61,16 @@ BUILTIN_TOOLS: tuple[Tool[object], ...] = (
     repl,
 )
 
-ORCHESTRATOR_TOOLS: tuple[str, ...] = ("repl",)
-"""The RLM main agent's entire tool set (§2.1). One entry, on purpose."""
-
 WORKER_TOOLS: tuple[str, ...] = (
     "read", "write", "edit", "bash", "bash_output", "glob", "grep", "ls",
-    "todo_write", "web_search", "ask_user_question", "skill",
+    "todo_write", "ask_user_question", "skill",
 )
-"""What a sub-agent gets by default. No `repl` — a sub-agent that can spawn a REPL can
-spawn agents from it, and `max_depth` stops being the thing that bounds recursion."""
+"""What a sub-agent gets. See the module docstring for what is missing and why."""
+
+MAIN_TOOLS: tuple[str, ...] = WORKER_TOOLS
+"""What a top-level agent gets. Identical to `WORKER_TOOLS` for now: `task` is added by
+`core/agent/` at construction (it cannot live here — a tool that spawns an `Agent` would
+point `core/harness` at its own caller), and `repl` joins at step 7."""
 
 READ_ONLY_TOOLS: tuple[str, ...] = tuple(
     builtin.name for builtin in BUILTIN_TOOLS if builtin.permission is ToolPermission.READ
@@ -71,7 +80,7 @@ READ_ONLY_TOOLS: tuple[str, ...] = tuple(
 __all__ = [
     "BUILTIN_TOOLS",
     "DEFAULT_MAX_OUTPUT",
-    "ORCHESTRATOR_TOOLS",
+    "MAIN_TOOLS",
     "READ_ONLY_TOOLS",
     "WORKER_TOOLS",
     "ApprovalRequest",

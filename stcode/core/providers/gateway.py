@@ -17,6 +17,7 @@ that knows how the on-disk config maps onto these shapes and loads them.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
 from typing import AsyncGenerator, Literal
@@ -29,6 +30,8 @@ from pydantic import BaseModel
 from stcode.core.providers.base import BaseModelProvider
 from stcode.core.providers.registry import get_provider
 from stcode.core.providers.types import Message, ReasoningEffort, StreamEvent, ToolDefinition
+
+logger = logging.getLogger("stcode.providers.gateway")
 
 Difficulty = Literal["low", "medium", "high"]
 
@@ -197,13 +200,32 @@ class LLMGateway:
         return self._provider_instances[cache_key]
 
     def _resolve_route(self, difficulty: Difficulty) -> RouteConfig:
-        try:
-            return self._routing[difficulty]
-        except KeyError:
-            raise ValueError(
-                f"No route configured for difficulty {difficulty!r}. "
-                f"Configured: {sorted(self._routing)}"
-            ) from None
+        """The route for a tier, falling back to another tier when it has none.
+
+        A missing `[routing.high]` used to raise and take down the turn. One absent
+        line of TOML is not a reason to refuse to work: `medium` first because it is
+        the least wrong answer in either direction, then whichever tier exists. Only a
+        gateway with no routes at all still raises.
+
+        This is config fallback, not provider failover — switching providers because
+        one is down only means something when you pay for two, and it would go around
+        the retry loop rather than here (EXPECTED.md §5.1).
+        """
+        route = self._routing.get(difficulty)
+        if route is not None:
+            return route
+        for candidate in ("medium", "high", "low"):
+            fallback = self._routing.get(candidate)  # type: ignore[arg-type]
+            if fallback is not None:
+                logger.warning(
+                    "no route configured for difficulty %r; using %r (%s/%s)",
+                    difficulty, candidate, fallback.provider, fallback.model,
+                )
+                return fallback
+        raise ValueError(
+            "No routes configured at all — every difficulty tier is missing. Add a "
+            "[routing.medium] section to your config."
+        )
 
     async def list_models(self, provider: str) -> list[str]:
         return await self._get_provider(provider, None, None, None).list_models()

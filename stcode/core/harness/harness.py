@@ -8,7 +8,7 @@ exactly two verbs from this module — "what tools do I advertise" and "run this
 and know nothing about how either is put together.
 
     harness = await Harness.create(cwd=project_root, approval_mode="auto-edit")
-    system  = harness.system_prompt(role="worker")
+    system  = harness.system_prompt()
     tools   = harness.tool_definitions()
     result  = await harness.invoke("read", {"path": "src/main.py"}, tool_call_id=call.id)
 
@@ -29,10 +29,10 @@ from stcode.core.common.tools import ToolDefinition, ToolResult
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
 from stcode.core.harness.context import HarnessContext
 from stcode.core.harness.mcp import MCPManager, load_mcp_config
-from stcode.core.harness.prompts import AgentRole, PromptMode, build_system_prompt, mode_for
+from stcode.core.harness.prompts import PromptMode, build_system_prompt, mode_for
 from stcode.core.harness.registry import ToolRegistry
 from stcode.core.harness.skills import SkillRegistry
-from stcode.core.harness.tools import BUILTIN_TOOLS, WORKER_TOOLS
+from stcode.core.harness.tools import BUILTIN_TOOLS, MAIN_TOOLS, WORKER_TOOLS
 from stcode.core.harness.tools.base import (
     ApprovalFn,
     AskFn,
@@ -41,7 +41,6 @@ from stcode.core.harness.tools.base import (
     Tool,
     current_runtime,
 )
-from stcode.core.kernel.store import ToolOutStore
 
 PROJECT_INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md", ".stcode/instructions.md")
 """Read in order; the first that exists wins. `AGENTS.md` is included because it is the
@@ -72,7 +71,15 @@ class Harness:
     ) -> None:
         self.context = context if context is not None else HarnessContext()
         self.registry = ToolRegistry(tools if tools is not None else BUILTIN_TOOLS)
-        self.allowed = list(allowed) if allowed is not None else None
+        # An explicit `tools=` list is already the caller's selection, so allowing all
+        # of it is right. The built-in set is not: it registers `repl` and `web_search`,
+        # which are deliberately not advertised (see `tools/__init__.py`).
+        if allowed is not None:
+            self.allowed: list[str] | None = list(allowed)
+        elif tools is not None:
+            self.allowed = None
+        else:
+            self.allowed = list(MAIN_TOOLS)
         self.approval_mode = approval_mode
         self.session_id = session_id
         self.agent_name = agent_name
@@ -80,10 +87,11 @@ class Harness:
         self.project_instructions = project_instructions
         self.extra_prompt = extra_prompt
         self.mcp = mcp
-        # The store from `kernel/store.py`, which was written for exactly this and had
-        # nothing to hold until now. Its spill-to-disk policy applies to every oversized
-        # tool result without any tool having to know about it.
-        self.outputs: MutableMapping[str, Any] = outputs if outputs is not None else ToolOutStore()
+        # A plain dict: `ToolOutStore` was a dict with a wrapper and a spill-to-disk
+        # TODO that never had data to evict. Whatever `elide` cuts is parked here for
+        # the trajectory and the TUI; step 7's REPL bridge is what makes it reachable
+        # from the model's side.
+        self.outputs: MutableMapping[str, Any] = outputs if outputs is not None else {}
         self.on_progress = on_progress
         self.on_approval = on_approval
         self.on_ask = on_ask
@@ -124,7 +132,16 @@ class Harness:
                 await manager.connect_all(servers)
                 harness.mcp = manager
                 harness.registry.extend(manager.tools.values(), replace=True)
+                # Registering is not advertising: `allowed` is a fixed list, so an MCP
+                # tool nobody adds to it is connected and invisible.
+                harness.allow(*manager.tools)
         return harness
+
+    def allow(self, *names: str) -> None:
+        """Add tools to what this agent may see. No-op when it may already see everything."""
+        if self.allowed is None:
+            return
+        self.allowed += [name for name in names if name not in self.allowed]
 
     def for_subagent(
         self,
@@ -179,17 +196,17 @@ class Harness:
             names if names is not None else self.allowed, approval_mode=self.approval_mode
         )
 
-    def system_prompt(
-        self,
-        *,
-        role: AgentRole = "worker",
-        mode: PromptMode | None = None,
-        task: str = "",
-    ) -> str:
+    def system_prompt(self, *, mode: PromptMode | None = None, task: str = "") -> str:
+        """This agent's system prompt.
+
+        `subagent` is derived from `depth` rather than passed in: a harness made by
+        `for_subagent()` is a sub-agent by construction, and a caller who could say
+        otherwise is a caller who will eventually get it wrong.
+        """
         skills = self.context.skills
         return build_system_prompt(
             mode or mode_for(self.approval_mode),
-            role=role,
+            subagent=self.depth > 0,
             cwd=str(self.context.cwd),
             approval_mode=self.approval_mode,
             tool_names=self.tool_names(),
@@ -197,6 +214,7 @@ class Harness:
             project_instructions=self.project_instructions,
             write_scope=", ".join(str(path) for path in self.context.scope),
             todos=self.context.render_todos() if self.context.todos else "",
+            git=self.context.git,
             extra="\n\n".join(part for part in (self.extra_prompt, task) if part),
         )
 
@@ -237,7 +255,7 @@ class Harness:
             )
         return await self.registry[name].invoke(arguments, self.runtime(), tool_call_id=tool_call_id)
 
-    # ---- REPL integration ----
+    # ---- ambient runtime ----
 
     @contextlib.contextmanager
     def bind(self) -> Iterator[Runtime[HarnessContext]]:
@@ -253,25 +271,6 @@ class Harness:
             yield runtime
         finally:
             current_runtime.reset(token)
-
-    def namespace(self) -> dict[str, Any]:
-        """Bound tools, callable with no plumbing: `await namespace["read"]("main.py")`.
-
-        These are live Python objects, so they work in an **in-process** REPL and in
-        tests. `PythonKernel` runs in a separate process and cannot receive them by
-        assignment — turning `bootstrap.py`'s placeholders into working calls over there
-        needs an RPC bridge that marshals each call back to this side. That bridge is
-        the agent loop's job (`core/agent/`), and this dict is the tool table it will
-        dispatch against.
-        """
-        runtime = self.runtime()
-        bound: dict[str, Any] = {
-            entry.name: entry.bind(runtime)
-            for entry in self.registry.select(self.allowed, approval_mode=self.approval_mode)
-        }
-        bound["session_ctx"] = self.context.session_ctx
-        bound["tool_out"] = self.outputs
-        return bound
 
     # ---- lifecycle ----
 

@@ -319,9 +319,21 @@ async def test_gateway_explicit_provider_and_model_bypasses_routing(monkeypatch)
     assert fake.calls[-1]["model"] == "explicit-model"
 
 
-async def test_gateway_unknown_difficulty_raises_value_error():
+async def test_gateway_falls_back_to_a_configured_tier(monkeypatch):
+    """One missing line of TOML must not kill the turn (EXPECTED.md §5.1)."""
+    fake = FakeProvider(events=[MessageStop(stop_reason="end_turn", usage=Usage())])
+    _install_fake_get_provider(monkeypatch, fake)
+    gateway = LLMGateway(
+        providers={"fake": ProviderConfig(api_key="k")},
+        routing={"medium": RouteConfig(provider="fake", model="fake-medium")},
+    )
+    await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="high"))
+    assert fake.calls[-1]["model"] == "fake-medium"
+
+
+async def test_gateway_with_no_routes_at_all_raises_value_error():
     gateway = LLMGateway(providers={}, routing={})
-    with pytest.raises(ValueError, match="No route configured"):
+    with pytest.raises(ValueError, match="No routes configured at all"):
         await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low"))
 
 
