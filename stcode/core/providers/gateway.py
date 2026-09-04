@@ -20,7 +20,7 @@ import asyncio
 import logging
 import os
 import random
-from typing import AsyncGenerator, Literal
+from typing import Any, AsyncGenerator, Literal, Mapping
 
 import anthropic
 import openai
@@ -130,15 +130,19 @@ class LLMGateway:
 
     def __init__(
         self,
-        providers: dict[str, ProviderConfig | dict],
-        routing: dict[Difficulty, RouteConfig | dict],
-        retry: RetryConfig | dict | None = None,
+        providers: Mapping[str, ProviderConfig | dict[str, Any]],
+        routing: Mapping[Difficulty, RouteConfig | dict[str, Any]],
+        retry: RetryConfig | dict[str, Any] | None = None,
     ) -> None:
         """`providers`/`routing`/`retry` accept either the model instances themselves or
         plain dicts of the same shape (e.g. inline literals in a script) — each is
         validated/coerced here, once, so a malformed entry fails loudly at construction
         with a clear pydantic error instead of an `AttributeError` deep inside `stream()`
         the first time that route is actually used.
+
+        `Mapping`, not `dict`, because both are copied on the next two lines and never
+        mutated: an invariant `dict[str, ProviderConfig | dict]` rejects the plain
+        `dict[str, ProviderConfig]` that `GatewayConfig` actually holds.
         """
         self._providers_cfg = {
             name: cfg if isinstance(cfg, ProviderConfig) else ProviderConfig.model_validate(cfg)

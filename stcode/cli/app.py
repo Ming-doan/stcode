@@ -1,5 +1,5 @@
 """
-Chat screen — the main stcode UI.
+Chat screen — the main stcode UI, and a **client of the daemon**.
 
 Layout, top to bottom: ASCII wordmark, transcript, status bar (model / provider /
 approval mode), prompt input, key hints.
@@ -7,17 +7,33 @@ approval mode), prompt input, key hints.
 Slash commands are handled here rather than by the agent: `/model` opens the settings
 screen, `/mode` cycles the approval mode. Anything else is a prompt.
 
-Scope note: the reply path streams straight through `LLMGateway` — one flat
-user/assistant exchange, no REPL, no sub-agents, no tools. That is a deliberate
-placeholder so the UI is exercisable end-to-end; when the RLM loop lands it replaces
-`_stream_reply` and nothing else on this screen needs to change.
+What changed at step 6: this screen no longer calls the gateway, and no longer owns a
+conversation. It opens a socket, sends `push`, and renders frames. Everything it used to
+hold — history, tools, approvals — lives behind that socket now, which is why closing
+the window no longer stops the work.
+
+**Connecting is find-or-start.** A daemon already listening on the configured address is
+used as-is; otherwise one is started in this process on the same address. The transport
+is real either way, so there is no co-located special case to keep working and the
+"attach to a container" path is the path that is exercised every day.
+
+`--daemonless` removes the "or start" half: the agent lives somewhere else, so a failed
+connection opens `ConnectScreen` and asks which daemon rather than quietly starting a
+second one on this machine. That is the only difference between the two modes, and it is
+one branch, because the client is the same client either way.
+
+The two request–response pairs — `approval_request` and `question` — are answered by a
+modal (`cli/prompts.py`) whose result is sent back under the `execution_id` it arrived
+with. They are deliberately *not* awaited inline in the frame pump: parallel tool calls
+can raise two at once, and a pump blocked on a dialog would stop rendering the tool
+that is still running behind it.
 """
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import on, work
@@ -29,17 +45,20 @@ from textual.widgets import Footer, Input, Static
 
 from stcode.cli import labels
 from stcode.cli.banner import banner_for_width
+from stcode.cli.connect import ConnectScreen
+from stcode.cli.prompts import ApprovalScreen, QuestionScreen
 from stcode.cli.settings import SettingsScreen
-from stcode.core.harness.approvals import ApprovalMode, next_approval_mode, parse_approval_mode
 from stcode.core.configs import (
     GatewayConfig,
+    apply_cli_overrides,
     config_exists,
     default_config_path,
     load_config,
     save_config,
 )
-from stcode.core.providers import LLMGateway, ProviderConfig, resolve_secret
-from stcode.core.providers.types import Message, TextDelta
+from stcode.core.daemon import Daemon, DaemonClient
+from stcode.core.harness.approvals import ApprovalMode, next_approval_mode, parse_approval_mode
+from stcode.core.providers import ProviderConfig, resolve_secret
 
 
 class Banner(Static):
@@ -65,6 +84,10 @@ class ChatMessage(Static):
         self.body = body
 
     def on_mount(self) -> None:
+        self._refresh_body()
+
+    def append(self, text: str) -> None:
+        self.body += text
         self._refresh_body()
 
     def set_body(self, body: str) -> None:
@@ -127,6 +150,11 @@ class StcodeApp(App[None]):
         color: $text;
     }
 
+    .message.thinking {
+        color: $text-muted;
+        text-style: italic;
+    }
+
     .message.notice {
         color: $text-muted;
     }
@@ -158,13 +186,36 @@ class StcodeApp(App[None]):
         Binding("escape", "cancel_stream", "Stop"),
     ]
 
-    def __init__(self, config_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        config_path: Path | None = None,
+        *,
+        daemonless: bool = False,
+        cwd: Path | None = None,
+        resume: str = "",
+        overrides: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__()
         self._config_path = config_path or default_config_path()
         self._first_run = not config_exists(self._config_path)
         self.config = GatewayConfig() if self._first_run else load_config(self._config_path)
-        self._gateway: LLMGateway | None = None
-        self._history: list[Message] = []
+        # Applied to the in-memory config only. `save_config` is called elsewhere on
+        # changes the user made *in* the UI; a flag must not become a stored default.
+        self._overrides = overrides or {}
+        apply_cli_overrides(self.config, **self._overrides)
+        # `--daemonless`: never start an agent here. The work belongs to a daemon
+        # somewhere else, and starting a local one would silently run it on this machine
+        # instead — the opposite of what was asked for.
+        self._daemonless = daemonless
+        self._cwd = cwd or Path.cwd()
+        self._resume = resume
+        self._client: DaemonClient | None = None
+        # Set only when this process started the daemon, and therefore the only case in
+        # which quitting should stop it.
+        self._daemon: Daemon | None = None
+        self._session_id = ""
+        self._stream: ChatMessage | None = None
+        self._stream_role = ""
 
     # ------------------------------------------------------------------ layout
 
@@ -182,10 +233,242 @@ class StcodeApp(App[None]):
         self.query_one("#prompt", Input).focus()
         if self._first_run:
             self._open_settings(first_run=True)
-        else:
-            self._notice(labels.config_location(self._config_path))
-            if not self.config.defaults.model:
-                self._notice(labels.NO_MODEL_NOTICE)
+            return
+        self._notice(labels.config_location(self._config_path))
+        if not self.config.defaults.model:
+            self._notice(labels.NO_MODEL_NOTICE)
+        self._connect()
+
+    async def on_unmount(self) -> None:
+        await self._close_connection()
+
+    async def _close_connection(self) -> None:
+        """Drop the connection, and stop the daemon only if we started it.
+
+        Detaching from someone else's daemon must leave it running — that is the
+        promise the whole layer exists for, and quitting the UI is a detach.
+        """
+        if self._client is not None:
+            with contextlib.suppress(Exception):
+                await self._client.aclose()
+            self._client = None
+        if self._daemon is not None:
+            with contextlib.suppress(Exception):
+                await self._daemon.aclose()
+            self._daemon = None
+
+    # ------------------------------------------------------------------- daemon
+
+    @work(exclusive=True, group="daemon")
+    async def _connect(self, ask: bool = False) -> None:
+        """Find or start a daemon, open a session on it, then render its frames forever.
+
+        Exclusive, so calling it again — after a settings change — cancels the running
+        pump first. The previous connection is closed here rather than there, because
+        the worker that owned it has already been cancelled by the time we run.
+        """
+        await self._close_connection()
+        self._session_id = ""
+        self._notice(labels.CONNECTING)
+        try:
+            client, embedded = (
+                (await self._connect_elsewhere(), False) if ask else await self._open_client()
+            )
+        except Exception as exc:  # noqa: BLE001 — including AutonomyRefused, which is a
+            # refusal the user has to read: `full-auto` on the host does not start.
+            self._error(labels.daemon_failed(exc))
+            return
+
+        self._client = client
+        self._notice(labels.daemon_connected(self._daemon_address(), embedded))
+        try:
+            if self._resume:
+                # `attach` resumes from disk when the daemon is not already holding it,
+                # so one message covers both "join the running session" and "reopen the
+                # transcript" — the client does not need to know which happened.
+                info = await client.attach(self._resume)
+            else:
+                info = await client.create(
+                    cwd=self._cwd, approval_mode=self.config.defaults.approval_mode
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._error(labels.daemon_failed(exc))
+            return
+
+        self._session_id = str(info.get("id", ""))
+        self._notice(labels.session_started(self._session_id, info.get("cwd", "")))
+
+        async for frame in client.events():
+            self._render(frame)
+
+    async def _open_client(self) -> tuple[DaemonClient, bool]:
+        """Connect, or start a daemon here and connect to that.
+
+        The `OSError` is the interesting case, not an error: nothing listening on the
+        address is exactly how "no daemon yet" looks. What that means depends on the
+        mode — start one, or ask where the right one is.
+        """
+        try:
+            return await DaemonClient.connect(self.config), False
+        except OSError:
+            pass
+        if self._daemonless:
+            return await self._connect_elsewhere(), False
+        self._notice(labels.DAEMON_STARTING)
+        daemon = Daemon(self.config)
+        await daemon.start()
+        self._daemon = daemon
+        return await DaemonClient.connect(self.config), True
+
+    async def _connect_elsewhere(self) -> DaemonClient:
+        """Ask for an address and keep trying until one answers or the user gives up.
+
+        Also what `/connect` runs, in either mode: moving this terminal to a different
+        agent — a container's, say — is the same act whether or not one is running here.
+
+        A loop rather than one shot: getting a container's host and port right on the
+        first try is not the common case, and dropping the user back to an empty chat
+        screen after a typo would make them restart the process.
+        """
+        reason = labels.no_daemon_here(self._daemon_address())
+        while True:
+            settings = await self.push_screen_wait(
+                ConnectScreen(self.config.daemon, reason=reason)
+            )
+            if settings is None:
+                raise ConnectionError(labels.DAEMONLESS_CANCELLED)
+            self.config.daemon = settings
+            try:
+                client = await DaemonClient.connect(self.config)
+            except OSError:
+                reason = labels.CONNECT_RETRY
+                continue
+            # Worth keeping: the next run should start where this one ended up.
+            if config_exists(self._config_path):
+                save_config(self.config, self._config_path)
+            return client
+
+    def _daemon_address(self) -> str:
+        settings = self.config.daemon
+        if settings.transport == "unix":
+            return settings.socket
+        return f"{settings.host}:{settings.port}"
+
+    # ---------------------------------------------------------------- rendering
+
+    def _render(self, frame: dict[str, Any]) -> None:
+        match frame.get("type"):
+            case "text_delta":
+                self._stream_into("assistant", str(frame.get("text", "")))
+            case "reasoning_delta":
+                self._stream_into("thinking", str(frame.get("text", "")))
+            case "tool_started":
+                self._notice(
+                    labels.tool_started(str(frame.get("name", "")), dict(frame.get("arguments", {})))
+                )
+            case "tool_finished":
+                self._notice(
+                    labels.tool_finished(
+                        str(frame.get("name", "")),
+                        bool(frame.get("ok", True)),
+                        str(frame.get("preview", "")),
+                    )
+                )
+            case "turn_finished":
+                self._end_stream()
+                self._notice(labels.turn_usage(dict(frame.get("usage", {}))))
+            case "agent_failed":
+                self._end_stream()
+                self._error(str(frame.get("message", "")))
+            case "approval_request":
+                self._ask_approval(frame)
+            case "question":
+                self._ask_question(frame)
+            case "progress":
+                self._notice(str(frame.get("text", "")))
+            case "history":
+                self._replay(frame)
+            case "session":
+                # The daemon is authoritative about the mode: a `set_mode` it refused
+                # (rule 5) must not leave the status bar showing one that is not in
+                # force, and must never be written to the config file.
+                mode = str(frame.get("approval_mode", ""))
+                if mode:
+                    self._adopt_mode(mode)  # type: ignore[arg-type]
+                self._refresh_status()
+            case "error":
+                self._error(str(frame.get("message", "")))
+
+    def _replay(self, frame: dict[str, Any]) -> None:
+        """Render a re-attached session's transcript before its live stream arrives.
+
+        Raw records, so this shows what happened rather than what the model was sent —
+        the same reason `tail()` exists for the supervisor.
+        """
+        for record in frame.get("records", []):
+            match record.get("type"):
+                case "user":
+                    self._add_message("user", str(record.get("content", "")))
+                case "assistant" if record.get("content"):
+                    self._add_message("assistant", str(record.get("content", "")))
+                case "tool_call":
+                    self._notice(
+                        labels.tool_started(
+                            str(record.get("name", "")), dict(record.get("arguments", {}))
+                        )
+                    )
+                case "error":
+                    self._error(str(record.get("message", "")))
+
+    def _stream_into(self, role: str, text: str) -> None:
+        """Append a delta, opening a new bubble when the kind of delta changes.
+
+        The state is the point: deltas carry no boundaries, so the only signal that a
+        block ended is that a different kind of event arrived.
+        """
+        if self._stream is None or self._stream_role != role:
+            self._stream = self._add_message(role, "")
+            self._stream_role = role
+        self._stream.append(text)
+        self.query_one("#transcript", VerticalScroll).scroll_end(animate=False)
+
+    def _end_stream(self) -> None:
+        if self._stream is not None and not self._stream.body.strip():
+            self._stream.remove()
+        self._stream = None
+        self._stream_role = ""
+
+    # ---------------------------------------------------------------- approvals
+
+    def _ask_approval(self, frame: dict[str, Any]) -> None:
+        execution_id = str(frame.get("execution_id", ""))
+
+        def answered(approved: bool | None) -> None:
+            self._answer_approval(execution_id, bool(approved))
+
+        self._end_stream()
+        self.push_screen(ApprovalScreen(frame), answered)
+
+    def _ask_question(self, frame: dict[str, Any]) -> None:
+        execution_id = str(frame.get("execution_id", ""))
+
+        def answered(text: str | None) -> None:
+            self._answer_question(execution_id, text or "")
+
+        self._end_stream()
+        self.push_screen(QuestionScreen(frame), answered)
+
+    @work(group="answers")
+    async def _answer_approval(self, execution_id: str, approved: bool) -> None:
+        if self._client is not None:
+            await self._client.approve(execution_id, approved)
+        if not approved:
+            self._notice(labels.APPROVAL_DENIED)
+
+    @work(group="answers")
+    async def _answer_question(self, execution_id: str, text: str) -> None:
+        if self._client is not None:
+            await self._client.answer(execution_id, text)
 
     # ---------------------------------------------------------------- settings
 
@@ -198,14 +481,18 @@ class StcodeApp(App[None]):
                 if first_run:
                     self._notice(labels.SETUP_SKIPPED)
                 return
-            self.config = config
-            self._gateway = None  # credentials may have changed; rebuild on next send
-            path = save_config(self.config, self._config_path)
+            path = save_config(config, self._config_path)
+            # Saved first, then the flags go back on top: what the user typed belongs in
+            # the file, what they passed on the command line belongs only to this run.
+            self.config = apply_cli_overrides(config, **self._overrides)
             self._first_run = False
             self._refresh_status()
             self._notice(labels.config_saved(path))
             if not self.config.defaults.model:
                 self._notice(labels.NO_MODEL_NOTICE)
+            # The daemon built its gateway from the old config, so new credentials or a
+            # new model reach it only through a new connection.
+            self._connect()
 
         self.push_screen(SettingsScreen(self.config, first_run=first_run), saved)
 
@@ -215,12 +502,40 @@ class StcodeApp(App[None]):
         self._set_mode(next_approval_mode(self.config.defaults.approval_mode))
 
     def _set_mode(self, mode: ApprovalMode) -> None:
+        """Ask for a mode. The daemon decides whether it gets one.
+
+        Nothing is announced or written here when a session is attached: the daemon can
+        refuse (rule 5 — `full-auto` on the host), and a UI that announced the change
+        first would both lie and, worse, *persist* a mode the daemon will refuse to
+        start in next time. The `session` frame it sends back is the answer, and
+        `_adopt_mode` is where a confirmed change lands.
+        """
+        if self._client is not None and self._session_id:
+            self._push_mode(mode)
+            return
         self.config.defaults.approval_mode = mode
         self._refresh_status()
         self._notice(labels.mode_changed(mode))
-        # Only persist once there's a config file; skipping setup shouldn't create one.
+        self._persist()
+
+    def _adopt_mode(self, mode: ApprovalMode) -> None:
+        """Take the mode the daemon reports as the truth, and only then write it down."""
+        if mode == self.config.defaults.approval_mode:
+            return
+        self.config.defaults.approval_mode = mode
+        self._notice(labels.mode_changed(mode))
+        self._persist()
+
+    def _persist(self) -> None:
+        """Only once there's a config file; skipping setup shouldn't create one."""
         if config_exists(self._config_path):
             save_config(self.config, self._config_path)
+
+    @work(group="answers")
+    async def _push_mode(self, mode: ApprovalMode) -> None:
+        """Tell the live session, so `/mode` means something before the next session."""
+        if self._client is not None and self._session_id:
+            await self._client.set_mode(mode)
 
     # ------------------------------------------------------------- status line
 
@@ -255,14 +570,18 @@ class StcodeApp(App[None]):
         return widget
 
     def _notice(self, body: str) -> None:
+        self._end_stream()
         self._add_message("notice", body)
 
     def _error(self, body: str) -> None:
+        self._end_stream()
         self._add_message("error", body)
 
     def action_clear_transcript(self) -> None:
+        """Clears the *view*. The session is append-only and is not touched."""
         self.query_one("#transcript", VerticalScroll).remove_children()
-        self._history.clear()
+        self._stream = None
+        self._stream_role = ""
 
     # ---------------------------------------------------------------- commands
 
@@ -295,6 +614,8 @@ class StcodeApp(App[None]):
                 self._error(labels.unknown_mode(argument))
             else:
                 self._set_mode(mode)
+        elif name == "connect":
+            self._connect(ask=True)
         elif name == "clear":
             self.action_clear_transcript()
         elif name == "help":
@@ -306,71 +627,48 @@ class StcodeApp(App[None]):
 
     def _send(self, text: str) -> None:
         defaults = self.config.defaults
+        self._add_message("user", text)
         if not defaults.model:
-            self._add_message("user", text)
             self._error(labels.NO_MODEL_ERROR)
             return
         if not self._has_credential():
-            self._add_message("user", text)
             self._error(labels.no_key_error(defaults.provider))
             return
+        if self._client is None or not self._session_id:
+            self._error(labels.CONNECTING)
+            return
+        self._push(text)
 
-        self._add_message("user", text)
-        self._history.append(Message(role="user", content=text))
-        self._stream_reply()
+    @work(group="push")
+    async def _push(self, text: str) -> None:
+        """Queue the message. A push arriving mid-turn waits for the next turn — it
+        never splices into the one in flight (§8 point 3)."""
+        if self._client is not None:
+            await self._client.push(text)
 
     def action_cancel_stream(self) -> None:
-        if self.workers:
-            self.workers.cancel_group(self, "chat")
+        """Esc stops the agent. `push` never does — this is the message that does."""
+        self._interrupt()
 
-    @work(exclusive=True, group="chat")
-    async def _stream_reply(self) -> None:
-        if self._gateway is None:
-            self._gateway = LLMGateway(
-                providers=self.config.providers,
-                routing=self.config.routing,
-                retry=self.config.retry,
-            )
-
-        defaults = self.config.defaults
-        bubble = self._add_message("assistant", "…")
-        transcript = self.query_one("#transcript", VerticalScroll)
-        chunks: list[str] = []
-
-        try:
-            async for event in self._gateway.stream(
-                self._history,
-                provider=defaults.provider,
-                model=defaults.model,
-            ):
-                if isinstance(event, TextDelta):
-                    chunks.append(event.text)
-                    bubble.set_body("".join(chunks))
-                    transcript.scroll_end(animate=False)
-        except asyncio.CancelledError:
-            # Stopped by esc or by a newer prompt. Keep whatever streamed, but leave
-            # history strictly alternating — an unpaired user turn breaks the next call.
-            self._settle(bubble, "".join(chunks), suffix=labels.STREAM_STOPPED_SUFFIX)
-            raise
-        except Exception as exc:  # noqa: BLE001 — surface any provider failure verbatim
-            bubble.remove()
-            self._error(labels.stream_failed(exc))
-            self._history.pop()
-            return
-
-        self._settle(bubble, "".join(chunks))
-
-    def _settle(self, bubble: ChatMessage, reply: str, suffix: str = "") -> None:
-        """Close out a reply: an empty one is dropped along with the prompt that caused
-        it, rather than recorded as an empty assistant turn."""
-        if not reply:
-            bubble.remove()
-            self._history.pop()
-            self._notice(labels.STREAM_STOPPED if suffix else labels.STREAM_EMPTY)
-            return
-        bubble.set_body(reply + suffix)
-        self._history.append(Message(role="assistant", content=reply))
+    @work(group="answers")
+    async def _interrupt(self) -> None:
+        if self._client is not None and self._session_id:
+            await self._client.interrupt()
+            self._notice(labels.STREAM_STOPPED)
 
 
-def run(config_path: Path | None = None) -> None:
-    StcodeApp(config_path=config_path).run()
+def run(
+    config_path: Path | None = None,
+    *,
+    daemonless: bool = False,
+    cwd: Path | None = None,
+    resume: str = "",
+    overrides: dict[str, Any] | None = None,
+) -> None:
+    StcodeApp(
+        config_path=config_path,
+        daemonless=daemonless,
+        cwd=cwd,
+        resume=resume,
+        overrides=overrides,
+    ).run()

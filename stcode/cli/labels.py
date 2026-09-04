@@ -80,6 +80,9 @@ PROMPT_PLACEHOLDER = "Ask stcode…   /help for commands"
 ROLE_PREFIX: dict[str, tuple[str, str]] = {
     "user": ("you", "bold cyan"),
     "assistant": ("stcode", "bold magenta"),
+    # Reasoning is the model thinking out loud, not its answer, and must not read as
+    # one — dimmed and labelled rather than shown in the assistant's voice.
+    "thinking": ("···", "dim italic"),
     "notice": ("··", "dim"),
     "error": ("!!", "bold red"),
 }
@@ -87,6 +90,7 @@ ROLE_PREFIX: dict[str, tuple[str, str]] = {
 COMMAND_HELP = """\
 /model          provider, API key, and model
 /mode [name]    approval mode — no argument cycles
+/connect        point this client at a different daemon
 /clear          clear the transcript
 /help           this list
 /quit           exit
@@ -106,6 +110,114 @@ SETUP_SKIPPED = (
 STREAM_STOPPED_SUFFIX = "  ⏹ stopped"
 STREAM_STOPPED = "Stopped."
 STREAM_EMPTY = "No response received."
+
+# --------------------------------------------------------------------------- daemon
+
+# The chat screen is a client now. These say so without making the user care: a daemon
+# they did not start is worth one line, and one they did is worth none.
+
+DAEMON_STARTING = "Starting a local agent daemon…"
+CONNECTING = "Connecting…"
+
+TOOL_OK = "✓"
+TOOL_FAILED = "✗"
+
+
+def daemon_connected(address: object, embedded: bool) -> str:
+    if embedded:
+        return f"Agent daemon started on {address}"
+    return f"Attached to the agent daemon on {address}"
+
+
+def session_started(session_id: str, cwd: object) -> str:
+    return f"Session {session_id} in {cwd}"
+
+
+def daemon_failed(exc: Exception) -> str:
+    return f"Could not reach the agent daemon: {type(exc).__name__}: {exc}"
+
+
+def turn_usage(usage: dict[str, object]) -> str:
+    """Cache reads are shown because "turn 2 is cheaper" is otherwise unverifiable."""
+    cached = int(usage.get("cache_read_input_tokens", 0) or 0)
+    tail = f" · {cached} cached" if cached else ""
+    return f"{usage.get('input_tokens', 0)} in / {usage.get('output_tokens', 0)} out{tail}"
+
+
+def tool_started(name: str, arguments: dict[str, object]) -> str:
+    rendered = " ".join(f"{key}={_short(str(value))}" for key, value in arguments.items())
+    return f"● {name} {_short(rendered, 110)}".rstrip()
+
+
+def tool_finished(name: str, ok: bool, preview: str) -> str:
+    mark = TOOL_OK if ok else TOOL_FAILED
+    return f"  {mark} {name} — {_short(preview, 100) or '(no output)'}"
+
+
+def _short(text: str, limit: int = 60) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+# --------------------------------------------------------------------------- connect
+
+CONNECT_TITLE = "Connect to an agent daemon"
+CONNECT_INTRO = "Where is the daemon? A container usually exposes TCP on 7717."
+CONNECT_RETRY = "Nothing is listening there. Check the address, or start a daemon."
+
+FIELD_TRANSPORT = "Transport"
+FIELD_SOCKET = "Socket path"
+FIELD_HOST = "Host"
+FIELD_PORT = "Port"
+
+HOST_PLACEHOLDER = "the container's address, e.g. 10.0.0.4"
+BUTTON_CONNECT = "Connect"
+
+TRANSPORT_LABELS: dict[str, str] = {
+    "unix": "unix socket  (this machine)",
+    "tcp": "tcp  (a container, or another host)",
+}
+
+
+def transport_options() -> list[tuple[str, str]]:
+    return [(TRANSPORT_LABELS[name], name) for name in ("unix", "tcp")]
+
+
+def bad_port(value: str) -> str:
+    return f"{value!r} is not a port number."
+
+
+def no_daemon_here(address: object) -> str:
+    """`--daemonless` says never start one, so a missing daemon is a question."""
+    return f"No daemon is listening on {address}."
+
+
+DAEMONLESS_CANCELLED = "Not connected. /connect to try another address."
+
+# ------------------------------------------------------------------------- approvals
+
+APPROVAL_TITLE = "Approve this?"
+APPROVAL_YES = "Approve"
+APPROVAL_NO = "Deny"
+APPROVAL_DENIED = "Denied."
+QUESTION_TITLE = "The agent needs a decision"
+QUESTION_PLACEHOLDER = "Type your answer…"
+QUESTION_SUBMIT = "Answer"
+
+
+def approval_summary(tool: str, permission: str, arguments: dict[str, object]) -> str:
+    """What is about to happen, in the terms the tool works in.
+
+    The engine sends validated arguments rather than a sentence precisely so this can
+    show a command as a command and a path as a path (`ApprovalRequest`'s docstring).
+    """
+    if tool in ("bash", "repl"):
+        body = str(arguments.get("cmd") or arguments.get("code") or "")
+    elif "path" in arguments:
+        body = str(arguments["path"])
+    else:
+        body = ", ".join(f"{key}={_short(str(value))}" for key, value in arguments.items())
+    return f"{tool} ({permission})\n\n{body}"
 
 
 def config_location(path: object) -> str:

@@ -29,6 +29,14 @@ The unit of deployment is a **daemon**: a long-lived process holding one agent, 
 JSONL over a socket. A TUI is just a client of it. That inversion — daemon first, UI
 second — is what makes the container story real instead of aspirational.
 
+One binary, three shapes, and nothing switches implementation between them:
+
+| | |
+| --- | --- |
+| `stcode` | UI + a daemon, started here if none is listening |
+| `stcode --headless` | the daemon alone — what a container runs |
+| `stcode --daemonless` | the UI alone, attached to a daemon elsewhere (`/connect` to move it) |
+
 **Two modes, one engine.** `Agent` does not know which mode it is in; the difference is
 which harness is loaded and which tools are injected.
 
@@ -101,7 +109,7 @@ not architecture. → step 5.
 | --- | --- | --- | --- |
 | Tool quality (read/edit/grep/bash) | excellent | good | ✓ comparable already |
 | MCP | tool defs per turn | tool defs per turn | ⟳ as code, ~50× cheaper |
-| Runs headless in a container | partial | no | ✗ core design, step 5 |
+| Runs headless in a container | partial | no | ✓ core design, step 5 |
 | Multi-agent team across containers | no | no | ✗ step 10 |
 | Stagnation detection | no | no | ✗ step 9 |
 | Maturity, polish, ecosystem | **far ahead** | ahead | behind, and will stay behind |
@@ -120,7 +128,7 @@ flowchart TB
     end
 
     subgraph container["One container = one agent = one role"]
-        daemon["<b>Daemon</b> ✗<br/>socket · JSONL · session registry"]
+        daemon["<b>Daemon</b> ✓<br/>socket · JSONL · session registry"]
         agent["<b>Agent</b> ✓<br/>the turn loop"]
         sup["<b>Supervisor</b> ✗<br/>stagnation detection"]
         sess["<b>Session</b> ✓<br/>JSONL append-only"]
@@ -210,10 +218,25 @@ stdin/stdout. Persistent namespace, top-level `await` via
 that pushes `tool_out` across. `core/kernel/` (jupyter) is already gone; until this
 lands, the `repl` tool is registered but advertised to nobody.
 
-**`Daemon`** ✗ step 5, `core/daemon/` — **one daemon, many sessions**, addressed by id.
-Solo mode runs a single daemon for every project you work on, one session per repo — not
-one process per repo. In team mode a container usually holds one session, but nothing
-forbids more.
+**`Daemon`** ✓ `core/daemon/` — **one daemon, many sessions**, addressed by id. Solo mode
+runs a single daemon for every project you work on, one session per repo — not one
+process per repo. In team mode a container usually holds one session, but nothing forbids
+more.
+
+```py
+async with Daemon(config) as daemon:      # binds; `full-auto` refuses here (rule 5)
+    await daemon.serve_forever()
+
+async with await DaemonClient.connect(config) as client:
+    await client.create(cwd=Path.cwd());  await client.push("…")
+    async for frame in client.events(): ...
+```
+
+Four modules, one job each: `protocol.py` (the wire), `runner.py` (one live session and
+the clients watching it), `server.py` (socket + registry), `autonomy.py` (rule 5, as
+code). Approvals live in the **runner**, not the connection: the client that asked may be
+gone by the time the answer comes, and a second client on the same session may answer
+instead.
 
 **`Supervisor`** ✗ step 9 · **`Mailbox`** ✗ step 10 — see §2.2 and §9.
 
@@ -264,14 +287,17 @@ Seven. Each one exists because violating it produced a specific, known failure.
 ```
 stcode/
   cli/                    what the user sees or types
-    main.py            ✓  typer entrypoint (`stcode`, `stcode config`)
-    app.py             ⟳  chat screen, still a flat gateway call → daemon client (step 6)
+    main.py            ✓  typer entrypoint — `stcode`, `--headless`, `--daemonless`,
+                          `stcode sessions`, `stcode config`
+    app.py             ✓  chat screen — a daemon client; find-or-start, or --daemonless
+    connect.py         ✓  "which daemon?" screen, for --daemonless
+    prompts.py         ✓  approval + question modals — the client half of §8 point 1
     settings.py        ✓  first-run wizard + /model page
     banner.py          ✓  ASCII wordmark
     labels.py          ✓  every user-facing string, in one place
   core/
-    configs.py         ⟳  location, schema, load/save, .env, [agent]/[session]
-                          (+ [daemon]/[team], step 5)
+    configs.py         ⟳  location, schema, load/save, .env, [agent]/[session]/[daemon]
+                          (+ [team], step 10)
     common/            ✓  vocabulary shared across core/ — ToolDefinition, ToolResult
       truncate.py      ✓  elide() and the 8192 cap
     providers/         ✓  adapters + gateway
@@ -296,7 +322,11 @@ stcode/
       skills/          ✓  SKILL.md discovery, loaded on demand
     session/           ✓  JSONL store, resume, messages()/tail()
     agent/             ✓  the turn loop, events, task tool
-    daemon/            ✗  socket server, protocol, registry, autonomy guard — step 5
+    daemon/            ✓  socket server, protocol, registry, autonomy guard
+      protocol.py      ✓  the JSONL message shapes — the only thing on the wire
+      runner.py        ✓  SessionRunner: fan-out, approval correlation, set_mode
+      server.py        ✓  Daemon + one connection per client
+      autonomy.py      ✓  guard_autonomy / in_container — rule 5, enforced
     repl/              ✗  _worker.py subprocess + JSONL client — step 7
       supervisor.py    ✗  (lives in agent/) stagnation detection — step 9
     team/              ✗  Mailbox, send_message, shared-volume conventions — step 10
@@ -345,7 +375,7 @@ See `core/harness/tools/base.py`.
 | `read` | `read(path, offset=0, limit=None)` | ✓ line-numbered; elides over 8 KB |
 | `write` | `write(path, content)` | ✓ scope-gated; requires a prior read of an existing file |
 | `edit` | `edit(path, old, new)` | ✓ exact unique match; fails loudly on 0 or >1 |
-| `bash` | `bash(cmd, timeout=120, background=False, cwd="")` | ✓ **each call is a fresh process**, and the docstring says so |
+| `bash` | `bash(command, timeout=120, background=False, cwd="", description="")` | ✓ **each call is a fresh process**, and the docstring says so. `permission_for` narrows a read-only command to READ, so `ls` does not prompt in `auto-edit` |
 | `bash_output` | `bash_output(shell_id, kill=False)` | ✓ drains a background shell, new output only |
 | `glob` | `glob(pattern, path=".")` | ✓ `fd`, falls back to `rg --files` then `pathlib` |
 | `grep` | `grep(pattern, path=".", ...)` | ✓ ripgrep. Do not hand-roll |
@@ -428,9 +458,28 @@ Daemon → Client
 {"type":"tool_finished","id":"c1","ok":true,"preview":"…"}
 {"type":"approval_request","execution_id":"ab12","tool":"bash","arguments":{…}}
 {"type":"question","execution_id":"cd34","question":"…","options":[…]}
-{"type":"turn_finished","usage":{"in":12043,"out":881}}
+{"type":"turn_finished","usage":{"input_tokens":12043,"output_tokens":881,…}}
+{"type":"agent_failed","message":"…"}
 {"type":"error","message":"…"}
 ```
+
+**Five things the sketch above leaves out**, all in `core/daemon/protocol.py`:
+
+| Message | Why it exists |
+| --- | --- |
+| `detach` (C→D) | Stop watching without stopping the agent. The verb the whole layer is for |
+| `set_mode` (C→D) | The TUI has had `/mode` since phase 0. Without this it would silently affect only *later* sessions |
+| `history` (D→C) | The replay half of point 2 below. Raw session records, not `messages()` — a client wants what happened, not what the model was sent |
+| `progress` (D→C) | `on_progress` from a long-running tool. Advisory; nothing is recorded |
+| `agent_failed` (D→C) | A turn ending badly, which is the agent's own event. `error` is a protocol or daemon failure — different thing, different sender |
+
+`turn_finished` carries the **full four-field `Usage`**, not the `{"in","out"}` sketch:
+`cache_read_input_tokens` is the evidence for the caching claim in §10, and the one
+client that could show it cannot if the wire drops it.
+
+Every frame from the daemon carries a `session` id, because several clients may attach
+to several sessions over one connection. Client messages take an optional `session` and
+default to the last one that connection created or attached to.
 
 **Three things to get right the first time:**
 
@@ -450,6 +499,11 @@ Daemon → Client
    it, send `interrupt`.
 4. **Transport is configuration.** `unix` for solo, `tcp` for containers, WebSocket later
    as a third adapter over the same protocol.
+5. **A parked request whose last client leaves is failed, not left waiting.** A turn
+   blocked on `approval_request` when the last watcher drops would wait forever on a
+   `Future` nobody can resolve. `unsubscribe` fails every pending request with
+   `ToolDenied` **naming the real reason** — not "the user declined", because a headless
+   agent told a human refused it will act on that lie.
 
 ---
 
@@ -635,12 +689,15 @@ Providers + gateway, config, CLI, chat/settings UI, harness tools, approval mode
    last system block, last message — the third is what makes the saving real); git state
    sampled once at startup; `bash` takes a `cwd`.
 
-### Phase 2 — Daemon and client (steps 5–6)
+### Phase 2 — Daemon and client (steps 5–6) ✓ done
 > *Done when: detach/re-attach mid-run works, and `full-auto` refuses to start on the host.*
+> **Demonstrated**, not just tested: `smoke_daemon.py` runs both against a real model
+> over a real socket. `core/daemon/_test.py` covers the same ground against a scripted
+> gateway, including the whole approval chain from `Tool.invoke` to the wire and back.
 
-5. **`core/daemon/`, ~200 lines.** Protocol (§8), approval correlation, autonomy guard.
-6. **TUI becomes a client, ~120 lines.** Replace `cli/app.py:_stream_reply` with the
-   socket; wire Esc → `interrupt`. **This is the point it is usable daily.**
+5. **`core/daemon/` ✓.** Protocol (§8), approval correlation, autonomy guard.
+6. **TUI is a client ✓.** `cli/app.py` opens a socket instead of the gateway; Esc →
+   `interrupt`; approval and question modals; `--headless` / `--daemonless`.
 
 ### Phase 3 — Token economics (steps 7–8)
 > *Done when: three MCP servers are connected and the prompt prefix does not grow.*

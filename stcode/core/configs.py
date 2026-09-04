@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 import tomli_w
 from pydantic import BaseModel, Field
@@ -26,6 +27,8 @@ from pydantic import BaseModel, Field
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
 from stcode.core.providers import Difficulty, ProviderConfig, RetryConfig, RouteConfig, default_model_for
 from stcode.core.session import DEFAULT_SESSION_DIR
+
+DEFAULT_SOCKET_PATH = "~/.stcode/daemon.sock"
 
 
 class DefaultsConfig(BaseModel):
@@ -67,6 +70,21 @@ class SessionConfig(BaseModel):
     keep: int = 100
 
 
+class DaemonConfig(BaseModel):
+    """Where the daemon listens. Transport is configuration, not architecture.
+
+    `unix` for solo — a path has no port to collide with, and filesystem permissions
+    are the access control. `tcp` for a container, where there is no host filesystem to
+    put a socket on. Same JSONL framing either way, which is the whole point: a third
+    transport later is an adapter, not a protocol.
+    """
+
+    transport: Literal["unix", "tcp"] = "unix"
+    socket: str = DEFAULT_SOCKET_PATH
+    host: str = "127.0.0.1"
+    port: int = 7717
+
+
 class GatewayConfig(BaseModel):
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     routing: dict[Difficulty, RouteConfig] = Field(default_factory=dict)
@@ -74,6 +92,7 @@ class GatewayConfig(BaseModel):
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
+    daemon: DaemonConfig = Field(default_factory=DaemonConfig)
 
 
 DEFAULT_CONFIG_TOML = """\
@@ -128,6 +147,13 @@ difficulty = "high"
 [session]
 dir = "~/.stcode/sessions"
 keep = 100
+
+# Where the daemon listens. `unix` on your own machine, `tcp` inside a container.
+[daemon]
+transport = "unix"
+socket = "~/.stcode/daemon.sock"
+# host = "0.0.0.0"   # when transport = "tcp"
+# port = 7717
 """
 
 SAVED_CONFIG_HEADER = """\
@@ -221,6 +247,40 @@ def save_config(config: GatewayConfig, path: Path | None = None) -> Path:
     tmp.chmod(0o600)
     tmp.replace(path)
     return path
+
+
+def apply_cli_overrides(
+    config: GatewayConfig,
+    *,
+    transport: str | None = None,
+    socket: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    approval_mode: ApprovalMode | None = None,
+    model: str | None = None,
+) -> GatewayConfig:
+    """Fold command-line overrides into a loaded config, in place, for this run only.
+
+    Deliberately not written back to disk: a flag is a decision about now. `--mode
+    full-auto` on one run must not leave `full-auto` in the file for the next one, which
+    is the shape of accident invariant 5 exists to prevent.
+
+    Here rather than in `cli/` because both entry paths need it — the headless daemon
+    and the UI — and the second must not have to import the first.
+    """
+    if transport is not None:
+        config.daemon.transport = transport  # type: ignore[assignment]
+    if socket:
+        config.daemon.socket = socket
+    if host:
+        config.daemon.host = host
+    if port is not None:
+        config.daemon.port = port
+    if approval_mode is not None:
+        config.defaults.approval_mode = approval_mode
+    if model:
+        config.defaults.model = model
+    return config
 
 
 def apply_provider_settings(

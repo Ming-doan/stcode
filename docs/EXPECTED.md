@@ -666,6 +666,41 @@ cấm nhiều hơn. Đây là chỗ bản trước mâu thuẫn với chính nó
 Cùng một framing JSONL. Nếu sau này cần điều khiển qua internet, WebSocket là adapter thứ
 ba trên cùng giao thức đó.
 
+### 11.1b Bốn thứ thêm vào khi cài đặt (bước 5–6, đã xong)
+
+Phác thảo §11.1 ở trên là khung; đây là những gì thực sự cần thêm khi viết, và **lý do**:
+
+```
+Client → Daemon
+{"type":"detach","session":"01HX…"}          # ngừng nhận sự kiện — KHÔNG giết agent
+{"type":"set_mode","mode":"auto-edit"}       # đổi approval mode của session đang chạy
+
+Daemon → Client
+{"type":"history","session":"01HX…","records":[…]}   # replay khi attach
+{"type":"progress","session":"01HX…","text":"…"}     # on_progress của tool dài
+{"type":"agent_failed","message":"…"}                # lượt hỏng — khác `error` (giao thức)
+```
+
+* **`set_mode`** — TUI đã có `/mode` từ phase 0. Không có message này thì đổi mode chỉ
+  ảnh hưởng session tạo *sau đó*, tức là lặng lẽ không làm gì. Runner đặt
+  `harness.approval_mode`; có hiệu lực từ lần gọi model kế tiếp.
+* **`history`** — §11.2(2) nói "replay từ session rồi nối vào luồng sống"; đây là hình
+  dạng của phần replay. Gửi **record thô**, không phải `messages()`: client muốn thấy
+  cái đã xảy ra (tool call, lỗi, usage), không phải cái model được gửi.
+* **`turn_finished.usage` mang đủ 4 trường `Usage`**, không phải `{"in","out"}`.
+  `cache_read_input_tokens` chính là bằng chứng cho tuyên bố prompt caching (§8); bỏ nó
+  trên dây nghĩa là client duy nhất có thể hiển thị lại không hiển thị được.
+* **`guard_autonomy` ném `AutonomyRefused`, không phải `SystemExit`.** Phác thảo §11.3
+  đúng cho CLI và sai cho tầng dưới: TUI tạo session trong một worker task, nơi
+  `SystemExit` bị nuốt và người dùng không thấy gì. CLI đổi nó thành exit code; TUI hiển
+  thị nó. Lời từ chối là như nhau — đó mới là phần bất biến quan tâm.
+
+**Chỗ hỏng phải xử lý ngay, không phải sau:** một lượt đang chờ approval mà client cuối
+cùng rớt sẽ chờ mãi trên một `Future` không ai resolve được. Khi watcher cuối `detach`,
+mọi request đang treo bị fail bằng `ToolDenied` kèm lý do thật — không phải "người dùng
+từ chối", vì một agent chạy headless được báo là có người từ chối sẽ hành động theo lời
+nói dối đó.
+
 ### 11.3 Bất biến #5 — cưỡng chế ở đây
 
 ```py
@@ -874,7 +909,7 @@ keep = 100
 # [session.database]                # tương lai: session vào db sống
 # url = "postgresql://..."          # creds ở đây, Session đổi backend, Agent không đổi
 
-[daemon]                            # §11
+[daemon]                            # §11 — đã cài, `DaemonConfig`
 transport = "unix"                  # unix | tcp
 socket    = "~/.stcode/daemon.sock"
 # host = "0.0.0.0"; port = 7717     # khi transport = "tcp" (container)
@@ -985,8 +1020,8 @@ Mỗi bước đều để lại thứ chạy được.
 | 2 | **`core/session/`** (§8) | ~120 dòng | `create → append → resume → messages()` khứ hồi đúng |
 | 3 | **`core/agent/`** — vòng lặp §9.1, chưa có supervisor/mailbox | ~250 dòng | Sửa được một file kèm test, session JSONL đọc được |
 | 4 | **Prompt caching + git context** (§14 mục 1–2) + `bash(cwd=)` (mục 3) | ~65 dòng | Lượt 2 rẻ hơn ~10×; agent biết nhánh và `git status` |
-| 5 | **`core/daemon/`** — giao thức §11.1, approval correlation §11.2, guard §11.3 | ~200 dòng | Attach/detach không giết agent; `full-auto` bị chặn trên host |
-| 6 | **TUI thành client.** Thay `cli/app.py:_stream_reply` bằng socket; nối Esc → interrupt | ~120 dòng | Dùng được hằng ngày như Cline/Kilo |
+| 5 | ✓ **`core/daemon/`** — giao thức §11.1 + §11.1b, approval correlation §11.2, guard §11.3 | ~200 dòng | Attach/detach không giết agent; `full-auto` bị chặn trên host |
+| 6 | ✓ **TUI thành client.** Thay `cli/app.py:_stream_reply` bằng socket; Esc → interrupt; `--headless` / `--daemonless` | ~120 dòng | Dùng được hằng ngày như Cline/Kilo |
 | 7 | **`core/repl/`** — worker subprocess §6.3 + `inject` sửa bug `tool_out` | ~120 dòng | `repl` chạy, biến sống qua các lượt |
 | 8 | **MCP-as-code** (§6.2) — `mcp.py` sinh file thay vì đăng ký tool | ~90 dòng | 3 MCP server mà prefix không phình |
 | 9 | **Supervisor** (§10) | ~80 dòng | Bơm một task lặp vô ích vào → nó bắt được và bẻ lái |
