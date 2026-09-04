@@ -84,10 +84,22 @@ class Session:
     """An append-only JSONL transcript of one agent's work."""
 
     def __init__(self, path: Path, *, records: list[dict[str, Any]] | None = None) -> None:
+        """Open `path`, adopting whatever is already in it.
+
+        Reading the existing file matters more than it looks. The class's premise is one
+        file serving three readers, and a `Session` that appends to a file whose earlier
+        content it has not loaded breaks that on the spot: `messages()` would describe a
+        shorter conversation than the file does, and the next run would look, to anyone
+        reading the trajectory, like a continuation of the last one when the model never
+        saw it. Pointing at an existing file therefore means resuming it — the file is
+        the truth, not the object. Pass `records` only when you have already read them.
+        """
         self.path = path
         self.id = path.stem
-        self._records: list[dict[str, Any]] = records if records is not None else []
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if records is None:
+            records = list(read_records(path)) if path.is_file() else []
+        self._records: list[dict[str, Any]] = records
         # Line-buffered and held open: the alternative is an open/close per event, and
         # a turn with twenty tool calls produces sixty events.
         self._file = self.path.open("a", encoding="utf-8", buffering=1)
@@ -123,7 +135,7 @@ class Session:
         path = sessions_dir(directory) / f"{session_id}.jsonl"
         if not path.is_file():
             raise FileNotFoundError(f"No session {session_id!r} in {path.parent}.")
-        return cls(path, records=list(read_records(path)))
+        return cls(path)
 
     @classmethod
     def list(cls, limit: int = 20, *, directory: str | Path | None = None) -> list[dict[str, Any]]:

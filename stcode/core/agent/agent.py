@@ -27,6 +27,7 @@ caller.
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from pathlib import Path
 from types import TracebackType
 from typing import Any, AsyncGenerator, AsyncIterator, Sequence
@@ -164,16 +165,30 @@ class Agent:
         """
         while True:
             text = await self._inbox.get()
-            async for event in self._run_turn(text):
-                yield event
+            async with aclosing(self._run_turn(text)) as turn:
+                async for event in turn:
+                    yield event
 
     async def run(self, text: str) -> AsyncIterator[AgentEvent]:
-        """One turn, start to finish. The shortcut, not a second loop."""
+        """One turn, start to finish. The shortcut, not a second loop.
+
+        `aclosing` because returning early from an `async for` leaves the generator
+        below it suspended for the garbage collector to close whenever it gets round to
+        it, which may be after the event loop has closed — and anything holding a
+        network connection down there then fails to unwind.
+
+        Closing one level is not enough, which is the part that is easy to get wrong:
+        throwing `GeneratorExit` into `events()` unwinds *its* frame but does not await
+        `_run_turn().aclose()`, so the chain below stays suspended anyway. Every level
+        of this stack therefore wraps the one under it — `run` → `events` → `_run_turn`
+        → `_stream` → the provider's — and each is answerable for exactly one.
+        """
         await self.push(text)
-        async for event in self.events():
-            yield event
-            if isinstance(event, (TurnFinished, AgentFailed)):
-                return
+        async with aclosing(self.events()) as stream:
+            async for event in stream:
+                yield event
+                if isinstance(event, (TurnFinished, AgentFailed)):
+                    return
 
     async def result(self, text: str) -> str:
         """Run one turn and return just the final text. What `task` hands its parent."""
@@ -207,18 +222,19 @@ class Agent:
             for _ in range(self.max_turns):
                 reply, calls, usage, failure = "", [], Usage(), None
                 try:
-                    async for event in self._stream():
-                        if isinstance(event, TextDelta):
-                            reply += event.text
-                            yield event
-                        elif isinstance(event, ReasoningDelta):
-                            yield event
-                        elif isinstance(event, ToolCallEnd):
-                            calls.append(event)
-                        elif isinstance(event, MessageStop):
-                            usage = event.usage
-                        if self._interrupted.is_set():
-                            break
+                    async with aclosing(self._stream()) as stream:
+                        async for event in stream:
+                            if isinstance(event, TextDelta):
+                                reply += event.text
+                                yield event
+                            elif isinstance(event, ReasoningDelta):
+                                yield event
+                            elif isinstance(event, ToolCallEnd):
+                                calls.append(event)
+                            elif isinstance(event, MessageStop):
+                                usage = event.usage
+                            if self._interrupted.is_set():
+                                break
                 except Exception as exc:  # noqa: BLE001 — any provider failure ends the turn
                     failure = f"{type(exc).__name__}: {exc}"
 

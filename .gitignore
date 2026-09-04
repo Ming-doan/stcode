@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Scratch workspace for main.py, the hand-run agent smoke test.
+temp/

@@ -398,3 +398,30 @@ def test_cache_counters_reach_the_session(tmp_path: Path, run: Any) -> None:
     assert usage["cache_read_input_tokens"] == 9000
     assert usage["input_tokens"] == 3
     run(agent.aclose())
+
+
+def test_run_closes_the_generator_chain_when_it_returns_early(tmp_path: Path, run: Any) -> None:
+    """`run()` returns on the first terminal event, abandoning events() -> _run_turn()
+    -> _stream() -> the provider's stream. Left to the GC, anything holding a network
+    connection down there unwinds after the loop has closed."""
+    closed: list[str] = []
+
+    class TrackingGateway(ScriptedGateway):
+        async def stream(self, messages: list[Message], **kwargs: Any) -> AsyncIterator[StreamEvent]:
+            try:
+                async for event in super().stream(messages, **kwargs):
+                    yield event
+            finally:
+                closed.append("stream")
+
+    agent = build(tmp_path, TrackingGateway([_text("done")]))
+
+    async def scenario() -> None:
+        async for _ in agent.run("hi"):
+            pass
+        # No GC, no loop teardown: the chain must already be unwound right here.
+        assert closed == ["stream"], "provider stream was left suspended"
+        assert agent.busy is False
+
+    run(scenario())
+    run(agent.aclose())

@@ -100,52 +100,59 @@ class OpenAIProvider(BaseModelProvider):
             stream_options={"include_usage": True},
             **kwargs,
         )
-        async for chunk in response_stream:
-            if chunk.usage is not None:
-                usage = Usage(
-                    input_tokens=chunk.usage.prompt_tokens,
-                    output_tokens=chunk.usage.completion_tokens,
-                )
-            if not chunk.choices:
-                continue
-
-            choice = chunk.choices[0]
-            delta = choice.delta
-            if delta.content:
-                yield TextDelta(text=delta.content)
-
-            # Not a Chat Completions field — some OpenAI-compatible routers (e.g.
-            # reasoning-model proxies) bolt it onto the delta as an extra attribute.
-            reasoning = getattr(delta, "reasoning", None)
-            if reasoning:
-                yield ReasoningDelta(text=reasoning)
-
-            for tool_call_delta in delta.tool_calls or []:
-                index = tool_call_delta.index
-                if tool_call_delta.id is not None:
-                    # First chunk for this call: id + name arrive together.
-                    name = tool_call_delta.function.name if tool_call_delta.function else ""
-                    pending_calls[index] = {"id": tool_call_delta.id, "name": name, "json": ""}
-                    yield ToolCallStart(id=tool_call_delta.id, name=name)
-                call = pending_calls.get(index)
-                if call is None:
-                    continue
-                arguments = tool_call_delta.function.arguments if tool_call_delta.function else None
-                if arguments:
-                    call["json"] += arguments
-                    yield ToolCallDelta(id=call["id"], partial_json=arguments)
-
-            if choice.finish_reason is not None:
-                stop_reason = _FINISH_REASON_MAP.get(choice.finish_reason, "end_turn")
-                # Some OpenAI-compatible routers repeat finish_reason on a trailing
-                # usage-only chunk — clear so that chunk doesn't re-flush stale calls.
-                for call in pending_calls.values():
-                    yield ToolCallEnd(
-                        id=call["id"],
-                        name=call["name"],
-                        input=json.loads(call["json"]) if call["json"] else {},
+        # `async with`, not a bare `async for`. The SDK closes the response only "if the
+        # response body is read to completion", and an SSE stream never is: iteration
+        # stops at the `[DONE]` sentinel with httpcore's byte generator still suspended
+        # mid-body. Left to the garbage collector it is closed after the event loop has
+        # gone, which surfaces as `RuntimeError: generator didn't stop after athrow()`
+        # from inside httpcore — a traceback with nothing in it pointing here.
+        async with response_stream:
+            async for chunk in response_stream:
+                if chunk.usage is not None:
+                    usage = Usage(
+                        input_tokens=chunk.usage.prompt_tokens,
+                        output_tokens=chunk.usage.completion_tokens,
                     )
-                pending_calls.clear()
+                if not chunk.choices:
+                    continue
+
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if delta.content:
+                    yield TextDelta(text=delta.content)
+
+                # Not a Chat Completions field — some OpenAI-compatible routers (e.g.
+                # reasoning-model proxies) bolt it onto the delta as an extra attribute.
+                reasoning = getattr(delta, "reasoning", None)
+                if reasoning:
+                    yield ReasoningDelta(text=reasoning)
+
+                for tool_call_delta in delta.tool_calls or []:
+                    index = tool_call_delta.index
+                    if tool_call_delta.id is not None:
+                        # First chunk for this call: id + name arrive together.
+                        name = tool_call_delta.function.name if tool_call_delta.function else ""
+                        pending_calls[index] = {"id": tool_call_delta.id, "name": name, "json": ""}
+                        yield ToolCallStart(id=tool_call_delta.id, name=name)
+                    call = pending_calls.get(index)
+                    if call is None:
+                        continue
+                    arguments = tool_call_delta.function.arguments if tool_call_delta.function else None
+                    if arguments:
+                        call["json"] += arguments
+                        yield ToolCallDelta(id=call["id"], partial_json=arguments)
+
+                if choice.finish_reason is not None:
+                    stop_reason = _FINISH_REASON_MAP.get(choice.finish_reason, "end_turn")
+                    # Some OpenAI-compatible routers repeat finish_reason on a trailing
+                    # usage-only chunk — clear so that chunk doesn't re-flush stale calls.
+                    for call in pending_calls.values():
+                        yield ToolCallEnd(
+                            id=call["id"],
+                            name=call["name"],
+                            input=json.loads(call["json"]) if call["json"] else {},
+                        )
+                    pending_calls.clear()
 
         yield MessageStop(stop_reason=stop_reason, usage=usage)
 

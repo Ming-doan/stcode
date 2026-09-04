@@ -534,3 +534,36 @@ def test_usage_carries_the_cache_counters():
     usage = Usage(input_tokens=12, cache_read_input_tokens=9000)
     assert usage.cache_creation_input_tokens == 0
     assert usage.model_dump()["cache_read_input_tokens"] == 9000
+
+
+async def test_the_openai_stream_is_closed_even_though_sse_never_reaches_eof(monkeypatch):
+    """The SDK closes the response only if the body is read to completion, and an SSE
+    body never is — iteration stops at `[DONE]`. Left to the GC it unwinds after the
+    event loop has gone, surfacing as an httpcore traceback that names nothing of ours."""
+    closed: list[bool] = []
+
+    class FakeStream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            closed.append(True)
+            return False
+
+        def __aiter__(self):
+            async def chunks():
+                return
+                yield  # pragma: no cover
+
+            return chunks()
+
+    provider = OpenAIProvider(api_key="k")
+
+    async def fake_create(**_kwargs):
+        return FakeStream()
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+    events = [e async for e in provider.stream([Message(role="user", content="hi")], model="m")]
+
+    assert closed == [True]
+    assert isinstance(events[-1], MessageStop)

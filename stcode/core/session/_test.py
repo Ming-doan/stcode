@@ -186,3 +186,30 @@ def test_prune_keeps_the_newest(tmp_path: Path) -> None:
     removed = prune(keep=2, directory=tmp_path)
     assert len(removed) == 3
     assert {entry["id"] for entry in Session.list(directory=tmp_path)} == {made[3].id, made[4].id}
+
+
+def test_opening_an_existing_file_adopts_its_history(tmp_path: Path) -> None:
+    """A Session that appends to a file it has not read describes a shorter conversation
+    than the file does, and the next run reads as a continuation of one the model never
+    saw. The file is the truth."""
+    first = Session.create(directory=tmp_path)
+    first.append(type="user", content="one")
+    first.append(type="assistant", content="done")
+    first.close()
+
+    reopened = Session(first.path)
+    assert len(reopened.records()) == 3
+    assert [m.role for m in reopened.messages()] == ["user", "assistant"]
+
+    reopened.append(type="user", content="two")
+    assert [m.role for m in reopened.messages()] == ["user", "assistant", "user"]
+    reopened.close()
+
+    # ...and what the object holds still matches what the file holds.
+    assert len(list(read_records(first.path))) == len(reopened.records())
+
+
+def test_opening_a_path_that_does_not_exist_yet_starts_empty(tmp_path: Path) -> None:
+    session = Session(tmp_path / "nested" / "fresh.jsonl")
+    assert session.records() == [] and session.path.is_file()
+    session.close()
