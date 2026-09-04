@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
 from stcode.core.providers import Difficulty, ProviderConfig, RetryConfig, RouteConfig, default_model_for
+from stcode.core.session import DEFAULT_SESSION_DIR
 
 
 class DefaultsConfig(BaseModel):
@@ -40,11 +41,39 @@ class DefaultsConfig(BaseModel):
     approval_mode: ApprovalMode = DEFAULT_APPROVAL_MODE
 
 
+class AgentConfig(BaseModel):
+    """Limits on one turn of the loop.
+
+    `max_turns` is the tool-call ceiling *within* a single turn, not a conversation
+    length. It is the only thing standing between a model that has decided to keep
+    grepping and an unbounded bill; EXPECTED.md §9.1 ends the loop on it with an
+    `AgentFailed`, deliberately loudly.
+
+    `max_depth = 1` is CLAUDE.md §4 rule 3 and is not meant to be raised: sub-agents get
+    neither `task` nor `repl`, and recursion with no budget is a fork bomb.
+    """
+
+    max_turns: int = 40
+    max_depth: int = 1
+    max_concurrent: int = 4
+    enable_task: bool = True
+    difficulty: Difficulty = "high"
+
+
+class SessionConfig(BaseModel):
+    """Where transcripts live. `dir` takes `./.stcode/sessions` for per-project history."""
+
+    dir: str = DEFAULT_SESSION_DIR
+    keep: int = 100
+
+
 class GatewayConfig(BaseModel):
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     routing: dict[Difficulty, RouteConfig] = Field(default_factory=dict)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
+    session: SessionConfig = Field(default_factory=SessionConfig)
 
 
 DEFAULT_CONFIG_TOML = """\
@@ -89,6 +118,16 @@ max_attempts = 3
 base_delay = 1.0
 max_delay = 20.0
 jitter = true
+
+# Limits on one turn. max_turns caps tool calls within a turn, not conversation length.
+[agent]
+max_turns = 40
+difficulty = "high"
+
+# dir = "./.stcode/sessions" keeps transcripts with the project instead of in ~.
+[session]
+dir = "~/.stcode/sessions"
+keep = 100
 """
 
 SAVED_CONFIG_HEADER = """\
