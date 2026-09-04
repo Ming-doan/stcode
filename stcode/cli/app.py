@@ -30,17 +30,15 @@ from textual.widgets import Footer, Input, Static
 from stcode.cli import labels
 from stcode.cli.banner import banner_for_width
 from stcode.cli.settings import SettingsScreen
-from stcode.core.approvals import ApprovalMode, next_approval_mode, parse_approval_mode
+from stcode.core.harness.approvals import ApprovalMode, next_approval_mode, parse_approval_mode
 from stcode.core.configs import (
     GatewayConfig,
-    ProviderConfig,
     config_exists,
     default_config_path,
     load_config,
-    resolve_secret,
     save_config,
 )
-from stcode.core.llm_gateway import LLMGateway
+from stcode.core.providers import LLMGateway, ProviderConfig, resolve_secret
 from stcode.core.providers.types import Message, TextDelta
 
 
@@ -328,7 +326,11 @@ class StcodeApp(App[None]):
     @work(exclusive=True, group="chat")
     async def _stream_reply(self) -> None:
         if self._gateway is None:
-            self._gateway = LLMGateway(self.config)
+            self._gateway = LLMGateway(
+                providers=self.config.providers,
+                routing=self.config.routing,
+                retry=self.config.retry,
+            )
 
         defaults = self.config.defaults
         bubble = self._add_message("assistant", "…")

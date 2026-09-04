@@ -1,499 +1,677 @@
 # CLAUDE.md
 
-Guidance for Claude Code (and any agentic contributor) working in this repository.
+Guidance for Claude Code and any agentic contributor working in this repository.
+
+**Authority:** the architecture is decided in [`docs/EXPECTED.md`](docs/EXPECTED.md)
+(Vietnamese, v2). This file is the English working spec derived from it. Where the two
+disagree, `EXPECTED.md` wins and this file is stale — say so rather than guessing.
+
+**Status legend**, used throughout. Honesty here is the point: the previous version of
+this file described an architecture that was never built, and every agent that read it
+coded in the wrong direction.
+
+| Mark | Meaning |
+| --- | --- |
+| ✓ | Exists and works today |
+| ⟳ | Exists, but changes in the named step |
+| ✗ | Does not exist yet — build in the named step |
+| ✂ | Exists, scheduled for deletion in step 1 |
 
 ---
 
 ## 1. What This Project Is
 
-`stcode` is a **coding agent CLI** built on the **Recursive Language Model (RLM)** architecture
-described in [Prime Intellect's RLM blog](https://www.primeintellect.ai/blog/rlm) and realized in
-[Prime Agent](https://www.primeintellect.ai/blog/prime-agent).
+`stcode` is a **general agent harness, specialised for coding**. In team mode it puts one
+agent per container so a set of them can work together; in solo mode a single daemon holds
+however many sessions you have projects.
 
-**The core inversion vs. a normal ReAct agent:**
+The unit of deployment is a **daemon**: a long-lived process holding one agent, speaking
+JSONL over a socket. A TUI is just a client of it. That inversion — daemon first, UI
+second — is what makes the container story real instead of aspirational.
 
-| Normal agent | RLM agent (this project) |
-| --- | --- |
-| Model calls tools directly; every tool output enters context | Model's **only** tool is a persistent Python REPL |
-| Long outputs cause context rot | Tool outputs live as **Python variables**; model sees a truncated preview |
-| Sub-agents are a fixed, hand-wired schema | Sub-agents are **async function calls** inside the REPL: `await agent(...)` |
-| Answer is the final assistant message | Answer is written into an `answer` dict variable and committed with `ready=True` |
+**Two modes, one engine.** `Agent` does not know which mode it is in; the difference is
+which harness is loaded and which tools are injected.
 
-**One-line thesis:** context is a variable, not a transcript. The main agent orchestrates; sub-agents
-absorb token-heavy work; nothing is ever summarized lossily.
+| | **Solo** | **Team** |
+| --- | --- | --- |
+| Deployment | one daemon on your machine | N containers, each = 1 daemon + 1 agent |
+| Workspace | existing checkout at `cwd`, scope-enforced | agent runs `git clone` itself; container is the isolation |
+| Roles | none | BA / frontend-dev / backend-dev / devops … |
+| Coordination | `task` tool (in-process sub-agent) | shared `/team` volume + `send_message` tool |
+| Client | TUI over unix socket | TUI/web over TCP; attach to any container and steer it mid-run |
+| Approval | human in the loop | `full-auto`, guarded by container detection |
 
-**Non-goals:** we are not building a training harness, not reimplementing MCP, and not chasing
-feature parity with Claude Code. Simplicity beats coverage.
-
----
-
-## 2. Core Architecture
-
-```
-┌──────────────┐    writes code    ┌─────────────────────┐
-│  Main Agent  │──────────────────▶│   Python REPL       │
-│              │◀──── stdout ──────│   (IPython kernel)   │
-│ system+user  │  (truncated 8KB)  │  • tool_out vars     │
-│ prompt only  │                   │  • session context   │
-└──────┬───────┘                   │  • answer dict       │
-       │                           │  • harness (CRUD)    │
-       │                           └──────────┬───────────┘
-       │                                      │ await agent(...)
-       │                                      ▼
-       │                           ┌──────────────────────┐
-       │                           │     Agent Pool       │
-       │                           │  queue + semaphore   │
-       │                           └──────────┬───────────┘
-       │                                      │ spawns
-       │      agent_message.send(...)         ▼
-       └──────────────────────────▶┌──────────────────────┐
-                                   │      Sub-Agent       │◀── has the real tools
-                                   │  own kernel + ctx    │    (read/write/bash/...)
-                                   └──────────┬───────────┘
-                                              │
-                                   ┌──────────▼───────────┐
-                                   │     LLM Gateway      │
-                                   │ difficulty → model   │
-                                   │ retry / fallback     │
-                                   └──────────────────────┘
-```
-
-### 2.1 Layers and their invariants
-
-**Main Agent** — sees only: system prompt, user prompt, and truncated REPL stdout.
-It has **no direct tools**. If you are tempted to give the main agent a tool, you are
-undoing the architecture. Route it through a sub-agent instead.
-
-**Python REPL** (`core/kernel/`) — a *persistent* IPython kernel (one per session), not
-`exec()` per turn. It holds:
-- `tool_out["<id>"]` — raw tool results, spilled to `.pkl` above the size threshold
-- `session_ctx` — shared knowledge injected into sibling sub-agents
-- `answer = {"content": "", "ready": False}` — the only channel for the final response
-- `harness` — CRUD surface over prompts / memories / skills / sub-agent specs
-- `agent`, `agent_message`, `compact`, `refine` — pre-imported at kernel init
-
-**Agent Pool** (`core/agent/`) — bounded queue with an `asyncio.Semaphore`. Enforces
-`max_concurrent`, `max_subagents_per_turn`, `max_depth`, and a recursive token budget.
-
-**Sub-Agent** — a full agent session (own model, own kernel, own history) with a *narrow*
-slice of parent context. Owns the real tools (`core/harness/`). Returns a short
-synthesis, never raw output.
-
-**LLM Gateway** (`core/providers/gateway.py`) — `difficulty` → model tier mapping, retry
-with backoff, provider fallback chain, circuit breaker, and cost accounting.
-Provider-specific streaming/tool-call formats are normalized in `core/providers/` and
-nowhere else.
-
-### 2.2 Hard rules
-
-1. **REPL stdout is truncated at 8192 chars.** This is a forcing function, not a nicety.
-   Never replace truncation with LLM summarization — summarization loses information;
-   truncation does not, because the variable is still there.
-2. **`agent()` returns at admission, not at completion.** It hands back a child handle
-   immediately. Results arrive via `agent_message`. Blocking `agent()` kills fan-out and
-   mid-flight steering.
-3. **Default `max_depth = 1`, hard cap 2.** Unbounded recursion + no budget = fork bomb.
-4. **Two sub-agents must never write the same file.** Assign disjoint path scopes at spawn.
-5. **The base system prompt is immutable.** `/refine` may only edit the harness layer around it.
-6. **Sessions are append-only JSONL.** Branch/fork/clone by moving the leaf pointer within
-   the same file. Never rewrite history.
-7. **Short tasks bypass RLM entirely.** See §7.
+**Non-goals.** Not a training harness. Not a reimplementation of MCP. Not feature parity
+with Claude Code. No self-modifying prompts (§4 rule 6). Simplicity beats coverage —
+but *simplicity of the path*, not of the destination: anything serving the
+multi-container team goal is the product, not scope creep.
 
 ---
 
-## 3. Repository Layout
+## 2. What Makes It Different
 
-Two top-level layers. **`cli/` is the interface, `core/` is the engine, and the
-dependency runs one way: `cli` → `core`, never back.** If `core` ever needs to import
-from `cli`, something display-shaped has ended up in the engine — move it, don't wire
-the arrow backwards.
+Four things, each traceable to a measurement rather than a preference. If you are about
+to remove one, read the number first.
 
-Present tense — what exists today is marked, the rest is the target shape. Everything
-non-CLI nests under `core/` — if you're adding a top-level `stcode/` directory that
-isn't `cli/`, you're probably one level too shallow; it belongs under `core/`.
+### 2.1 MCP tools are code, not tool definitions
+
+Every other coding agent ships MCP tool schemas in the prompt prefix on every turn. Three
+mid-sized servers cost 10–30k tokens per turn, forever.
+
+`stcode` writes them to `.stcode/mcp_servers/<server>/<tool>.py` and lets the agent
+`grep` and `import` what it needs from the REPL. Anthropic measured this pattern at
+**150k → 2k tokens, a 98.7% reduction**. Intermediate results stay in the REPL process
+and never touch the context.
+
+This is also the honest remnant of the RLM idea: *context as a variable*, obtained
+without the kernel↔harness RPC bridge that the original design required.
+→ §6.2 / §6.3 of `EXPECTED.md`, step 7–8.
+
+### 2.2 A supervisor watches the trajectory
+
+NVIDIA AVO reached 100% on ARC-AGI-3 and attributed it to system design, not model
+strength. The component they name is a supervisor that watches for **stagnation and
+repeated unproductive cycles** and redirects the agent.
+
+`stcode` already writes its trajectory — the session JSONL — so the supervisor is just a
+reader. Cheap counting heuristics run first at zero token cost (same tool+args ≥3×, error
+rate >50%, no file written in N turns, same file edited ≥4×); only when one fires does it
+spend a `difficulty="low"` call. Its nudge is appended as a `user` message, never as a
+system-prompt edit, so prompt caching survives. → step 9.
+
+### 2.3 Agent-to-agent messaging has no protocol
+
+Containers already share a volume, so a message is a **file**: `send_message` writes JSON
+into `/team/inbox/<role>/`, and the receiver drains its own directory at the start of each
+turn. Shared knowledge is a directory the existing `read`/`write`/`grep` already handle.
+
+No registry, no routing table, no service discovery, no N² socket mesh. Messages carry
+`refs` (paths) rather than content — Anthropic's filesystem-output pattern, and the thing
+that keeps team token cost from exploding. → step 10.
+
+### 2.4 Daemon-first, so containerization is not a rewrite
+
+Detach does not kill the agent. Approval and questions are request–response correlated by
+`execution_id` over the same JSONL framing. Transport (`unix` / `tcp`) is configuration,
+not architecture. → step 5.
+
+### 2.5 Honest comparison
+
+| | Claude Code | Cline / Kilo | **stcode** |
+| --- | --- | --- | --- |
+| Tool quality (read/edit/grep/bash) | excellent | good | ✓ comparable already |
+| MCP | tool defs per turn | tool defs per turn | ⟳ as code, ~50× cheaper |
+| Runs headless in a container | partial | no | ✗ core design, step 5 |
+| Multi-agent team across containers | no | no | ✗ step 10 |
+| Stagnation detection | no | no | ✗ step 9 |
+| Maturity, polish, ecosystem | **far ahead** | ahead | behind, and will stay behind |
+
+We are not competing on polish. We are betting on the four rows in the middle.
+
+---
+
+## 3. Architecture
+
+```mermaid
+flowchart TB
+    subgraph clients["Clients"]
+        tui["TUI (textual)"]
+        web["Web / SDK"]
+    end
+
+    subgraph container["One container = one agent = one role"]
+        daemon["<b>Daemon</b> ✗<br/>socket · JSONL · session registry"]
+        agent["<b>Agent</b> ✗<br/>the turn loop"]
+        sup["<b>Supervisor</b> ✗<br/>stagnation detection"]
+        sess["<b>Session</b> ✗<br/>JSONL append-only"]
+        harn["<b>Harness</b> ✓<br/>tools · role prompt · approvals"]
+        gw["<b>LLMGateway</b> ✓<br/>difficulty routing · retry"]
+        repl["<b>PyREPL</b> ⟳<br/>subprocess + JSONL"]
+
+        daemon --> agent
+        agent --> sess
+        agent --> harn
+        agent --> gw
+        sup -.->|reads| sess
+        sup -.->|nudge| agent
+        harn -.->|tool repl| repl
+        repl -.->|import| mcpcode["mcp_servers/*.py ✗"]
+    end
+
+    subgraph vol["/team volume — mounted into every container"]
+        know["knowledge/"]
+        inbox["inbox/&lt;role&gt;/"]
+        arte["artifacts/"]
+    end
+
+    tui -->|unix socket| daemon
+    web -->|tcp| daemon
+    harn -.->|read/write/grep| know
+    harn -.->|send_message| inbox
+    daemon -.->|watch → wake| inbox
+```
+
+### 3.1 Component contracts
+
+Each component is one object with a small surface. If you find yourself needing a fifth
+method, check whether the thing belongs somewhere else first.
+
+**`LLMGateway`** ✓ `core/providers/gateway.py` — difficulty tier → provider+model,
+credential resolution, retry before the first token only.
+
+```py
+async with LLMGateway(providers={...}, routing={...}, retry={...}) as gw:
+    async for event in gw.stream(messages, system=..., tools=..., difficulty="high"): ...
+```
+
+Not a singleton — one instance per configuration; provider clients are cached inside by
+`(provider, key, base_url)`. It knows nothing about sessions, tools, or the agent loop,
+and must never import upward.
+
+**`Harness`** ✓ `core/harness/harness.py` — one agent's capabilities. Per *agent*, not per
+process: `for_subagent()` makes the narrowed copy.
+
+```py
+harness = await Harness.create(cwd=..., approval_mode=..., role=..., load_skills=True, load_mcp=True)
+system  = harness.system_prompt()
+tools   = harness.tool_definitions()
+result  = await harness.invoke("read", {"path": ...}, tool_call_id=call.id)
+```
+
+`invoke()` **never raises** for a tool-level failure — bad arguments, denial, timeout, a
+bug inside the tool all come back as `ToolResult(is_error=True)`. The loop's only move
+after a tool call is to hand a `tool_result` back to the model; a raise takes down the turn.
+
+**`Session`** ✗ step 2, `core/session/` — append-only JSONL. One file serving three
+readers: model history, your trajectory log, and the supervisor's input.
+
+```py
+s = Session.create(cwd=..., role=...);  s = Session.resume(id);  Session.list(limit=20)
+s.append(type="user", content=...)      # sync, ~20µs
+s.messages()                            # -> list[Message] for the gateway
+s.tail(30)                              # -> raw records for the supervisor
+```
+
+**`Agent`** ✗ step 3, `core/agent/` — the turn loop, ~45 lines. Message in, events out.
+
+```py
+agent = await Agent.create(config, cwd=..., role=...)
+await agent.push("...")
+async for ev in agent.events(): ...     # TextDelta | ToolStarted | ToolFinished | TurnFinished | AgentFailed
+await agent.interrupt();  await agent.aclose()
+```
+
+`run(text)` is a shortcut: `push()` then `events()` until the first `TurnFinished`.
+One machine, two doors — do not write a second loop.
+
+**`PyREPL`** ⟳ step 7, `core/repl/` — a `python -u` subprocess speaking JSONL on
+stdin/stdout. Persistent namespace, top-level `await` via
+`compile(..., PyCF_ALLOW_TOP_LEVEL_AWAIT)`, SIGINT to interrupt, and an `inject` message
+that pushes `tool_out` across. Replaces `core/kernel/` (jupyter) and its two dependencies.
+
+**`Daemon`** ✗ step 5, `core/daemon/` — **one daemon, many sessions**, addressed by id.
+Solo mode runs a single daemon for every project you work on, one session per repo — not
+one process per repo. In team mode a container usually holds one session, but nothing
+forbids more.
+
+**`Supervisor`** ✗ step 9 · **`Mailbox`** ✗ step 10 — see §2.2 and §9.
+
+### 3.2 Dependency direction
+
+```
+cli ──▶ core/daemon ──▶ core/agent ──▶ { core/session, core/harness, core/providers }
+                                   └──▶ core/team (team mode only)
+core/harness ──▶ core/repl        core/common ◀── everyone (imports nothing back)
+```
+
+One way, always. If `core/providers` needs `core/session`, something is inverted — that
+exact temptation is why the gateway does not log (§4 rule 7). If `core` needs `cli`,
+something display-shaped ended up in the engine; move it, don't reverse the arrow.
+
+---
+
+## 4. Hard Rules
+
+Seven. Each one exists because violating it produced a specific, known failure.
+
+1. **Tool output is elided at 8192 chars, never LLM-summarised.** Summarising loses
+   information; eliding does not — *provided the full value is somewhere the model can
+   actually reach*. The elision hint may only name a real location: `tool_out["..."]`
+   once the REPL bridge exists (step 7), otherwise "call again with a narrower
+   `offset`/`limit`". Promising a variable that isn't there is the bug described in
+   `EXPECTED.md` §4.1.
+2. **One agent = one role = one checkout = one merge boundary.** If two agents need to
+   write the same file, the roles are split wrong. That is a design error, not a signal
+   to add locking.
+3. **`max_depth = 1`.** Sub-agents get neither `task` nor `repl`. Unbounded recursion
+   plus no budget is a fork bomb.
+4. **Sessions are append-only JSONL.** Never rewrite history. No branch, no fork, no leaf
+   pointer — `cp session.jsonl` is the branching feature.
+5. **`full-auto` without an approver runs only inside a container.** The daemon refuses to
+   start otherwise. There is no override flag. This is code (`_guard_autonomy`), not a
+   warning in a document.
+6. **The agent never edits its own harness.** No `/refine`, no prompt CRUD. Prime Agent
+   shipped this and the agent promoted *cheating* into a skill (§11).
+7. **Layers do not reach upward.** Most concretely: the gateway emits
+   `MessageStop(usage=...)` and the *agent* writes it to the session. A gateway that
+   imports `Session` has taken a dependency on its own caller.
+
+---
+
+## 5. Repository Layout
 
 ```
 stcode/
-  cli/                 everything the user sees or types
-    main.py          ✓ typer entrypoint (`stcode`, `stcode config`)
-    app.py           ✓ chat screen, slash commands, status bar
-    settings.py      ✓ first-run wizard + /model config page
-    banner.py        ✓ ASCII wordmark
-    labels.py        ✓ every user-facing string, in one place
-  core/                the agent engine — no UI knowledge
-    configs.py       ✓ config location, schema, load/save, .env loading
-    common/          ✓ vocabulary shared across core/ subpackages, importing none of
-                        them — ToolDefinition, ToolResult
-    providers/       ✓ provider adapters + the LLM gateway built on them
-      types.py       ✓ unified Message/StreamEvent shapes — the wire format every
-                        adapter translates to/from (ToolDefinition is re-exported
-                        from core/common, which has three consumers now)
-      base.py        ✓ BaseModelProvider — the adapter contract (stream(), aclose())
+  cli/                    what the user sees or types
+    main.py            ✓  typer entrypoint (`stcode`, `stcode config`)
+    app.py             ⟳  chat screen → becomes a daemon client (step 6)
+    settings.py        ✓  first-run wizard + /model page
+    banner.py          ✓  ASCII wordmark
+    labels.py          ✓  every user-facing string, in one place
+  core/
+    configs.py         ⟳  config location, schema, load/save, .env (+ new sections, step 5)
+    common/            ✓  vocabulary shared across core/ — ToolDefinition, ToolResult
+      truncate.py      ✗  moves here from core/kernel/ (step 1)
+    providers/         ✓  adapters + gateway
+      types.py         ✓  unified Message/StreamEvent — the wire format
+      base.py          ✓  BaseModelProvider contract
       anthropic_claude.py / openai_gpt.py / google_gemini.py
-                     ✓ one adapter per SDK; normalize that SDK's wire format here
-                        and nowhere else
-      registry.py    ✓ provider lookup by name + static metadata (default model,
-                        conventional key env var)
-      gateway.py     ✓ LLMGateway — difficulty routing, retry, credential
-                        resolution (`ProviderConfig`/`RouteConfig`/`RetryConfig`
-                        are its own domain vocabulary, not a fact about files)
-    agent/              turn loop + state machine, agent pool (queue, semaphore,
-                        depth guard, token budget), session state (JSONL store,
-                        leaf pointer, tree ops, resume) — the workflow that drives
-                        harness + providers + kernel each turn
-    kernel/             jupyter_client wrapper, output capture, truncation, snapshot
-    harness/         ✓ the tools, prompts, and skills an agent works with
-      harness.py     ✓ Harness — the facade the agent loop talks to. Per *agent*, not
-                        per process: for_subagent() narrows scope and tools
-      approvals.py   ✓ approval-mode vocabulary + ToolPermission + the mode policy
-      errors.py      ✓ ToolError family. A leaf, so context and tools can share it
-      context.py     ✓ HarnessContext — cwd, write scope, read tracking, todos; the
-                        `T` in Runtime[T]
-      registry.py    ✓ which tools exist, and which an agent may see
-      mcp.py         ✓ MCP servers from .mcp.json, adapted to the Tool interface
-      tools/         ✓ base.py (@tool, Runtime), schema.py (signature → JSON Schema),
-                        files/search/shell/repl/todo/web/interact/skill
-      prompts/       ✓ plan + execute modes, orchestrator + worker roles
-      skills/        ✓ SKILL.md discovery from ~/.agents/skills, loaded on demand
-    daemon/             unix socket server, A2A routing, session registry, plus a
-                        websocket channel for control over the internet
-tests/
+                       ⟳  one adapter per SDK (+ cache_control, step 4)
+      registry.py      ✓  provider lookup + static metadata
+      gateway.py       ⟳  LLMGateway (+ config fallback in _resolve_route, step 1)
+    harness/           ✓  the tools, prompts and skills an agent works with
+      harness.py       ⟳  facade (+ role=, drop namespace(), step 1/10)
+      approvals.py     ✓  ApprovalMode, ToolPermission, mode policy
+      errors.py        ✓  ToolError family
+      context.py       ⟳  HarnessContext — cwd, scope, read tracking, todos (+ written_files)
+      registry.py      ✓  which tools exist, which an agent may see
+      mcp.py           ⟳  MCP servers → generates mcp_servers/*.py (step 8)
+      tools/           ✓  base.py (@tool, Runtime), schema.py, files/search/shell/repl/…
+      prompts/         ⟳  trim to one prompt + mode note
+        roles/         ✗  ba.md, frontend-dev.md, backend-dev.md, devops.md (step 10)
+      skills/          ✓  SKILL.md discovery, loaded on demand
+    session/           ✗  JSONL store, resume, messages()/tail() — step 2
+    agent/             ✗  the turn loop, events, task tool — step 3
+    daemon/            ✗  socket server, protocol, registry, autonomy guard — step 5
+    repl/              ✗  _worker.py subprocess + JSONL client — step 7
+      supervisor.py    ✗  (lives in agent/) stagnation detection — step 9
+    team/              ✗  Mailbox, send_message, shared-volume conventions — step 10
+    kernel/            ✂  jupyter wrapper — delete in step 1, replaced by core/repl/
+Dockerfile             ✗  one image, all roles — step 10 (§9.4)
 docs/
+  EXPECTED.md          ✓  the architecture decision (Vietnamese) — the authority
 ```
 
-**Where a given thing goes**, when it isn't obvious:
+No `docker-compose.yml`, no k8s manifests. The repo ships an image and an environment
+contract; how you bring up N containers is yours, and orchestration opinions do not
+belong in a Python package.
+
+**Deleted in step 1:** `core/kernel/` (jupyter, ~750 lines), `core/kernel/store.py`
+(`ToolOutStore` — a dict with a wrapper), `Harness.namespace()` (only meaningful with the
+RPC bridge we are not building), `stcode/platform/` (empty, unreferenced).
+
+### 5.1 Where a given thing goes
 
 | Kind of thing | Home | Example |
 | --- | --- | --- |
 | A word the user reads | `cli/labels.py` | `"read-only — no writes, no commands"` |
 | A value the engine branches on | `core/` | `ApprovalMode`, `APPROVAL_MODES` order |
-| A type more than two packages need | `core/common/` | `ToolDefinition`, `ToolResult` |
+| A type more than two packages need | `core/common/` | `ToolDefinition`, `ToolResult`, `elide` |
 | A fact about a provider | `core/providers/` | default model, conventional key env var |
 | How a fact is *displayed* | `cli/labels.py` | `"OpenAI (also any OpenAI-compatible endpoint)"` |
-
-The split shows up most clearly in approval modes: `core/harness/approvals.py` owns the
-names, their order, and the permission policy the tool layer enforces; `cli/labels.py`
-owns the help text and the status-bar colours. Same for providers —
-`core/providers/registry.py` knows `gpt-5.6` is OpenAI's default, `cli/labels.py`
-decides that renders as `optional — e.g. gpt-5.6`.
+| What a role owns and reports to | `harness/prompts/roles/*.md` | data, never code |
+| Anything on the wire between processes | `core/daemon/protocol.py` | the JSONL message shapes |
 
 Conditional copy lives in `labels.py` as a *function*, not as an `if` in a screen: the
 decision about which wording applies is itself part of the wording.
 
 ---
 
-## 4. CLI & TUI
-
-`stcode` (typer) launches a textual app; `stcode config` prints the resolved config
-without starting the UI.
-
-**Config lives in one file** — `~/.stcode/config.toml`, or wherever `STCODE_CONFIG`
-points. `stcode/core/configs.py` owns everything about it; nothing else touches paths
-or TOML.
-
-**Startup is a single test: does that file exist?**
-
-- Absent → the setup screen opens over the chat screen. Provider (OpenAI by default,
-  no base URL), API key, optional base URL, optional model. Skipping writes **nothing**,
-  so the next run asks again — an empty config would silently turn the prompt off forever.
-- Present → straight to chat, no questions. `/model` reopens the same screen.
-
-**Credentials resolve env-first.** `api_key_env` names an environment variable,
-`api_key` is a literal fallback, and the variable wins whenever it's set
-(`providers.resolve_secret`, defined in `core/providers/gateway.py` — it's the LLM
-Gateway's own domain vocabulary, `core/configs.py` only composes `ProviderConfig`
-into the on-disk `GatewayConfig` shape). Files stcode writes are chmod 0600 because the
-literal may be in them. When the user types a key into the UI we clear that provider's
-`api_key_env`, so a stale exported variable can't shadow the key they just entered.
-The API key field is write-only: blank means "keep what's stored", never "erase it".
-
-**Saving from `/model` also repoints difficulty tiers** — any tier already on the chosen
-provider, or still tracking the provider being replaced, follows the new model. A tier
-deliberately pinned to a third provider is left alone.
-
-**Slash commands** are handled by `cli/app.py`, not the agent — they never reach a model:
-
-| Command | Effect |
-| --- | --- |
-| `/model` | open the settings screen (also `f2`) |
-| `/mode [name]` | cycle approval modes, or jump to one by name/prefix (also `shift+tab`) |
-| `/clear` | clear the transcript and the message history (also `ctrl+l`) |
-| `/help`, `/quit` | |
-
-**Approval modes** (least → most permissive): `plan`, `suggest`, `auto-edit`,
-`full-auto`. Names, ordering, and policy in `core/harness/approvals.py`; help text and
-colours in `cli/labels.py`. `full-auto` is the mode §9 says never to run
-un-containerized.
-
-They are **enforced** by the tool layer. A tool declares a `ToolPermission` once, at
-definition (`@tool(permission=...)`), and `requires_approval(mode, permission)` decides
-whether that class runs unattended — the tool never tests the mode itself, because a
-tool that knows about `full-auto` is a tool that will disagree with the next one about
-what it means. `is_forbidden` is separate from `requires_approval` on purpose: "ask
-first" is a pause a human can resolve, while `plan` mode simply does not have the
-capability, and the agent should be told which one it hit. Tools a mode forbids are
-never advertised — being offered a tool and then refused it wastes a turn.
-
-`NETWORK` is gated on its own line rather than wedged into the ordering: the mode
-ordering is about workspace mutation, and network egress is a disclosure risk, not a
-corruption risk. `plan` therefore *asks* for network access rather than refusing it —
-refusing research in the mode that exists for research would be backwards.
-
-**Warn, don't guess.** An empty `defaults.model` means "not chosen yet". The status bar
-says so and sending is refused. Never silently substitute a default model — the user
-paying for the call should know which one it is.
-
-**The reply path is a placeholder.** `cli/app.py:_stream_reply` streams one flat
-user/assistant exchange through `LLMGateway` — no REPL, no sub-agents, no tools. It
-exists so the UI is exercisable end to end. When the RLM loop lands it replaces that
-one method; nothing else on the screen changes.
-
-**Textual notes worth not rediscovering:**
-
-- `shift+tab` belongs to screen-level focus navigation. Reaching it needs
-  `Binding(..., priority=True)`.
-- `Select` wraps its value in a `SelectCurrent` carrying its own border. Squashing a
-  `Select` to `height: 1` without flattening `SelectCurrent` renders an empty box.
-- Keep dialog buttons outside the scrolling region, or they slide below the fold on a
-  24-row terminal.
-- Widget CSS is inlined as a `CSS` class attribute rather than `CSS_PATH`, so nothing
-  depends on package data being present at runtime.
-
-Testing the UI is headless: `App.run_test()` drives it with a `Pilot`, and
-`app.export_screenshot()` returns SVG you can reconstruct a text grid from to eyeball
-layout at a given terminal size.
-
----
-
-## 5. Tool Set
-
-Tools are **only available to sub-agents**. The main agent reaches them by delegating.
-
-| Tool | Signature | Notes |
-| --- | --- | --- |
-| `read` | `read(path, offset=0, limit=None) -> str` | Result cached to a variable; prints preview only if oversized |
-| `write` | `write(path, content)` | Permission-gated; must be inside the agent's path scope |
-| `edit` | `edit(path, old, new)` | Exact, unique string match. Fails loudly on 0 or >1 matches |
-| `bash` | `bash(cmd, timeout=120, background=False)` | Allowlist + denylist; output → variable |
-| `glob` | `glob(pattern, path=".")` | Shells out to `fd` |
-| `grep` | `grep(pattern, path=".", ...)` | Shells out to `ripgrep`. Do not hand-roll |
-| `ls` | `ls(path)` | `.gitignore`-aware |
-| `todo_write` | `todo_write(items)` | Not a real tool — a device to keep the plan in context. Keep it |
-| `bash_output` | `bash_output(shell_id, kill=False)` | Drains a `background=True` shell. Returns only what is new since the last read |
-| `web_search` | `web_search(query=None, url=None, ...)` | Tavily. `query` searches, `url` extracts, both crawl. Sub-agent only; output is always huge |
-| `ask_user_question` | `ask_user_question(question, options=None, ...)` | Pauses the turn. Fails clearly when no user is attached, rather than hanging |
-| `skill` | `skill(name)` | Loads a `SKILL.md` body on demand |
-| `repl` | `repl(code, timeout=120)` | The *main* agent's only tool. Runs in the session kernel |
-
-REPL-only primitives (main agent side):
-
-```python
-h       = await agent(prompt, difficulty="high", name="auth-expert", tools=[...], scope="src/auth/")
-_       = await agent_message.send(text, receiver_role="child", receiver_name="auth-expert")
-results = await gather(h1, h2, h3)
-subs    = await agent.list_subagents()      # survives compaction + kernel restart
-await compact.run()
-await refine.run("promote the retry-on-flaky-test pattern to a skill")
-```
+## 6. Tool Set
 
 Tools are ordinary Python functions. `@tool` derives the JSON Schema from the signature
-and the description from the docstring, so a tool is described exactly once. A parameter
-annotated `Runtime[T]` is hidden from the model and injected at call time — it carries
-identity, the approval mode, the cancellation flag, the output store, and the progress /
-approval / ask callbacks. See `core/harness/tools/base.py`.
+and the description from the docstring, so a tool is described exactly once — **the
+docstring is the prompt the model reads**. A parameter annotated `Runtime[T]` is hidden
+from the schema and injected at call time; it carries identity, approval mode, the
+cancellation flag, the output store, and the progress/approval/ask callbacks.
+See `core/harness/tools/base.py`.
 
-**Deferred to later phases:** notebook editing, multi-edit, image input.
+| Tool | Signature | Status / notes |
+| --- | --- | --- |
+| `read` | `read(path, offset=0, limit=None)` | ✓ line-numbered; elides over 8 KB |
+| `write` | `write(path, content)` | ✓ scope-gated; requires a prior read of an existing file |
+| `edit` | `edit(path, old, new)` | ✓ exact unique match; fails loudly on 0 or >1 |
+| `bash` | `bash(cmd, timeout=120, background=False)` | ⟳ add `cwd=`; **each call is a fresh process** (step 4) |
+| `bash_output` | `bash_output(shell_id, kill=False)` | ✓ drains a background shell, new output only |
+| `glob` | `glob(pattern, path=".")` | ✓ `fd`, falls back to `rg --files` then `pathlib` |
+| `grep` | `grep(pattern, path=".", ...)` | ✓ ripgrep. Do not hand-roll |
+| `ls` | `ls(path)` | ✓ `.gitignore`-aware |
+| `todo_write` | `todo_write(items)` | ✓ not a real tool — a device to keep the plan in context. Keep it |
+| `ask_user_question` | `ask_user_question(question, options=None)` | ✓ fails clearly with no user attached, rather than hanging |
+| `skill` | `skill(name)` | ✓ loads a `SKILL.md` body on demand |
+| `repl` | `repl(code, timeout=120)` | ⟳ backend swaps to `core/repl/` (step 7) |
+| `web_search` | `web_search(query=None, url=None)` | ✂ deferred — needs a second API key; MCP can cover it |
+| `task` | `task(prompt, name, tools=None, scope=None, difficulty=...)` | ✗ step 3 — sub-agent, solo mode only |
+| `send_message` | `send_message(to, subject, body, refs=None)` | ✗ step 10 — team mode only |
 
-**A2A scope:** messaging is restricted to the *nuclear family* — parent, sibling, child.
-This is deliberate; it prevents N² message storms across sessions.
+**Named sets** (`core/harness/tools/__init__.py`): `WORKER_TOOLS` is what a sub-agent
+gets — no `repl`, no `task`, because a sub-agent that can spawn is a sub-agent for which
+`max_depth` stops bounding anything. `READ_ONLY_TOOLS` is derived from declared
+permissions, not hand-listed, so it cannot drift.
 
----
+**Permissions are declared once and enforced elsewhere.** `@tool(permission=...)` states
+the class of side effect; `requires_approval(mode, permission)` and
+`is_forbidden(mode, permission)` in `approvals.py` decide what that means under the
+current mode. A tool never tests the mode itself — a tool that knows about `full-auto` is
+a tool that will disagree with the next one about what it means. Tools a mode forbids are
+never advertised; being offered a capability and then refused it wastes a turn.
 
-## 6. Reference Flow
+`NETWORK` is gated separately from the write/execute ordering: that ordering is about
+workspace mutation, while network egress is a disclosure risk. `plan` therefore *asks*
+for network rather than refusing it — refusing research in the mode that exists for
+research would be backwards.
 
-Task: *"Add Redis-backed rate limiting to the API endpoints, with tests."*
-
-**Turn 1 — orient (cheap, no sub-agents)**
-
-```python
-print(bash("fd -e py -d 3 . src/ | head -50"))   # ~40 lines, under the truncation limit
-```
-
-**Turn 2 — parallel scouting (token-heavy work pushed down)**
-
-```python
-scout = await agent(
-    "Read src/api/ and report: (1) HTTP framework, (2) existing middleware pattern, "
-    "(3) every endpoint definition as a file:line -> endpoint table. Do not modify files.",
-    difficulty="low", name="scout", tools=["read", "grep", "glob"],
-)
-probe = await agent(
-    "Does this repo already have a Redis client? Grep pyproject/requirements and config. "
-    "Answer yes/no plus location.",
-    difficulty="low", name="redis-probe", tools=["read", "grep"],
-)
-findings = await gather(scout, probe)
-print(findings[0][:2000])
-```
-
-`scout` may read 20 files and grep 300 KB. **None of those tokens reach the main agent** —
-it receives roughly 800 tokens of table.
-
-**Turn 3 — implement, with disjoint file scopes**
-
-```python
-ctx = f"Framework: FastAPI. Middleware at src/api/middleware/. No Redis client yet.\n{findings[0]}"
-session_ctx["shared"] = ctx
-
-impl = await agent(
-    f"{ctx}\n\nCreate src/api/middleware/ratelimit.py: sliding-window limiter using "
-    "redis.asyncio, configured by RATE_LIMIT_RPM. Only this file.",
-    difficulty="high", name="impl", tools=["read", "write", "edit", "bash"],
-    scope="src/api/middleware/",
-)
-test = await agent(
-    f"{ctx}\n\nWrite tests/test_ratelimit.py with fakeredis + pytest-asyncio. "
-    "Assume API: RateLimiter(redis, rpm).check(key) -> bool. Only this file.",
-    difficulty="medium", name="test", tools=["read", "write", "bash"],
-    scope="tests/",
-)
-await gather(impl, test)
-```
-
-**Turn 4 — verify and repair**
-
-```python
-out = bash("uv run pytest tests/test_ratelimit.py -x 2>&1 | tail -40")
-print(out)   # FAILED: 'RateLimiter' object has no attribute 'check'
-
-fixer = await agent(
-    f"Tests fail:\n{out}\n\nRead both files, reconcile the interface, rerun pytest until green.",
-    difficulty="high", name="fixer", tools=["read", "edit", "bash"],
-)
-await gather(fixer)
-```
-
-**Turn 5 — commit the answer**
-
-```python
-answer["content"] = """Added rate limiting:
-- src/api/middleware/ratelimit.py — sliding window, Redis backend
-- tests/test_ratelimit.py — 6 tests, all passing
-- Requires RATE_LIMIT_RPM (default 60)
-Not done: not yet wired into the app factory, see src/api/main.py:23"""
-answer["ready"] = True
-```
-
-**Budget outcome:** main agent context ≈ 12k tokens. The same task in a flat ReAct loop
-lands around 180k. That gap is the entire point of the architecture.
+**Deferred:** notebook editing, multi-edit, image input.
 
 ---
 
-## 7. When *Not* To Use RLM
+## 7. Session Format
 
-Prime Intellect's own ablations found the RLM scaffold **hurt** performance on math-python,
-despite permitting identical behavior to a plain LLM — the scaffolding overhead made the model
-reason worse. The lesson generalizes.
+`~/.stcode/sessions/<id>.jsonl` (or `./.stcode/sessions/` — `[session] dir`). One append
+per event, flushed. One file, three readers.
 
-Bypass the RLM path and run a flat agent loop when:
-- the task touches ≤ 2 files
-- no tool is expected to produce > 8 KB of output
-- the user asked a question rather than requested a change
-- total estimated context < 30k tokens
+```jsonl
+{"ts":"…","type":"meta","cwd":"/w","role":"backend-dev","model":"claude-opus-5"}
+{"ts":"…","type":"user","content":"Add rate limiting to the API"}
+{"ts":"…","type":"assistant","content":"Let me look at the middleware first."}
+{"ts":"…","type":"tool_call","id":"c1","name":"grep","arguments":{"pattern":"middleware"}}
+{"ts":"…","type":"tool_result","id":"c1","content":"src/api/mw.py:12: …","is_error":false}
+{"ts":"…","type":"usage","model":"claude-opus-5","difficulty":"high","in":12043,"out":881}
+{"ts":"…","type":"supervisor","content":"You have grepped 'middleware' 4×. Read mw.py."}
+{"ts":"…","type":"inbox","from":"ba","subject":"spec v2","refs":["/team/knowledge/spec.md"]}
+```
 
-Route this decision explicitly in `agent/router.py`. Do not let it be implicit.
+`messages()` folds records into `list[Message]`: `assistant` plus adjacent `tool_call`
+records become one message carrying `ToolUseBlock`s; `tool_result` records become one
+`user` message carrying `ToolResultBlock`s; `supervisor` and `inbox` become clearly
+prefixed `user` messages. `meta` / `usage` / `error` are skipped — they are for you and
+the supervisor, not the model.
+
+Swapping to a live database later replaces one class; `Agent` sees the same four methods.
+Do not write an abstraction for that now — a class with four methods **is** the abstraction.
 
 ---
 
-## 8. Tech Stack
+## 8. Daemon Protocol
+
+JSONL, one message per line, same framing on unix and TCP.
+
+```
+Client → Daemon
+{"type":"create","cwd":"/w","role":"backend-dev"}   → {"type":"session","id":"01HX…"}
+{"type":"attach","session":"01HX…"}                 # several clients may attach at once
+{"type":"sessions"}                                 → what this daemon is holding
+{"type":"push","text":"…"}
+{"type":"interrupt"}
+{"type":"approval","execution_id":"ab12","approved":true}
+{"type":"answer","execution_id":"cd34","text":"Postgres"}
+
+Daemon → Client
+{"type":"text_delta","text":"…"}
+{"type":"tool_started","id":"c1","name":"bash","arguments":{…}}
+{"type":"tool_finished","id":"c1","ok":true,"preview":"…"}
+{"type":"approval_request","execution_id":"ab12","tool":"bash","arguments":{…}}
+{"type":"question","execution_id":"cd34","question":"…","options":[…]}
+{"type":"turn_finished","usage":{"in":12043,"out":881}}
+{"type":"error","message":"…"}
+```
+
+**Three things to get right the first time:**
+
+1. **Approval is request–response, not a one-way event.** `on_approval` is
+   `async (ApprovalRequest) -> bool`. Over a socket it becomes: emit `approval_request`,
+   await a `Future`, resolve on the matching `execution_id`. `ApprovalRequest` already
+   carries `execution_id` and is already a pydantic model — **the harness needs no
+   change**. Same mechanism for `ask_user_question`. Do not "simplify" this into a
+   fire-and-forget event.
+2. **Detach must not kill the agent.** That is the entire reason the daemon exists. The
+   client drops, the agent keeps working, events keep landing in the session. On
+   re-attach the daemon replays from the session, then joins the live stream.
+3. **A `push` arriving mid-turn queues for the next turn.** It never interrupts the turn
+   in flight and never splices into it. This is exactly why `Agent` separates `push()`
+   from `events()` instead of offering only `run()` — it is what lets you attach to a
+   working agent and redirect it without destroying what it is doing. To actually stop
+   it, send `interrupt`.
+4. **Transport is configuration.** `unix` for solo, `tcp` for containers, WebSocket later
+   as a third adapter over the same protocol.
+
+---
+
+## 9. Team Mode
+
+```
+/team                                   # mounted into EVERY container
+├── knowledge/                          # shared truth; plain files
+│   ├── architecture.md
+│   ├── api-contract.md
+│   └── decisions/2026-09-03-rate-limit.md
+├── inbox/
+│   ├── backend-dev/01HX…-from-ba.json
+│   └── frontend-dev/
+└── artifacts/                          # large output: reports, diffs, logs
+```
+
+### 9.1 Who dispatches
+
+**You do, per role.** There is no lead agent, no scheduler, no coordinator. The real flow:
+
+1. You attach to the **BA** container and describe the work.
+2. BA analyses it, writes the spec into `/team/knowledge/`, then `send_message`s
+   frontend-dev and backend-dev.
+3. You switch to another container to watch, and push a message mid-run if it drifts.
+
+Every step of that already has a mechanism. BA calls `send_message` like any other role;
+"BA is where you start" is a *convention* living in `roles/ba.md` — one English sentence,
+not a class. If a `lead` role is ever wanted, it is one more markdown file. That is why
+roles must stay data.
+
+### 9.2 Shared knowledge and messaging
+
+**`knowledge/` needs no new tool.** It is a directory; `read`, `write`, `grep`, `ls`,
+`edit` already work on it. Add `/team/knowledge` to the write scope and state the
+convention in the role prompt. The thing everyone wants to build as a "knowledge base
+service" is `mkdir`.
+
+**Convention, enforced by prompt rather than code:** write to `knowledge/` append-only
+*per file* — one decision, one file at `decisions/<date>-<topic>.md`, never edit a file
+another role owns. Same discipline as the session. No locks, no CRDT, no merge.
+
+**Exactly one new tool**, `send_message`, whose docstring pushes `refs` over content:
+messages carry pointers, not payloads. That single rule is what keeps team token cost
+from growing with N².
+
+### 9.3 Roles are data
+
+`harness/prompts/roles/<role>.md` states what the role owns, whose output it reads, and
+who it reports to. A new role is a new file, not a code change. Any file in that directory
+is a valid role; `[team] role` selects one and `Harness.create(role=…)` loads it as a
+prompt section, the same mechanism as `project_instructions`.
+
+### 9.4 Deployment contract
+
+The repo ships a `Dockerfile` and this contract, nothing more:
+
+| | |
+| --- | --- |
+| Mounts | `/team` (shared volume), `/workspace` (where the agent clones), config read-only |
+| Env | `STCODE_CONFIG`, `STCODE_SANDBOX=1` (unlocks `full-auto`, rule 5), provider keys |
+| Port | `[daemon] transport="tcp"`, default 7717 |
+| Role | `[team] role`, which must match a file in `prompts/roles/` |
+| Credentials | SSH key mounted read-only, if git integration uses a real remote |
+
+### 9.5 Open decision — how work gets integrated
+
+**Not decided. Settle it at step 10, not before.** The current leaning: your git SSH
+credential is mounted into every container (path in `[team.git]`), and the role prompt
+tells the agent to check out before writing code; a private repo with no credential
+available means the agent writes into the shared volume instead.
+
+This affects **no step before 10**, and the three candidates — real remote + PRs, a bare
+repo on `/team`, a shared checkout — differ more in `roles/*.md` wording than in code.
+Recorded here so nobody later mistakes the leaning for a decision.
+
+**Failure modes to design against** — these are the ones that actually show up:
+
+| Failure | Cause | Guard |
+| --- | --- | --- |
+| Deadlock — two roles waiting on each other | nobody has a timeout | supervisor detects "waiting >20 min" |
+| Message storm | no discipline | `refs` not content; role prompt names who to report to |
+| Divergent knowledge | no owner | each `knowledge/` file has exactly one owning role |
+| Cost explosion | multi-agent ≈ 15× tokens | `[team] max_agents`; per-role token ceiling; cheap tiers for support roles |
+| Nobody integrates | no merge owner | exactly one role may merge |
+
+---
+
+## 10. Tech Stack
 
 | Concern | Choice | Why |
 | --- | --- | --- |
-| REPL | `jupyter_client` + `ipykernel` | Persistent namespace, native async, interrupt, clean output capture |
-| LLM client | `httpx` + `openai` SDK (async) | OpenAI-compatible endpoints are the common denominator |
-| Concurrency | `asyncio`, `anyio`, `asyncer` | `Semaphore` for pool limits, `TaskGroup` for fan-out |
-| TUI | `textual` | Agents view, streaming render, attach/detach |
-| Schemas | `pydantic` v2 | Tool signature → JSON Schema for free |
+| REPL | plain `python -u` subprocess + JSONL | Persistent namespace, crash isolation, SIGINT, zero dependencies. Replaces jupyter |
+| LLM clients | `anthropic`, `openai`, `google-genai` (async) | One adapter each; normalise the wire format there and nowhere else |
+| Concurrency | `asyncio`, `anyio`, `asyncer` | `gather` for fan-out, `Semaphore` for caps |
+| TUI | `textual` | Streaming render, attach/detach |
+| Schemas | `pydantic` v2 | Signature → JSON Schema for free |
 | CLI | `typer` | |
-| Config | `tomllib` (read) + `tomli-w` (write) | The UI writes config back; stdlib is read-only |
-| Sandbox | `docker` SDK / devcontainer CLI | Phase 2+ |
-| Search | `ripgrep` (pip wheel), `fd` (subprocess, optional) | Faster and more correct than anything hand-written. `ripgrep` is a declared dependency — the wheel drops an `rg` binary next to the interpreter, so `grep` works on a fresh checkout with no system packages. `fd` has no such wheel, so `glob` falls back to `rg --files` then `pathlib` |
-| Tool schemas | `docstring-parser` | Signature + `Args:` block → JSON Schema, so a tool is described once |
-| MCP | `mcp` (official SDK) | We adapt it; we do not reimplement the protocol |
-| Web | `tavily` REST via `httpx` | No extra SDK — three endpoints behind one tool |
+| Config | `tomllib` (read) + `tomli-w` (write) | Stdlib is read-only; the UI writes config back |
+| Search | `ripgrep` (pip wheel), `fd` (optional) | The wheel drops `rg` next to the interpreter, so `grep` works on a fresh checkout |
+| Tool schemas | `docstring-parser` | Signature + `Args:` → JSON Schema, described once |
+| MCP | `mcp` (official SDK) | We adapt it; we never reimplement the protocol |
+| Sandbox | Docker | Team mode; also what makes `full-auto` legal (rule 5) |
 | Packaging | `uv` | |
 
-**Explicitly not used: LangChain.** Also avoid LangGraph, CrewAI, and AutoGen. The whole
-premise is programmatic control over context; a framework that owns the loop defeats it.
+**Removed in step 1:** `ipykernel`, `jupyter-client`.
+
+**Explicitly not used: LangChain.** Also LangGraph, CrewAI, AutoGen. The premise is
+programmatic control over context and the loop; a framework that owns the loop defeats it.
 
 **Knowledge you need that isn't a library:**
 
-1. **Jupyter messaging protocol** — `execute_request`, `iopub` streams, `execute_reply`.
-   This is the most common place to get stuck. Read the spec before writing kernel code.
-2. **SSE streaming + tool-call delta accumulation.** OpenAI streams
+1. **SSE streaming + tool-call delta accumulation.** OpenAI streams
    `tool_calls[].function.arguments` in fragments; Anthropic uses `content_block_delta`.
-   Normalize both in `core/providers/`, never above it.
-3. **Async lifecycle** — cancellation, timeouts, graceful shutdown. Ctrl-C with five
+   Normalise both in `core/providers/`, never above it.
+2. **Prompt caching.** Keep the system prompt and tool definitions byte-stable across
+   turns. Single biggest cost lever, and the reason supervisor nudges go into `messages`.
+3. **Async lifecycle.** Cancellation, timeouts, graceful shutdown. Ctrl-C with three
    sub-agents in flight must leave no orphans and no half-written files.
-4. **Token counting** — `tiktoken` for OpenAI-family; Anthropic exposes a count endpoint.
-   Needed for compaction triggers and budget enforcement.
-5. **Prompt caching** — keep system prompt and tool definitions byte-stable across turns.
-   This is the single biggest cost lever.
-6. **IPC** — Unix domain socket with JSONL framing for daemon ↔ CLI ↔ A2A.
+4. **JSONL framing over sockets and pipes.** Used in three places now: daemon protocol,
+   REPL worker, session file. Same discipline each time — one object per line, flush.
+5. **Token counting.** `tiktoken` for OpenAI-family, Anthropic's count endpoint. Needed
+   when compaction lands, not before.
 
 ---
 
-## 9. Important Notices
+## 11. Important Notices
 
-**Arbitrary code execution.** The agent writes Python and runs it with your privileges.
-Containerize before any autonomous run. Never enable `--autonomous` on the host.
+**Arbitrary code execution.** The agent runs commands and Python with your privileges.
+Rule 5 is the mitigation and it is enforced in `_guard_autonomy`, not by discipline.
 
-**Total token cost goes up, not down.** Only the *main agent's* context shrinks. Sub-agent
-tokens can be 3–5× the flat-loop total. Mitigate by routing sub-agents to cheaper tiers —
-this is what `difficulty` exists for — while the main agent stays on a strong model.
+**Multi-agent costs more, not less.** Anthropic measured multi-agent at **~15× the tokens**
+of chat and single-agent at ~4×, with token volume explaining **80% of performance
+variance** — meaning much of what looks like architectural cleverness is just paying more.
+They also list **"most coding tasks"** as a *poor* fit for multi-agent: few parallelisable
+subtasks, heavy interdependencies. Team mode pays off only when roles work on genuinely
+separable things (spec / UI / API / pipeline), which is exactly why rule 2 draws the
+boundary at the service, not the file.
 
-**Latency increases in every measured environment.** The blog found this consistently, partly
-because models do not reliably parallelize even when they can. For an interactive CLI this is
-a real UX problem: stream progress and expose the agents view so the session never looks hung.
+**Latency increases.** Models do not reliably parallelise even when they can. Stream
+progress and surface what each agent is doing, or a working session looks hung.
 
-**No model has been trained on this scaffold.** Expect the agent to under-use `agent()` and
-over-use plain REPL code. Compensate with explicit strategy prompts (the "env tips" pattern):
-decompose → fan out → synthesize → iterate → commit `answer`.
+**No model is trained on this scaffold.** Expect under-use of `task` and over-use of plain
+tool calls. Compensate in the `task` docstring — it must force an output format and a
+scope, because a vaguely-described sub-agent is the number one cause of duplicated and
+off-target work.
 
-**Kernel state bloats.** A three-hour session can accumulate gigabytes of variables. Enforce
-a GC policy from day one: spill above a size threshold, LRU-evict, `del` unreferenced vars.
-Run the collector asynchronously so it never blocks a turn.
+**Reward hacking is real and already documented.** Prime Agent, given a refinement loop,
+found it could bypass Factorio's rules via RCON and **promoted cheating into a skill** —
+even when told not to. The coding analogue is editing the test to make it pass. This is
+why rule 6 exists. If you ever revisit it, the verifier must be outside the agent's write
+scope, and any test-file edit during a "make the tests pass" task must be flagged.
 
-**Reward hacking is real.** Prime Agent, given a refinement loop, discovered it could bypass
-Factorio's rules via RCON and promoted *cheating* into a skill. The coding analogue is editing
-the test to make it pass. Keep a verifier the agent cannot modify, and treat any test-file edit
-during a "make tests pass" task as suspect.
+**Debuggability is designed in, not retrofitted.** Agent → tool → sub-agent leaves no
+natural stack trace. The session JSONL *is* the trace; keep every event in it, including
+the ones the model never sees.
 
-**Debuggability must be designed in, not retrofitted.** Agent writes code → code spawns agent →
-agent calls tool → tool returns a variable. When it goes wrong, there is no natural stack trace.
-Structured logging and a trajectory viewer are Phase 1 requirements, not nice-to-haves.
-
----
-
-## 10. Roadmap
-
-| Phase | Scope | Folders | Done when |
-| --- | --- | --- | --- |
-| 0 | Shell: gateway + providers, config, CLI, chat/settings UI | `core/providers/`, `core/configs.py` | ✓ done — `stcode` runs, configures itself, and streams a flat reply |
-| 1 | Single agent + IPython kernel + 6 core tools + 1 provider. `depth=0` | `core/kernel/` ✓, `core/harness/` ✓ | Can complete a two-file change end-to-end with a trajectory log — kernel and harness are in; the turn loop that drives them (`core/agent/`) is not |
-| 2 | Async `agent()`, pool, gateway with fallback, `difficulty` routing | `core/agent/`, `core/providers/gateway.py` | Parallel fan-out works under a concurrency cap and a token budget |
-| 3 | Daemon, socket IPC, A2A messaging, persistent sub-agents, agents view | `core/daemon/` | Detach/reattach mid-run; child survives parent compaction |
-| 4 | Continual Harness — prompt/memory/skill/subagent CRUD, `/refine` | `core/harness/` | A repeated failure is promoted to a skill and reused next session |
-
-Read the `prime-agent` source before starting Phase 2. It will save days.
+**Cost visibility.** Every LLM call lands in the session as a `usage` record. That is the
+one place. Do not add a second logger — see rule 7.
 
 ---
 
-## 11. Conventions
+## 12. Roadmap
+
+Six phases. Each step leaves something that runs; nothing is a big-bang integration.
+The full table with estimates is `EXPECTED.md` §15.
+
+### Phase 0 — Shell ✓ done
+Providers + gateway, config, CLI, chat/settings UI, harness tools, approval modes.
+`stcode` runs, configures itself, streams a flat reply. **~9k lines, and no turn loop.**
+
+### Phase 1 — The loop (steps 1–4)
+> *Done when: a two-file change completes end to end with a readable session log.*
+
+1. **Cleanup, ~2h.** Delete `core/kernel/`, `store.py`, `namespace()`, `stcode/platform/`;
+   move `truncate.py` → `core/common/`. Fix the elide hint (rule 1). Add config fallback
+   to `_resolve_route`. Drop `ipykernel` + `jupyter-client`.
+2. **`core/session/`, ~120 lines.** Create → append → resume → `messages()` round-trips.
+3. **`core/agent/`, ~250 lines.** The turn loop; no supervisor, no mailbox yet.
+4. **Prompt caching + git context + `bash(cwd=)`, ~65 lines.** Turn 2 onward ~10× cheaper;
+   the agent knows its branch and `git status`.
+
+### Phase 2 — Daemon and client (steps 5–6)
+> *Done when: detach/re-attach mid-run works, and `full-auto` refuses to start on the host.*
+
+5. **`core/daemon/`, ~200 lines.** Protocol (§8), approval correlation, autonomy guard.
+6. **TUI becomes a client, ~120 lines.** Replace `cli/app.py:_stream_reply` with the
+   socket; wire Esc → `interrupt`. **This is the point it is usable daily.**
+
+### Phase 3 — Token economics (steps 7–8)
+> *Done when: three MCP servers are connected and the prompt prefix does not grow.*
+
+7. **`core/repl/`, ~120 lines.** Subprocess worker, `inject` for `tool_out`.
+8. **MCP-as-code, ~90 lines.** `mcp.py` generates `mcp_servers/*.py` instead of
+   registering tool definitions.
+
+### Phase 4 — Autonomy (step 9)
+> *Done when: a deliberately looping task is caught and redirected.*
+
+9. **Supervisor, ~80 lines.** Heuristics first, cheap model second, nudge into `messages`.
+
+### Phase 5 — Team (step 10)
+> *Done when: two containers, two roles, one feature shipped through `/team`.*
+
+10. **`core/team/`, ~120 lines**, plus the `Dockerfile` (§9.4). Mailbox, `send_message`,
+    `roles/*.md`, daemon watches the inbox and wakes an idle agent.
+    **Settle the git integration question (§9.5) here.**
+    **Before starting: write ~20 real evaluation tasks.** Without them there is no way to
+    tell whether team mode helps or merely spends 15× the tokens — and §11 says that is
+    the live question, not a rhetorical one.
+
+### Later
+`web_search`, compaction with a visible threshold, sessions in a live database, provider
+failover, `@`-mention in the TUI, `written_files` tracking.
+
+---
+
+## 13. Conventions
 
 - Python 3.12+, `uv` for everything. `uv run pytest` before claiming anything works.
-- Type hints mandatory in `core/` and `kernel/`. `mypy --strict` on those packages.
-- Every tool is a pydantic model with a docstring — the docstring *is* the prompt the model sees.
-- No blocking I/O inside the agent loop. If it can take 100 ms, it is `async`.
-- Log every LLM call with model, difficulty, token counts, and cost. No exceptions.
+- Type hints mandatory in `core/`. `mypy --strict` on it.
+- Tests live beside the code as `<package>/_test.py` (see `core/harness/_test.py`,
+  `core/providers/_test.py`), matched by `python_files = *_test.py test_*.py`.
+- Every tool has a docstring, because **the docstring is the prompt the model sees**.
+  Write it for the model: imperative, concrete, no rationale. Rationale goes in comments.
+- No blocking I/O in the agent loop. If it can take 100 ms, it is `async`. The exception
+  is `Session.append` — one line to an open file, deliberately sync.
 - Commit messages: `area: what changed`. Keep them short.
+- **When you change the architecture, update `docs/EXPECTED.md` first, then this file.**
+  A spec that has drifted from the code is worse than no spec: every agent that reads it
+  builds in the wrong direction, and none of them will tell you.

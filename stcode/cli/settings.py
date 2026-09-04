@@ -21,8 +21,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static
 
 from stcode.cli import labels
-from stcode.core.configs import GatewayConfig, ProviderConfig, apply_provider_settings
-from stcode.core.providers import PROVIDERS, key_env_for
+from stcode.core.configs import GatewayConfig, apply_provider_settings
+from stcode.core.providers import PROVIDERS, ProviderConfig, key_env_for
 
 
 class SettingsScreen(ModalScreen[GatewayConfig | None]):

@@ -14,9 +14,8 @@ from __future__ import annotations
 
 import os
 
-from stcode.core.approvals import APPROVAL_MODES, ApprovalMode
-from stcode.core.configs import ProviderConfig
-from stcode.core.providers import PROVIDERS, default_model_for, key_env_for
+from stcode.core.harness.approvals import APPROVAL_MODES, ApprovalMode
+from stcode.core.providers import PROVIDERS, ProviderConfig, default_model_for, key_env_for
 
 # --------------------------------------------------------------------------- wordmark
 
