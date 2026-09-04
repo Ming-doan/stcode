@@ -21,6 +21,7 @@ and mutating its scope between spawns is exactly the bug that rule exists to pre
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from pathlib import Path
 from typing import Any, Iterator, MutableMapping, Sequence
@@ -68,6 +69,7 @@ class Harness:
         on_approval: ApprovalFn | None = None,
         on_ask: AskFn | None = None,
         mcp: MCPManager | None = None,
+        cancel: asyncio.Event | None = None,
     ) -> None:
         self.context = context if context is not None else HarnessContext()
         self.registry = ToolRegistry(tools if tools is not None else BUILTIN_TOOLS)
@@ -95,6 +97,11 @@ class Harness:
         self.on_progress = on_progress
         self.on_approval = on_approval
         self.on_ask = on_ask
+        # One event, shared by every `Runtime` this harness hands out, so a single
+        # `set()` reaches all the tools currently in flight. `Runtime` has watched a
+        # cancellation flag since it was written; nothing ever set it (EXPECTED.md §14
+        # item 4), because a per-call event nobody keeps a reference to cannot be.
+        self.cancel = cancel if cancel is not None else asyncio.Event()
 
     # ---- construction ----
 
@@ -181,6 +188,9 @@ class Harness:
             on_approval=self.on_approval,
             on_ask=self.on_ask,
             mcp=self.mcp,
+            # Interrupting the parent must reach into its children: a sub-agent still
+            # editing files after the user pressed Esc is the orphan §10 warns about.
+            cancel=self.cancel,
         )
         child.registry = self.registry
         return child
@@ -229,6 +239,7 @@ class Harness:
         """
         return Runtime(
             context=self.context,
+            cancel=self.cancel,
             session_id=self.session_id,
             agent_name=self.agent_name,
             depth=self.depth,
