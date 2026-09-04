@@ -1,5 +1,12 @@
 """
-Anthropic LLM Provider
+Anthropic LLM Provider.
+
+**Prompt caching lives here and nowhere else.** CLAUDE.md §10 calls it the single
+biggest cost lever, and it is the one optimisation that has to be applied at the
+provider boundary because only Anthropic asks for it explicitly (OpenAI caches long
+prefixes on its own; Gemini needs a separate cached-content resource, which is a
+different feature). See the `prompt caching` section at the bottom for where the
+markers go and why there are three of them.
 """
 
 from __future__ import annotations
@@ -81,9 +88,9 @@ class AnthropicProvider(BaseModelProvider):
         """
         kwargs: dict[str, Any] = {}
         if system:
-            kwargs["system"] = system
+            kwargs["system"] = _mark_last([{"type": "text", "text": system}])
         if tools:
-            kwargs["tools"] = [self._to_tool(tool) for tool in tools]
+            kwargs["tools"] = _mark_last([self._to_tool(tool) for tool in tools])
             if parallel_tool_calls is not None:
                 kwargs["tool_choice"] = {
                     "type": "auto",
@@ -109,12 +116,21 @@ class AnthropicProvider(BaseModelProvider):
         async with self._client.messages.stream(
             model=model,
             max_tokens=max_tokens,
-            messages=[self._to_message(message) for message in messages],
+            messages=_mark_last_block([self._to_message(message) for message in messages]),
             **kwargs,
         ) as stream:
             async for event in stream:
                 if event.type == "message_start":
-                    usage.input_tokens = event.message.usage.input_tokens
+                    started = event.message.usage
+                    usage.input_tokens = started.input_tokens
+                    # Present only when caching is in play, and the whole point of it:
+                    # a non-zero read on turn 2 is the evidence the prefix held.
+                    usage.cache_creation_input_tokens = (
+                        getattr(started, "cache_creation_input_tokens", None) or 0
+                    )
+                    usage.cache_read_input_tokens = (
+                        getattr(started, "cache_read_input_tokens", None) or 0
+                    )
                 elif event.type == "content_block_start":
                     if event.content_block.type == "tool_use":
                         pending_calls[event.index] = event.content_block.id
@@ -177,3 +193,51 @@ class AnthropicProvider(BaseModelProvider):
         if stop_reason in ("end_turn", "tool_use", "max_tokens", "stop_sequence", "pause_turn", "refusal"):
             return stop_reason  # type: ignore[return-value]
         return "end_turn"
+
+
+# ---- prompt caching --------------------------------------------------------------
+#
+# Anthropic caches the request *prefix*, in the order tools -> system -> messages, up
+# to each breakpoint. Three breakpoints, and each earns its place:
+#
+#   last tool     `registry.definitions()` sorts by name, so the tool block is
+#                 byte-stable for a session and survives a turn where the system
+#                 prompt moved underneath it.
+#   last system   Stable too, except on turns where the todo list changed —
+#                 `environment_section` is deliberately last for exactly this reason.
+#   last message  The one that actually matters in an agent loop. After ten tool calls
+#                 the history dwarfs both of the above, so without a breakpoint here
+#                 "turn 2 is ~10x cheaper" would be a rounding error rather than a
+#                 fact. Each turn's breakpoint is the next turn's cache hit.
+#
+# A write costs 1.25x and a read 0.1x, so this pays for itself on the second request
+# and every one after. A single-shot call pays the premium for nothing — the deliberate
+# trade, because this project is an agent loop.
+
+CACHE_CONTROL = {"type": "ephemeral"}
+
+
+def _mark_last(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put a cache breakpoint on the final entry of `blocks`."""
+    if blocks:
+        blocks[-1] = {**blocks[-1], "cache_control": CACHE_CONTROL}
+    return blocks
+
+
+def _mark_last_block(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put a cache breakpoint on the last content block of the last message.
+
+    A string `content` is promoted to a one-block list first: `cache_control` is a
+    property of a block, and there is nowhere to hang it on a bare string.
+    """
+    if not messages:
+        return messages
+    last = dict(messages[-1])
+    content = last["content"]
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    if not content:
+        return messages
+    last["content"] = [*content[:-1], {**content[-1], "cache_control": CACHE_CONTROL}]
+    messages[-1] = last
+    return messages

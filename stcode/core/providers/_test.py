@@ -460,3 +460,77 @@ async def test_gateway_does_not_retry_after_partial_output(monkeypatch):
             received.append(event)
     assert len(received) == 1
     assert fake.calls == 1  # no retry attempted despite _is_retryable always returning True
+
+
+# ---- prompt caching ---------------------------------------------------------------
+
+
+def _sent(monkeypatch, **stream_kwargs):
+    """Capture the request body the Anthropic adapter builds, without a network call."""
+    captured: dict = {}
+
+    class FakeStream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        def __aiter__(self):
+            async def empty():
+                return
+                yield  # pragma: no cover
+
+            return empty()
+
+    provider = AnthropicProvider(api_key="k")
+
+    def fake_stream(**kwargs):
+        captured.update(kwargs)
+        return FakeStream()
+
+    monkeypatch.setattr(provider._client.messages, "stream", fake_stream)
+    return provider, captured
+
+
+async def test_cache_breakpoints_land_on_the_last_tool_system_and_message(monkeypatch):
+    """Anthropic caches the request prefix up to each breakpoint, in the order
+    tools -> system -> messages. All three, or the history — the bulk after ten tool
+    calls — is re-billed in full every turn."""
+    provider, captured = _sent(monkeypatch)
+    tools = [
+        ToolDefinition(name="a", description="A", input_schema={"type": "object"}),
+        ToolDefinition(name="b", description="B", input_schema={"type": "object"}),
+    ]
+    async for _ in provider.stream(
+        [Message(role="user", content="one"), Message(role="assistant", content="two")],
+        model="claude-opus-5",
+        system="be helpful",
+        tools=tools,
+    ):
+        pass
+
+    mark = {"type": "ephemeral"}
+    assert "cache_control" not in captured["tools"][0]
+    assert captured["tools"][-1]["cache_control"] == mark
+    assert captured["system"][-1]["cache_control"] == mark
+
+    # A string `content` is promoted to a block list — there is nowhere to hang
+    # cache_control on a bare string.
+    assert captured["messages"][0]["content"] == "one"
+    assert captured["messages"][-1]["content"][-1]["cache_control"] == mark
+
+
+async def test_no_tools_or_system_means_no_stray_breakpoints(monkeypatch):
+    provider, captured = _sent(monkeypatch)
+    async for _ in provider.stream([Message(role="user", content="hi")], model="m"):
+        pass
+    assert "tools" not in captured and "system" not in captured
+    assert captured["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_usage_carries_the_cache_counters():
+    """Without these, "turn 2 is ~10x cheaper" is an unverifiable claim."""
+    usage = Usage(input_tokens=12, cache_read_input_tokens=9000)
+    assert usage.cache_creation_input_tokens == 0
+    assert usage.model_dump()["cache_read_input_tokens"] == 9000

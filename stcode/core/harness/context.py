@@ -21,6 +21,7 @@ old contents are simply gone.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -193,4 +194,68 @@ class TodoList(BaseModel):
     items: list[TodoItem] = Field(default_factory=list)
 
 
-__all__ = ["DEFAULT_IGNORED_DIRS", "HarnessContext", "TodoItem", "TodoList", "TodoStatus"]
+# ---- repository state ------------------------------------------------------------
+
+GIT_TIMEOUT = 5.0
+"""A `git` call that takes longer than this is a repository so large or a filesystem so
+slow that blocking session startup on it is the wrong trade. The prompt loses one
+section; the agent can still run `git status` itself."""
+
+_GIT_QUERIES = (
+    ("Branch", ("rev-parse", "--abbrev-ref", "HEAD")),
+    ("Status", ("status", "--short", "--branch")),
+    ("Recent commits", ("log", "-5", "--oneline", "--no-decorate")),
+)
+
+
+async def git_context(cwd: Path) -> str:
+    """Branch, working-tree status, and the last five commits, as a prompt section.
+
+    Sampled once at `Harness.create` and never refreshed — EXPECTED.md §14 item 2 is
+    explicit about this. It is the highest quality-per-line addition to the prompt, and
+    re-running it per turn would move the prompt every turn and undo the caching that
+    item 1 just bought.
+
+    Not a repository, or `git` not installed: returns "". A missing section is correct
+    here, not an error — plenty of work happens outside a checkout.
+    """
+    async def run(arguments: tuple[str, ...]) -> str:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "git", "-C", str(cwd), *arguments,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(process.communicate(), GIT_TIMEOUT)
+        except (OSError, asyncio.TimeoutError):
+            return ""
+        if process.returncode != 0:
+            return ""
+        return stdout.decode("utf-8", errors="replace").strip()
+
+    if not await run(("rev-parse", "--is-inside-work-tree")):
+        return ""
+
+    sections = await asyncio.gather(*(run(arguments) for _, arguments in _GIT_QUERIES))
+    lines = ["Repository:"]
+    for (label, _), output in zip(_GIT_QUERIES, sections):
+        if not output:
+            continue
+        if "\n" in output:
+            lines.append(f"{label}:")
+            lines += [f"  {line}" for line in output.splitlines()[:12]]
+        else:
+            lines.append(f"{label}: {output}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+__all__ = [
+    "DEFAULT_IGNORED_DIRS",
+    "GIT_TIMEOUT",
+    "HarnessContext",
+    "TodoItem",
+    "TodoList",
+    "TodoStatus",
+    "git_context",
+]

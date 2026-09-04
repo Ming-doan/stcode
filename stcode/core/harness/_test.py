@@ -14,6 +14,7 @@ closed one.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 from typing import Annotated, Any, Coroutine, Iterator, TypeVar
 
@@ -645,3 +646,57 @@ def test_asking_reaches_the_callback(tmp_path: Path, run: Any) -> None:
     result = run(harness.invoke("ask_user_question", {"question": "A or B?", "options": ["A", "B"]}))
     assert "the second one" in result.content
     assert asked[0].options == ["A", "B"]
+
+
+# ---- step 4: caching, git context, bash cwd -------------------------------------
+
+
+def test_git_context_reports_the_repository_and_stays_quiet_outside_one(
+    tmp_path: Path, run: Any
+) -> None:
+    from stcode.core.harness.context import git_context
+
+    assert run(git_context(tmp_path)) == ""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for command in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "config", "user.email", "a@b.c"],
+        ["git", "config", "user.name", "A"],
+        ["git", "commit", "-q", "--allow-empty", "-m", "first commit"],
+    ):
+        subprocess.run(command, cwd=repo, check=True)
+    (repo / "dirty.txt").write_text("x")
+
+    summary = run(git_context(repo))
+    assert "Branch: main" in summary
+    assert "dirty.txt" in summary
+    assert "first commit" in summary
+
+
+def test_git_context_is_sampled_once_at_create_not_per_turn(tmp_path: Path, run: Any) -> None:
+    """Re-sampling per turn would move the prompt every turn and undo the caching that
+    the same step just bought (EXPECTED.md §14 item 2)."""
+    harness = run(Harness.create(cwd=tmp_path, load_mcp=False, load_git=False))
+    assert harness.context.git == ""
+
+    harness.context.git = "Repository:\nBranch: main"
+    assert "Branch: main" in harness.system_prompt()
+    # ...and it sits in the turn-varying tail, not the cached prefix.
+    prompt = harness.system_prompt()
+    assert prompt.index("Branch: main") > prompt.index("## How to communicate")
+
+
+def test_bash_runs_in_a_given_subdirectory(tmp_path: Path, run: Any) -> None:
+    """Each call is a fresh process, so `cd` in one does not reach the next — `cwd` is
+    the supported way to work somewhere else (EXPECTED.md §14 item 3)."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "marker.txt").write_text("here")
+    harness = Harness(HarnessContext(cwd=tmp_path), approval_mode="full-auto")
+
+    assert "marker.txt" in run(harness.invoke("bash", {"command": "ls", "cwd": "sub"})).content
+    assert "marker.txt" not in run(harness.invoke("bash", {"command": "ls"})).content
+
+    missing = run(harness.invoke("bash", {"command": "ls", "cwd": "nope"}))
+    assert missing.is_error and "not a directory" in missing.content

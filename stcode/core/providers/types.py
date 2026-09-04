@@ -85,8 +85,17 @@ class Message(BaseModel):
 
 
 class Usage(BaseModel):
+    """Token counts for one completion.
+
+    The two cache fields stay 0 for providers that cache implicitly (OpenAI) or not at
+    all. They are here because "turn 2 is ~10x cheaper" is otherwise an unverifiable
+    claim: `cache_read_input_tokens` on turn 2 is the evidence, and the agent writes it
+    into the session where anyone can look."""
+
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
 
 class TextDelta(BaseModel):

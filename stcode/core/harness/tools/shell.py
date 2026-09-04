@@ -19,6 +19,13 @@ prompt at all, so an allowlist of read-only commands is downgraded to READ per c
 **Never hang.** stdin is closed, pagers are disabled, and every prompt-driven variable
 is set to non-interactive. A command that stops to ask a question stops the whole turn,
 and unlike a failure it produces nothing to react to.
+
+**Each call is a fresh process, and the model will assume otherwise.** `cd src && ...`,
+`export`, and `source .venv/bin/activate` all vanish when the call returns. A persistent
+shell would need a sentinel protocol to know when a command finished, so the answer is
+the `cwd` argument plus a docstring that says so outright (EXPECTED.md §14 item 3). This
+goes from annoying to broken in team mode, where an agent clones a repository and then
+has to work inside it.
 """
 
 from __future__ import annotations
@@ -236,6 +243,7 @@ async def bash(
     command: str,
     timeout: Annotated[float, Field(gt=0, le=MAX_TIMEOUT)] = DEFAULT_TIMEOUT,
     background: bool = False,
+    cwd: str = "",
     description: str = "",
     runtime: Runtime[HarnessContext] = None,  # type: ignore[assignment]
 ) -> str:
@@ -245,6 +253,12 @@ async def bash(
     `glob`, and `grep` are faster than `cat`, `find`, and `grep`, and their output is
     shaped for you rather than for a terminal. Reach for this when you need a real
     program: a test runner, a build, `git`, a package manager.
+
+    **Every call is a new process.** Nothing carries over between calls — not the
+    working directory, not `export`ed variables, not an activated virtualenv. `cd src`
+    in one call has no effect on the next one. To work in a subdirectory, pass `cwd`;
+    to use a virtualenv, call its binaries by path (`.venv/bin/pytest`) or prefix the
+    command (`uv run pytest`).
 
     The command runs with no stdin and no pager, so anything that would stop to ask a
     question fails instead of hanging. Quote paths containing spaces.
@@ -257,6 +271,8 @@ async def bash(
         command: The command line to run.
         timeout: Seconds to wait before giving up and killing it.
         background: Return immediately and keep the command running.
+        cwd: Directory to run in, relative to the session root. Defaults to the
+            session root itself.
         description: A 5-10 word description of what this does, shown to the user
             while it runs. e.g. "Run the unit tests".
     """
@@ -265,13 +281,17 @@ async def bash(
     if refusal:
         raise ToolError(f"`{command}` was not run — {refusal}")
 
+    working_dir = context.resolve(cwd) if cwd else context.cwd
+    if not working_dir.is_dir():
+        raise ToolError(f"`{command}` was not run — {working_dir} is not a directory.")
+
     env = {**context.process_env(), **NON_INTERACTIVE_ENV}
     if description:
         await runtime.progress(description)
 
     process = await asyncio.create_subprocess_shell(
         command,
-        cwd=str(context.cwd),
+        cwd=str(working_dir),
         env=env,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,

@@ -273,9 +273,8 @@ class Agent:
                 self.session.append(
                     type="usage",
                     difficulty=self.difficulty,
-                    input_tokens=event.usage.input_tokens,
-                    output_tokens=event.usage.output_tokens,
                     stop_reason=event.stop_reason,
+                    **event.usage.model_dump(),
                 )
             yield event
 

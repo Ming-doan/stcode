@@ -379,3 +379,22 @@ def test_create_wires_config_through_to_harness_and_session(tmp_path: Path, run:
     # Plan mode forbids EXECUTE, so `task` is registered and correctly not advertised.
     assert "task" in agent.harness.registry and "task" not in agent.harness.tool_names()
     run(agent.aclose())
+
+
+def test_cache_counters_reach_the_session(tmp_path: Path, run: Any) -> None:
+    """Step 4's outcome has to be checkable after the fact, and the session is the one
+    place it is recorded (rule 7 — no second logger)."""
+    turn = [
+        TextDelta(text="ok"),
+        MessageStop(
+            stop_reason="end_turn",
+            usage=Usage(input_tokens=3, cache_read_input_tokens=9000, cache_creation_input_tokens=0),
+        ),
+    ]
+    agent = build(tmp_path, [turn])
+    run(drain(agent, "hi"))
+
+    usage = next(r for r in agent.session.records() if r["type"] == "usage")
+    assert usage["cache_read_input_tokens"] == 9000
+    assert usage["input_tokens"] == 3
+    run(agent.aclose())

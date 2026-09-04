@@ -28,7 +28,7 @@ from typing import Any, Iterator, MutableMapping, Sequence
 
 from stcode.core.common.tools import ToolDefinition, ToolResult
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
-from stcode.core.harness.context import HarnessContext
+from stcode.core.harness.context import HarnessContext, git_context
 from stcode.core.harness.mcp import MCPManager, load_mcp_config
 from stcode.core.harness.prompts import PromptMode, build_system_prompt, mode_for
 from stcode.core.harness.registry import ToolRegistry
@@ -113,6 +113,7 @@ class Harness:
         approval_mode: ApprovalMode = DEFAULT_APPROVAL_MODE,
         load_skills: bool = True,
         load_mcp: bool = True,
+        load_git: bool = True,
         mcp_config: str | Path | None = None,
         **kwargs: Any,
     ) -> "Harness":
@@ -128,6 +129,8 @@ class Harness:
         context.cwd = root
         if load_skills and context.skills is None:
             context.skills = SkillRegistry.discover(root)
+        if load_git and not context.git:
+            context.git = await git_context(root)
 
         kwargs.setdefault("project_instructions", read_project_instructions(root))
         harness = cls(context, approval_mode=approval_mode, **kwargs)
