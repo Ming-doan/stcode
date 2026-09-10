@@ -1,21 +1,20 @@
 """
 `repl` — a persistent Python interpreter for the session.
 
-**Not advertised yet.** It is registered so step 7 is a one-line change to `MAIN_TOOLS`,
-but its backend (`core/repl/`) does not exist: the jupyter kernel this used to drive was
-deleted in step 1, and nothing replaces it until then. A tool that is offered and then
-refuses wastes a whole turn, so until the backend lands this stays out of every named
-set and `runtime.context.repl` stays None.
+The namespace lives in a subprocess (`core/repl/`) and survives between calls, so a
+variable set on turn 2 is still there on turn 20.
 
-What it will be for, and why it is worth keeping at all: MCP-as-code (CLAUDE.md §2.1).
-Tool *definitions* in the prompt prefix cost 10–30k tokens per turn forever; the same
-servers written to `.stcode/mcp_servers/<server>/<tool>.py` cost a `grep` and an
-`import`. That needs somewhere to run the import and hold the result across turns, and
-this is it.
+Two jobs, and both are about keeping bulk out of the context window:
 
-The docstring below used to describe an `answer = {"ready": True}` protocol and an
-in-REPL `agent()`. Both are gone (EXPECTED.md §16): a turn ends when the model stops
-calling tools, and sub-agents are the `task` tool.
+* **MCP-as-code** (CLAUDE.md 2.1). Tool *definitions* in the prompt prefix cost
+  10-30k tokens every turn. The same servers written to `.stcode/mcp_servers/` cost a
+  `grep` and an `import`, and the result stays in a variable here.
+* **`tool_out`.** Whatever `elide` cut from a tool result is injected into this
+  namespace under the result's `output_id`. That is what makes rule 1's promise true:
+  eliding loses nothing, because the whole value is one slice away.
+
+Not for sub-agents (rule 3), and not a replacement for `read`/`edit`/`bash` — those are
+shorter and their output is already shaped for the model.
 """
 
 from __future__ import annotations
@@ -50,6 +49,10 @@ async def repl(
     holding the rest is still there to slice.
 
     Top-level `await` works.
+
+    `tool_out` is a dict already in the namespace. When a tool result was elided, the
+    whole value is in there under the id the elision named — slice it here rather than
+    calling the tool again.
 
     Reach for this when a result is too big to want in full, or when you need to compute
     over something rather than read it: parse a large JSON payload and print three

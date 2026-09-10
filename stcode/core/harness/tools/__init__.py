@@ -11,11 +11,12 @@ that can spawn is a sub-agent for which `max_depth = 1` stops bounding anything
 `READ_ONLY_TOOLS` is defined by permission rather than by taste, so a tool that later
 gains the ability to write cannot quietly stay on the list.
 
-Two tools are registered but in no set. `repl` has no backend until step 7 and
-`web_search` needs a second API key that MCP can cover instead (CLAUDE.md §6). Both are
-in `BUILTIN_TOOLS` so a caller can opt in explicitly and so turning them on later is a
-one-line change; neither is advertised, because being offered a capability and then
-refused it costs the model a whole turn.
+`repl` is a top-level tool only. A sub-agent that can hold a persistent namespace and
+import MCP stubs is doing the parent's job with none of the parent's oversight, and it
+is half of what rule 3 bounds.
+
+`web_search` is in both sets. It needs `TAVILY_API_KEY`; without one the tool says so
+plainly on the first call rather than being missing with no explanation.
 """
 
 from stcode.core.harness.tools.base import (
@@ -63,14 +64,14 @@ BUILTIN_TOOLS: tuple[Tool[object], ...] = (
 
 WORKER_TOOLS: tuple[str, ...] = (
     "read", "write", "edit", "bash", "bash_output", "glob", "grep", "ls",
-    "todo_write", "ask_user_question", "skill",
+    "todo_write", "ask_user_question", "skill", "web_search",
 )
-"""What a sub-agent gets. See the module docstring for what is missing and why."""
+"""What a sub-agent gets. No `task`, no `repl` — see the module docstring."""
 
-MAIN_TOOLS: tuple[str, ...] = WORKER_TOOLS
-"""What a top-level agent gets. Identical to `WORKER_TOOLS` for now: `task` is added by
-`core/agent/` at construction (it cannot live here — a tool that spawns an `Agent` would
-point `core/harness` at its own caller), and `repl` joins at step 7."""
+MAIN_TOOLS: tuple[str, ...] = (*WORKER_TOOLS, "repl")
+"""What a top-level agent gets. `task` is added on top by `core/agent/` at construction:
+it cannot live here, because a tool that spawns an `Agent` would point `core/harness` at
+its own caller."""
 
 READ_ONLY_TOOLS: tuple[str, ...] = tuple(
     builtin.name for builtin in BUILTIN_TOOLS if builtin.permission is ToolPermission.READ

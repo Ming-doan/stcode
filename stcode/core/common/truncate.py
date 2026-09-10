@@ -25,8 +25,20 @@ HEAD_SHARE = 0.75
 a test summary, and a `| tail -40` all live, so it keeps a real share."""
 
 NARROW_REQUEST_HINT = "call again with a narrower offset/limit to see the rest"
-"""The only recovery that is true today. Replace at step 7 with the `tool_out[...]`
-form, and only once the REPL bridge actually holds the value."""
+"""The recovery for a session with no REPL attached: re-call the same tool with a
+tighter range. Needs nothing that may not exist."""
+
+
+def tool_out_hint(output_id: str) -> str:
+    """The better recovery, and only legal when the REPL really holds the value.
+
+    Step 7 made this true: `Harness.invoke` injects the spilled payload into the
+    worker's `tool_out` before the model sees the elision. Passing this hint for a
+    session with no REPL would be the exact bug of EXPECTED.md 4.1 all over again, so
+    `Runtime.outputs_reachable` is what decides, not this module.
+    """
+    return f'the whole value is in tool_out["{output_id}"] — slice it with `repl`'
+
 
 _MIN_LIMIT = 32
 
@@ -69,4 +81,4 @@ def elide(text: str, limit: int, *, hint: str | None = None) -> str:
     return text[:head] + marker + (text[-tail:] if tail else "")
 
 
-__all__ = ["DEFAULT_VIEW_LIMIT", "HEAD_SHARE", "NARROW_REQUEST_HINT", "elide"]
+__all__ = ["DEFAULT_VIEW_LIMIT", "HEAD_SHARE", "NARROW_REQUEST_HINT", "elide", "tool_out_hint"]

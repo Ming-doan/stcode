@@ -618,14 +618,13 @@ def test_bind_makes_tools_callable_without_plumbing(tmp_path: Path, run: Any) ->
         assert "hi" in run(read("f.txt"))
 
 
-def test_backendless_and_keyless_tools_are_registered_but_not_advertised() -> None:
-    """`repl` has no backend until step 7 and `web_search` needs a second API key.
-    Advertising either costs a turn to discover it does not work."""
+def test_repl_is_a_top_level_tool_only() -> None:
+    """Step 7 gave `repl` a backend, so it is advertised — but only to a top-level
+    agent. A sub-agent holding a persistent namespace is half of what rule 3 bounds."""
     harness = Harness(approval_mode="full-auto")
-    assert "repl" in harness.registry and "web_search" in harness.registry
-    assert "repl" not in harness.tool_names()
-    assert "web_search" not in harness.tool_names()
-    assert "read" in harness.tool_names()
+    assert "repl" in harness.tool_names()
+    assert "web_search" in harness.tool_names()
+    assert "repl" not in harness.for_subagent("worker").tool_names()
 
 
 def test_asking_with_no_user_attached_fails_clearly(tmp_path: Path, run: Any) -> None:

@@ -21,60 +21,13 @@ file on disk. Run it with `uv run python smoke_daemon.py`.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
-from pathlib import Path
 
-from dotenv import load_dotenv
-
-from stcode.core.configs import GatewayConfig, ProviderConfig, RetryConfig, RouteConfig
+from smoke_common import BOLD, DIM, GREEN, RED, RESET, WORKSPACE, bad, build_config, ok, step, verdict
+from stcode.core.configs import GatewayConfig
 from stcode.core.daemon import AutonomyRefused, Daemon, DaemonClient
 
-load_dotenv("./.env")
-
-WORKSPACE = Path(__file__).parent / "temp"
-MODEL = "ollama/qwen3.5:2b"
 PROMPT = "List the files in the current directory, then say in one sentence what you see."
-
-_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-DIM = "\033[2m" if _COLOR else ""
-BOLD = "\033[1m" if _COLOR else ""
-GREEN = "\033[32m" if _COLOR else ""
-RED = "\033[31m" if _COLOR else ""
-RESET = "\033[0m" if _COLOR else ""
-
-
-def step(text: str) -> None:
-    print(f"\n{BOLD}▌ {text}{RESET}")
-
-
-def ok(text: str) -> None:
-    print(f"  {GREEN}✓{RESET} {text}")
-
-
-def bad(text: str) -> None:
-    print(f"  {RED}✗{RESET} {text}")
-
-
-def build_config() -> GatewayConfig:
-    """A config pointed at the local workspace and a socket beside it.
-
-    Deliberately not the user's `~/.stcode/config.toml`: a smoke test that writes into
-    your real session directory and squats on your real socket is a smoke test you stop
-    running.
-    """
-    config = GatewayConfig()
-    config.providers["openai"] = ProviderConfig(
-        base_url=os.getenv("OPENAI_BASE_URL"), api_key=os.getenv("OPENAI_API_KEY")
-    )
-    config.routing["high"] = RouteConfig(provider="openai", model=MODEL)
-    config.retry = RetryConfig(max_attempts=1)
-    config.defaults.model = MODEL
-    config.defaults.approval_mode = "auto-edit"
-    config.session.dir = str(WORKSPACE / "sessions")
-    config.daemon.transport = "unix"
-    config.daemon.socket = str(WORKSPACE / "smoke.sock")
-    return config
 
 
 async def check_guard(config: GatewayConfig) -> bool:
@@ -155,14 +108,13 @@ async def check_detach(config: GatewayConfig) -> bool:
 
 async def main() -> int:
     WORKSPACE.mkdir(parents=True, exist_ok=True)
-    config = build_config()
+    config = build_config(subdir="daemon")
     guarded = await check_guard(config)
     detached = await check_detach(config)
-
-    step("phase 2")
-    print(f"  detach / re-attach mid-run: {'PASS' if detached else 'FAIL'}")
-    print(f"  full-auto refused on host:  {'PASS' if guarded else 'FAIL'}")
-    return 0 if (guarded and detached) else 1
+    return verdict("phase 2", {
+        "detach / re-attach mid-run": detached,
+        "full-auto refused on host": guarded,
+    })
 
 
 if __name__ == "__main__":

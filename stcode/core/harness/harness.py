@@ -42,6 +42,7 @@ from stcode.core.harness.tools.base import (
     Tool,
     current_runtime,
 )
+from stcode.core.repl import PyREPL
 
 PROJECT_INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md", ".stcode/instructions.md")
 """Read in order; the first that exists wins. `AGENTS.md` is included because it is the
@@ -74,8 +75,8 @@ class Harness:
         self.context = context if context is not None else HarnessContext()
         self.registry = ToolRegistry(tools if tools is not None else BUILTIN_TOOLS)
         # An explicit `tools=` list is already the caller's selection, so allowing all
-        # of it is right. The built-in set is not: it registers `repl` and `web_search`,
-        # which are deliberately not advertised (see `tools/__init__.py`).
+        # of it is right. The built-in set is not: `MAIN_TOOLS` is the narrower default
+        # (see `tools/__init__.py`).
         if allowed is not None:
             self.allowed: list[str] | None = list(allowed)
         elif tools is not None:
@@ -90,9 +91,8 @@ class Harness:
         self.extra_prompt = extra_prompt
         self.mcp = mcp
         # A plain dict: `ToolOutStore` was a dict with a wrapper and a spill-to-disk
-        # TODO that never had data to evict. Whatever `elide` cuts is parked here for
-        # the trajectory and the TUI; step 7's REPL bridge is what makes it reachable
-        # from the model's side.
+        # TODO that never had data to evict. Whatever `elide` cuts is parked here, and
+        # `_share_output` copies it into the REPL's `tool_out` so the model can reach it.
         self.outputs: MutableMapping[str, Any] = outputs if outputs is not None else {}
         self.on_progress = on_progress
         self.on_approval = on_approval
@@ -114,6 +114,7 @@ class Harness:
         load_skills: bool = True,
         load_mcp: bool = True,
         load_git: bool = True,
+        load_repl: bool = True,
         mcp_config: str | Path | None = None,
         **kwargs: Any,
     ) -> "Harness":
@@ -131,6 +132,11 @@ class Harness:
             context.skills = SkillRegistry.discover(root)
         if load_git and not context.git:
             context.git = await git_context(root)
+        if load_repl and context.repl is None:
+            # Constructed, not started: the subprocess is spawned by the first cell.
+            # Most sessions never run one, and paying for an interpreter they will not
+            # use is a cost with no matching benefit.
+            context.repl = PyREPL(cwd=root, env=context.env)
 
         kwargs.setdefault("project_instructions", read_project_instructions(root))
         harness = cls(context, approval_mode=approval_mode, **kwargs)
@@ -248,6 +254,9 @@ class Harness:
             depth=self.depth,
             approval_mode=self.approval_mode,
             outputs=self.outputs,
+            # Rule 1's proviso, decided in exactly one place: an elision may only name
+            # `tool_out[...]` if there is a REPL holding it.
+            outputs_reachable=getattr(self.context, "repl", None) is not None,
             on_progress=self.on_progress,
             on_approval=self.on_approval,
             on_ask=self.on_ask,
@@ -267,7 +276,23 @@ class Harness:
             return ToolResult.error(
                 f"`{name}` is not available to this agent. You have: {available}.", tool=name
             )
-        return await self.registry[name].invoke(arguments, self.runtime(), tool_call_id=tool_call_id)
+        result = await self.registry[name].invoke(arguments, self.runtime(), tool_call_id=tool_call_id)
+        await self._share_output(result)
+        return result
+
+    async def _share_output(self, result: ToolResult) -> None:
+        """Push an elided result's full payload across to the REPL's `tool_out`.
+
+        This is the half of rule 1 that makes eliding non-lossy: the model was just told
+        the rest is in `tool_out["..."]`, and this is what puts it there. Failing to
+        inject is not worth failing the tool call over — the model has the elided view
+        either way — so a dead REPL costs a hint, not a turn.
+        """
+        repl = getattr(self.context, "repl", None)
+        if repl is None or not result.output_id:
+            return
+        with contextlib.suppress(Exception):
+            await repl.inject({result.output_id: self.outputs.get(result.output_id)})
 
     # ---- ambient runtime ----
 
@@ -301,6 +326,8 @@ class Harness:
             if shell.pump is not None:
                 shell.pump.cancel()
         self.context.shells.clear()
+        if self.context.repl is not None:
+            await self.context.repl.aclose()
         if self.mcp is not None:
             await self.mcp.aclose()
 

@@ -73,7 +73,12 @@ from stcode.core.harness.errors import (
     ToolTimeout,
 )
 from stcode.core.harness.tools.schema import build_params_model, json_schema_for, split_docstring
-from stcode.core.common.truncate import DEFAULT_VIEW_LIMIT, NARROW_REQUEST_HINT, elide
+from stcode.core.common.truncate import (
+    DEFAULT_VIEW_LIMIT,
+    NARROW_REQUEST_HINT,
+    elide,
+    tool_out_hint,
+)
 
 CtxT = TypeVar("CtxT")
 
@@ -164,8 +169,15 @@ class Runtime(Generic[CtxT]):
 
     outputs: MutableMapping[str, Any] = field(default_factory=dict)
     """The in-process mirror of the REPL's `tool_out`. Anything elided out of a result
-    is still here under the result's `output_id`; the layer that owns the kernel pushes
-    it across. A plain dict by default so a tool is testable without a kernel."""
+    is still here under the result's `output_id`; `Harness.invoke` pushes it across. A
+    plain dict by default so a tool is testable without a REPL."""
+
+    outputs_reachable: bool = False
+    """Whether a REPL is attached, so the model can actually read `tool_out`.
+
+    This is the whole of rule 1's proviso, as a boolean. True and an elision may name
+    `tool_out["..."]`; False and it may only say "ask for a narrower range". Set by
+    `Harness.runtime()`, never guessed here."""
 
     on_progress: ProgressFn | None = None
     on_approval: ApprovalFn | None = None
@@ -511,12 +523,9 @@ class Tool(Generic[CtxT]):
         passed straight through; everything else is stringified, and anything over
         `max_output` is elided.
 
-        The elision marker tells the model to re-call with a narrower range, **not** to
-        look in `tool_out`. Rule 1 permits only a hint the model can act on, and
-        `outputs` currently lives in this process while the model has no way into it.
-        The full payload is still kept there — the trajectory and the TUI read it, and
-        step 7's REPL bridge is what makes it reachable from the other side; the hint
-        changes then, not before.
+        The elision marker names `tool_out["..."]` only when a REPL is attached to
+        carry the payload across, and otherwise says to re-call with a narrower range.
+        Rule 1 permits exactly one hint: a true one.
         """
         if isinstance(value, ToolResult):
             result = value
@@ -526,11 +535,14 @@ class Tool(Generic[CtxT]):
         if result.is_error or len(result.content) <= self.max_output:
             return result
 
+        hint = NARROW_REQUEST_HINT
         if self.spill:
             output_id = result.output_id or f"{self.name}_{call.execution_id}"
             call.outputs[output_id] = result.payload if result.payload is not None else result.content
             result.output_id = output_id
-        result.content = elide(result.content, self.max_output, hint=NARROW_REQUEST_HINT)
+            if call.outputs_reachable:
+                hint = tool_out_hint(output_id)
+        result.content = elide(result.content, self.max_output, hint=hint)
         return result
 
 

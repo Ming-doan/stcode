@@ -34,6 +34,7 @@ from stcode.core.harness.errors import ToolError
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, fine for type checkers
     from stcode.core.harness.skills import SkillRegistry
     from stcode.core.harness.tools.shell import BackgroundShell
+    from stcode.core.repl import PyREPL
 
 TodoStatus = Literal["pending", "in_progress", "completed"]
 
@@ -106,11 +107,16 @@ class HarnessContext:
 
     skills: "SkillRegistry | None" = None
 
-    repl: Any = None
-    """The session's persistent Python REPL, when one is running. `repl()` needs it and
-    nothing else does. Untyped because `core/repl/` does not exist until step 7 — the
-    tool is registered but kept out of `MAIN_TOOLS` until then, so this stays None and
-    `repl()` says so rather than failing obscurely."""
+    repl: "PyREPL | None" = None
+    """The session's persistent Python REPL.
+
+    Attached by `Harness.create`, and lazy: the subprocess is not spawned until the
+    first cell runs. Two things read it — the `repl` tool, and `Harness.invoke`, which
+    pushes elided payloads into its `tool_out`.
+
+    None for a sub-agent (rule 3: no `task`, no `repl`) and for anything built with
+    `load_repl=False`. When it is None the elision hint quietly drops back to "ask for
+    a narrower range", because `tool_out` is then not somewhere the model can reach."""
 
     git: str = ""
     """A one-shot summary of the repository: branch, status, recent commits. Sampled at
