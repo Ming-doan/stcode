@@ -699,3 +699,172 @@ def test_bash_runs_in_a_given_subdirectory(tmp_path: Path, run: Any) -> None:
 
     missing = run(harness.invoke("bash", {"command": "ls", "cwd": "nope"}))
     assert missing.is_error and "not a directory" in missing.content
+
+
+# ---- step 8: MCP as code -------------------------------------------------------
+#
+# The claim under test is a token claim: with `expose="code"`, a server's schemas are
+# on disk and *not* in the prompt. So these check both halves — that the files are
+# right, and that the prompt stayed small.
+
+MCP_FIXTURE = '''
+from mcp.server.mcpserver import MCPServer
+
+server = MCPServer("bookshop")
+
+
+@server.tool()
+def search_books(query: str, limit: int = 10) -> dict:
+    """Search the catalogue by title or author.
+
+    Args:
+        query: Words to match against title and author.
+        limit: How many results to return.
+    """
+    return {"results": [{"id": n, "title": f"{query} {n}"} for n in range(limit)]}
+
+
+if __name__ == "__main__":
+    server.run()
+'''
+
+
+@pytest.fixture
+def mcp_project(tmp_path: Path) -> Path:
+    """A workspace with one real, launchable MCP server configured."""
+    import json
+    import sys
+
+    server = tmp_path / "fixture_server.py"
+    server.write_text(MCP_FIXTURE)
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"bookshop": {"command": sys.executable, "args": [str(server)]}}})
+    )
+    return tmp_path
+
+
+def test_generated_stub_is_importable_python_with_the_right_signature(tmp_path: Path) -> None:
+    import importlib.util
+    import inspect as inspect_module
+
+    from stcode.core.harness.mcp import generate_server_code
+
+    generate_server_code(
+        tmp_path,
+        {
+            "github": {
+                "list_issues": {
+                    "description": "List issues on a repository.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "repo": {"type": "string", "description": "owner/name."},
+                            "state": {"type": "string", "default": "open"},
+                        },
+                        "required": ["repo"],
+                    },
+                }
+            }
+        },
+    )
+    stub = tmp_path / ".stcode/mcp_servers/github/list_issues.py"
+    assert stub.is_file()
+
+    spec = importlib.util.spec_from_file_location("gen_list_issues", stub)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    signature = inspect_module.signature(module.list_issues)
+    assert list(signature.parameters) == ["repo", "state"]
+    assert signature.parameters["repo"].default is inspect_module.Parameter.empty
+    assert signature.parameters["state"].default is None
+
+    # The docstring is the whole interface — it is what replaces the prompt schema.
+    assert "List issues on a repository." in (module.list_issues.__doc__ or "")
+    assert "owner/name." in (module.list_issues.__doc__ or "")
+
+
+def test_regeneration_drops_a_tool_the_server_no_longer_has(tmp_path: Path) -> None:
+    """A stale stub is worse than a missing one: the agent reads it, believes it, and
+    calls something that is not there."""
+    from stcode.core.harness.mcp import generate_server_code
+
+    schema = {"description": "d", "input_schema": {"type": "object", "properties": {}}}
+    generate_server_code(tmp_path, {"srv": {"old_tool": schema, "kept": schema}})
+    assert (tmp_path / ".stcode/mcp_servers/srv/old_tool.py").is_file()
+
+    generate_server_code(tmp_path, {"srv": {"kept": schema}})
+    assert not (tmp_path / ".stcode/mcp_servers/srv/old_tool.py").exists()
+    assert (tmp_path / ".stcode/mcp_servers/srv/kept.py").is_file()
+
+
+def test_names_python_cannot_spell_are_reported_not_silently_dropped(tmp_path: Path) -> None:
+    from stcode.core.harness.mcp import generate_server_code
+
+    generate_server_code(
+        tmp_path,
+        {
+            "srv": {
+                "class": {  # a Python keyword, as a tool name
+                    "description": "d",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"ok": {"type": "string"}, "not-an-identifier": {"type": "string"}},
+                    },
+                }
+            }
+        },
+    )
+    body = (tmp_path / ".stcode/mcp_servers/srv/class_.py").read_text()
+    assert "async def class_(" in body
+    assert "not-an-identifier" in body  # named in the docstring as uncallable
+    assert "ok: str | None = None" in body
+
+
+@pytest.mark.parametrize("expose", ["code", "tools"])
+def test_expose_decides_whether_the_prompt_grows(mcp_project: Path, run: Any, expose: str) -> None:
+    """The whole point of step 8, as one assertion: in `code` mode the server's schema
+    is on disk and the prompt only knows the names."""
+    harness = run(
+        Harness.create(mcp_project, approval_mode="full-auto", mcp_expose=expose, load_repl=False)
+    )
+    try:
+        prompt = harness.system_prompt()
+        stub = mcp_project / ".stcode/mcp_servers/bookshop/search_books.py"
+        if expose == "code":
+            assert not any(name.startswith("mcp__") for name in harness.tool_names())
+            assert stub.is_file()
+            assert "`search_books`" in prompt          # the name, so it is discoverable
+            assert "Words to match against" not in prompt  # the schema, which is not
+        else:
+            assert "mcp__bookshop__search_books" in harness.tool_names()
+            assert not stub.exists()
+    finally:
+        run(harness.aclose())
+
+
+def test_a_generated_stub_really_calls_the_server(mcp_project: Path, run: Any) -> None:
+    """End to end: generate, import inside the REPL, call, get parsed data back."""
+    from stcode.core.repl import PyREPL
+
+    harness = run(Harness.create(mcp_project, approval_mode="full-auto", mcp_expose="code"))
+    assert isinstance(harness.context.repl, PyREPL)
+    try:
+        result = run(
+            harness.invoke(
+                "repl",
+                {
+                    "code": (
+                        "from mcp_servers.bookshop import search_books\n"
+                        "books = await search_books(query='dune', limit=3)\n"
+                        # Filter first, print second: this is the pattern the whole
+                        # design exists to enable.
+                        "print(len(books['results']))"
+                    )
+                },
+            )
+        )
+        assert result.content.strip() == "3", result.content
+    finally:
+        run(harness.aclose())

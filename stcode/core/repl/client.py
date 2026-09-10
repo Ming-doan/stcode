@@ -29,6 +29,7 @@ import os
 import signal
 import sys
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -38,6 +39,10 @@ from stcode.core.common.truncate import DEFAULT_VIEW_LIMIT, NARROW_REQUEST_HINT,
 WORKER = Path(__file__).with_name("_worker.py")
 
 DEFAULT_TIMEOUT = 120.0
+STDERR_TAIL_LINES = 50
+"""How much of the worker's stderr is kept for a crash report. Bounded because the
+alternative is holding every warning a long session produced."""
+
 INTERRUPT_GRACE = 5.0
 """After SIGINT, how long the worker gets to report back before it is killed. A cell
 stuck in a C call cannot be interrupted at all, and waiting forever for it is how a
@@ -90,6 +95,8 @@ class PyREPL:
         self.python = python
         self._process: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
         # Injections that arrived before anything started the worker. Held rather than
         # spawning a Python for them: a big tool result is not a reason to pay for an
         # interpreter the session may never use.
@@ -125,14 +132,38 @@ class PyREPL:
         except OSError as exc:
             raise ReplError(f"Could not start the REPL worker: {exc}") from exc
 
+        self._stderr_task = asyncio.create_task(self._drain_stderr(), name="stcode-repl-stderr")
+
         if self._pending_injects:
             values, self._pending_injects = self._pending_injects, {}
             await self._request({"type": "inject", "values": values})
+
+    async def _drain_stderr(self) -> None:
+        """Keep the worker's stderr pipe empty, and keep the last of it.
+
+        Two reasons, and the second is the one that bites: a subprocess started from a
+        cell inherits this pipe, and a server that logs freely into a pipe nobody reads
+        will block on a full buffer and hang the cell that started it.
+        """
+        process = self._process
+        if process is None or process.stderr is None:
+            return
+        with contextlib.suppress(Exception):
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    return
+                self._stderr_tail.append(line.decode("utf-8", errors="replace").rstrip("\n"))
 
     async def aclose(self) -> None:
         """Close stdin, then kill if it does not leave."""
         process = self._process
         self._process = None
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._stderr_task
+            self._stderr_task = None
         if process is None or process.returncode is not None:
             return
         with contextlib.suppress(Exception):
@@ -307,10 +338,7 @@ class PyREPL:
 
     async def _death_note(self, process: asyncio.subprocess.Process) -> str:
         """Whatever the worker said on its way out — usually the real reason."""
-        detail = ""
-        if process.stderr is not None:
-            with contextlib.suppress(Exception):
-                detail = (await process.stderr.read()).decode("utf-8", errors="replace").strip()
+        detail = "\n".join(self._stderr_tail).strip()
         code = process.returncode
         return f"the REPL worker exited ({code}){': ' + detail[-800:] if detail else ''}"
 

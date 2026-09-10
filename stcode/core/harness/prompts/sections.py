@@ -176,6 +176,29 @@ def tools_section(names: list[str]) -> str:
     return "## Tools available this turn\n\n" + ", ".join(f"`{name}`" for name in sorted(names))
 
 
+def mcp_section(catalogue: str, directory: str) -> str:
+    """MCP servers, as files rather than as tool definitions.
+
+    Names only. The schemas are the expensive half — that is the entire reason they are
+    on disk instead of in this prompt — so the agent is told where to look, not what it
+    would find.
+    """
+    if not catalogue:
+        return ""
+    return (
+        "## MCP servers\n\n"
+        f"These are Python files under `{directory}`, not tools. To use one: read the "
+        "file to see its arguments, then import and call it from `repl`.\n\n"
+        f"{catalogue}\n\n"
+        "```py\n"
+        "from mcp_servers.<server> import <tool>\n"
+        "result = await <tool>(...)\n"
+        "print(len(result))   # filter first, print second — the result stays in the\n"
+        "                     # variable and never enters this conversation\n"
+        "```"
+    )
+
+
 def project_section(instructions: str) -> str:
     """Repository-specific instructions (a CLAUDE.md or AGENTS.md).
 
@@ -200,6 +223,7 @@ __all__ = [
     "TOOL_POLICY",
     "VERIFICATION",
     "environment_section",
+    "mcp_section",
     "project_section",
     "skills_section",
     "tools_section",

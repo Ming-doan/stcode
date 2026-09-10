@@ -35,6 +35,7 @@ from typing import Any
 # The real stdout, grabbed before any redirect. Cell output is redirected away from
 # sys.stdout; this handle is the protocol and must never be.
 _PROTO = sys.stdout
+_REAL_STDERR = sys.stderr
 
 ns: dict[str, Any] = {"tool_out": {}}
 
@@ -71,6 +72,20 @@ class _Tee(io.TextIOBase):
 
     def flush(self) -> None:
         pass
+
+    def fileno(self) -> int:
+        """The real stderr's fd.
+
+        Needed because `subprocess.Popen` asks for one, and a cell that spawns a
+        process is not exotic — launching a stdio MCP server is the main thing this
+        REPL exists for. Without this, `redirect_stderr` turns every such call into
+        `io.UnsupportedOperation: fileno`.
+
+        A child's output therefore goes to the worker's own stderr rather than into
+        this buffer. The parent drains that continuously, so a chatty server cannot
+        fill the pipe and deadlock.
+        """
+        return _REAL_STDERR.fileno()
 
     def drain(self) -> None:
         """Emit the last line when it had no trailing newline."""

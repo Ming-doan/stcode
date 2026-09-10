@@ -85,6 +85,23 @@ class DaemonConfig(BaseModel):
     port: int = 7717
 
 
+class MCPConfig(BaseModel):
+    """How MCP servers reach the agent.
+
+    `code` writes each tool to `.stcode/mcp_servers/<server>/<tool>.py` and advertises
+    nothing. The agent greps, reads the one file it needs, and calls it from `repl`.
+    Tool definitions in the prompt prefix cost 10-30k tokens *per turn* for three
+    mid-sized servers; as code they cost a grep.
+
+    `tools` advertises them the old way. Kept because the token argument is real but
+    not universal — one server with two tools is cheaper in the prompt than over three
+    REPL round-trips.
+    """
+
+    expose: Literal["code", "tools"] = "code"
+    enabled: bool = True
+
+
 class GatewayConfig(BaseModel):
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     routing: dict[Difficulty, RouteConfig] = Field(default_factory=dict)
@@ -93,6 +110,7 @@ class GatewayConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
 
 
 DEFAULT_CONFIG_TOML = """\
@@ -147,6 +165,11 @@ difficulty = "high"
 [session]
 dir = "~/.stcode/sessions"
 keep = 100
+
+# MCP servers (from .mcp.json). "code" writes them to .stcode/mcp_servers/ and lets the
+# agent import what it needs; "tools" advertises them in the prompt every turn.
+[mcp]
+expose = "code"
 
 # Where the daemon listens. `unix` on your own machine, `tcp` inside a container.
 [daemon]

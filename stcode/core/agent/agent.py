@@ -106,6 +106,10 @@ class Agent:
         gateway = gateway or LLMGateway(
             providers=config.providers, routing=config.routing, retry=config.retry
         )
+        # `setdefault`, not a keyword: a caller that passed `load_mcp=False` meant it,
+        # and passing both would be a duplicate-argument TypeError.
+        harness_kwargs.setdefault("load_mcp", config.mcp.enabled)
+        harness_kwargs.setdefault("mcp_expose", config.mcp.expose)
         harness = await Harness.create(
             cwd=cwd,
             approval_mode=approval_mode or config.defaults.approval_mode,

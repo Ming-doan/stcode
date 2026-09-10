@@ -342,7 +342,7 @@ class Tool(Generic[CtxT]):
         input_schema: dict[str, Any] | None = None,
     ) -> None:
         self.fn = fn
-        self.name = name or getattr(fn, "__name__", "tool")
+        self.name: str = name or str(getattr(fn, "__name__", "tool"))
         self.permission = permission
         self.timeout = timeout
         self.max_output = max_output
@@ -455,7 +455,7 @@ class Tool(Generic[CtxT]):
         is to return a `tool_result` block and let the model try something else. A raise
         here would instead take down the turn.
         """
-        runtime = runtime or current_runtime.get()  # type: ignore[assignment]
+        runtime = runtime or current_runtime.get()
         if runtime is None:
             return ToolResult.error(f"`{self.name}` was invoked with no runtime bound.")
         call = runtime.for_tool(self.name, tool_call_id=tool_call_id)

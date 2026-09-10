@@ -34,6 +34,7 @@ from stcode.core.harness.prompts.sections import (
     TOOL_POLICY,
     VERIFICATION,
     environment_section,
+    mcp_section,
     project_section,
     skills_section,
     tools_section,
@@ -66,6 +67,8 @@ def build_system_prompt(
     approval_mode: ApprovalMode = "suggest",
     tool_names: Sequence[str] = (),
     skill_catalogue: str = "",
+    mcp_catalogue: str = "",
+    mcp_directory: str = ".stcode/mcp_servers",
     project_instructions: str = "",
     write_scope: str = "",
     todos: str = "",
@@ -81,6 +84,8 @@ def build_system_prompt(
         approval_mode: What the agent may do unattended; also decides the note shown.
         tool_names: Tools advertised this turn.
         skill_catalogue: Output of `SkillRegistry.catalogue()`.
+        mcp_catalogue: Output of `MCPManager.catalogue()` — server and tool names only.
+        mcp_directory: Where the generated stubs live.
         project_instructions: Contents of the repository's CLAUDE.md / AGENTS.md.
         write_scope: Paths a sub-agent may write to, when it is narrowed.
         todos: Rendered todo list, if any.
@@ -101,6 +106,7 @@ def build_system_prompt(
 
     for optional in (
         skills_section(skill_catalogue),
+        mcp_section(mcp_catalogue, mcp_directory),
         project_section(project_instructions),
         extra.strip(),
     ):

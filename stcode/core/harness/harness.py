@@ -29,7 +29,12 @@ from typing import Any, Iterator, MutableMapping, Sequence
 from stcode.core.common.tools import ToolDefinition, ToolResult
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
 from stcode.core.harness.context import HarnessContext, git_context
-from stcode.core.harness.mcp import MCPManager, load_mcp_config
+from stcode.core.harness.mcp import (
+    MCP_CODE_DIRNAME,
+    MCPManager,
+    generate_server_code,
+    load_mcp_config,
+)
 from stcode.core.harness.prompts import PromptMode, build_system_prompt, mode_for
 from stcode.core.harness.registry import ToolRegistry
 from stcode.core.harness.skills import SkillRegistry
@@ -66,6 +71,7 @@ class Harness:
         project_instructions: str = "",
         extra_prompt: str = "",
         outputs: MutableMapping[str, Any] | None = None,
+        mcp_catalogue: str = "",
         on_progress: ProgressFn | None = None,
         on_approval: ApprovalFn | None = None,
         on_ask: AskFn | None = None,
@@ -90,6 +96,9 @@ class Harness:
         self.project_instructions = project_instructions
         self.extra_prompt = extra_prompt
         self.mcp = mcp
+        self.mcp_catalogue = mcp_catalogue
+        """Server and tool *names*, for the prompt. Empty in `tools` mode, where the
+        definitions are advertised instead."""
         # A plain dict: `ToolOutStore` was a dict with a wrapper and a spill-to-disk
         # TODO that never had data to evict. Whatever `elide` cuts is parked here, and
         # `_share_output` copies it into the REPL's `tool_out` so the model can reach it.
@@ -115,6 +124,7 @@ class Harness:
         load_mcp: bool = True,
         load_git: bool = True,
         load_repl: bool = True,
+        mcp_expose: str = "code",
         mcp_config: str | Path | None = None,
         **kwargs: Any,
     ) -> "Harness":
@@ -145,12 +155,20 @@ class Harness:
             servers = load_mcp_config(mcp_config, cwd=root)
             if servers:
                 manager = MCPManager()
-                await manager.connect_all(servers)
-                harness.mcp = manager
-                harness.registry.extend(manager.tools.values(), replace=True)
-                # Registering is not advertising: `allowed` is a fixed list, so an MCP
-                # tool nobody adds to it is connected and invisible.
-                harness.allow(*manager.tools)
+                await manager.open(servers)
+                if mcp_expose == "tools":
+                    harness.mcp = manager
+                    harness.registry.extend(manager.tools.values(), replace=True)
+                    # Registering is not advertising: `allowed` is a fixed list, so an
+                    # MCP tool nobody adds to it is connected and invisible.
+                    harness.allow(*manager.tools)
+                else:
+                    # Code mode. We connected only to ask each server what it offers;
+                    # the generated stubs open their own connection inside the REPL, so
+                    # holding this one would mean two live connections per server.
+                    generate_server_code(root, manager.schemas())
+                    harness.mcp_catalogue = manager.catalogue()
+                    await manager.aclose()
         return harness
 
     def allow(self, *names: str) -> None:
@@ -193,6 +211,8 @@ class Harness:
             project_instructions=self.project_instructions,
             extra_prompt=self.extra_prompt,
             outputs=self.outputs,
+            # No `mcp_catalogue`: a sub-agent has no `repl` (rule 3), so telling it
+            # about files it cannot call would cost tokens to advertise a dead end.
             on_progress=self.on_progress,
             on_approval=self.on_approval,
             on_ask=self.on_ask,
@@ -230,6 +250,8 @@ class Harness:
             approval_mode=self.approval_mode,
             tool_names=self.tool_names(),
             skill_catalogue=skills.catalogue() if skills else "",
+            mcp_catalogue=self.mcp_catalogue,
+            mcp_directory=MCP_CODE_DIRNAME,
             project_instructions=self.project_instructions,
             write_scope=", ".join(str(path) for path in self.context.scope),
             todos=self.context.render_todos() if self.context.todos else "",
