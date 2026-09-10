@@ -35,7 +35,7 @@ from stcode.core.harness.mcp import (
     generate_server_code,
     load_mcp_config,
 )
-from stcode.core.harness.prompts import PromptMode, build_system_prompt, mode_for
+from stcode.core.harness.prompts import PromptMode, build_system_prompt, load_role, mode_for
 from stcode.core.harness.registry import ToolRegistry
 from stcode.core.harness.skills import SkillRegistry
 from stcode.core.harness.tools import BUILTIN_TOOLS, MAIN_TOOLS, WORKER_TOOLS
@@ -70,6 +70,8 @@ class Harness:
         depth: int = 0,
         project_instructions: str = "",
         extra_prompt: str = "",
+        role: str = "",
+        teammates: Sequence[str] = (),
         outputs: MutableMapping[str, Any] | None = None,
         mcp_catalogue: str = "",
         on_progress: ProgressFn | None = None,
@@ -95,6 +97,11 @@ class Harness:
         self.depth = depth
         self.project_instructions = project_instructions
         self.extra_prompt = extra_prompt
+        self.role = role
+        """The role's markdown body, already loaded. A string, not a name — `Harness`
+        should not be the thing that knows where roles live on disk."""
+
+        self.teammates = list(teammates)
         self.mcp = mcp
         self.mcp_catalogue = mcp_catalogue
         """Server and tool *names*, for the prompt. Empty in `tools` mode, where the
@@ -124,6 +131,7 @@ class Harness:
         load_mcp: bool = True,
         load_git: bool = True,
         load_repl: bool = True,
+        role: str = "",
         mcp_expose: str = "code",
         mcp_config: str | Path | None = None,
         **kwargs: Any,
@@ -148,6 +156,9 @@ class Harness:
             # use is a cost with no matching benefit.
             context.repl = PyREPL(cwd=root, env=context.env)
 
+        # Raises on an unknown name, which is the point: a container started with a
+        # typo'd role should refuse rather than run an agent that owns nothing.
+        kwargs.setdefault("role", load_role(role))
         kwargs.setdefault("project_instructions", read_project_instructions(root))
         harness = cls(context, approval_mode=approval_mode, **kwargs)
 
@@ -210,6 +221,8 @@ class Harness:
             depth=self.depth + 1,
             project_instructions=self.project_instructions,
             extra_prompt=self.extra_prompt,
+            role=self.role,
+            teammates=self.teammates,
             outputs=self.outputs,
             # No `mcp_catalogue`: a sub-agent has no `repl` (rule 3), so telling it
             # about files it cannot call would cost tokens to advertise a dead end.
@@ -250,6 +263,8 @@ class Harness:
             approval_mode=self.approval_mode,
             tool_names=self.tool_names(),
             skill_catalogue=skills.catalogue() if skills else "",
+            role=self.role,
+            teammates=self.teammates,
             mcp_catalogue=self.mcp_catalogue,
             mcp_directory=MCP_CODE_DIRNAME,
             project_instructions=self.project_instructions,

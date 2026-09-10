@@ -164,6 +164,12 @@ def supervisor_nudge(text: str) -> str:
     return f"◆ supervisor — {' '.join(text.split())}"
 
 
+def inbox_message(sender: str, subject: str, refs: list[str]) -> str:
+    """A message from a teammate, as one line in the transcript."""
+    tail = f" → {', '.join(refs)}" if refs else ""
+    return f"✉ from {sender or 'unknown'}: {subject}{tail}"
+
+
 def _short(text: str, limit: int = 60) -> str:
     flat = " ".join(text.split())
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"

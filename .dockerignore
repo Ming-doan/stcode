@@ -1,0 +1,10 @@
+.git
+.venv
+temp/
+.mypy_cache
+.pytest_cache
+.ruff_cache
+**/__pycache__
+docs/
+smoke_*.py
+main.py

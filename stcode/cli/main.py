@@ -74,6 +74,15 @@ def main(
         str | None,
         typer.Option("--resume", "-r", help="Attach to an existing session id instead of starting one."),
     ] = None,
+    role: Annotated[
+        str | None,
+        typer.Option(
+            "--role",
+            envvar="STCODE_ROLE",
+            help="Team role for this run, e.g. backend-dev. Turns on team mode: the "
+            "shared volume, the role prompt, and send_message.",
+        ),
+    ] = None,
     transport: Annotated[
         str | None, typer.Option("--transport", help="unix | tcp. Overrides [daemon] transport.")
     ] = None,
@@ -109,6 +118,7 @@ def main(
         "port": port,
         "approval_mode": _mode(mode),
         "model": model,
+        "role": role,
     }
 
     if headless:

@@ -73,6 +73,7 @@ class Agent:
         max_concurrent: int = 4,
         owns_gateway: bool = False,
         supervisor: Supervisor | None = None,
+        mailbox: Any = None,
     ) -> None:
         self.gateway = gateway
         self.harness = harness
@@ -83,6 +84,11 @@ class Agent:
         """Checked every `supervisor.every` iterations *inside* a turn. None disables
         it entirely — sub-agents get none, since a nudge for a one-shot worker arrives
         about when the worker is finishing anyway."""
+
+        self.mailbox = mailbox
+        """This role's `core/team` Mailbox, in team mode. Drained at the top of every
+        turn. Typed loosely so `core/agent` does not import `core/team` merely to hold
+        a reference — `enable_team()` is what actually brings the package in."""
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._owns_gateway = owns_gateway
         self._inbox: asyncio.Queue[str] = asyncio.Queue()
@@ -113,10 +119,19 @@ class Agent:
         gateway = gateway or LLMGateway(
             providers=config.providers, routing=config.routing, retry=config.retry
         )
+        # `role` names the prompt section and the session's `meta` record. It does not,
+        # by itself, turn on team mode: `[team] role` is a container declaring that a
+        # shared volume is mounted, and a solo session naming a role should not go
+        # looking for one.
+        team = getattr(config, "team", None)
+        role = role or (team.role if team else "")
+        joins_team = bool(team and team.role)
+
         # `setdefault`, not a keyword: a caller that passed `load_mcp=False` meant it,
         # and passing both would be a duplicate-argument TypeError.
         harness_kwargs.setdefault("load_mcp", config.mcp.enabled)
         harness_kwargs.setdefault("mcp_expose", config.mcp.expose)
+        harness_kwargs.setdefault("role", role)
         harness = await Harness.create(
             cwd=cwd,
             approval_mode=approval_mode or config.defaults.approval_mode,
@@ -151,6 +166,8 @@ class Agent:
         )
         if config.agent.enable_task and harness.depth < config.agent.max_depth:
             agent.enable_task()
+        if joins_team and team is not None:
+            agent.enable_team(team.shared_dir, role)
         return agent
 
     def enable_task(self) -> None:
@@ -165,6 +182,35 @@ class Agent:
 
         self.harness.registry.register(make_task_tool(self), replace=True)
         self.harness.allow("task")
+
+    def enable_team(self, shared_dir: str, role: str) -> None:
+        """Join a team: a mailbox on the shared volume, and `send_message`.
+
+        Registered from here rather than built into the harness for the same reason as
+        `task` — the tool closes over this agent's mailbox, and `core/harness` must not
+        import `core/team`.
+
+        In team mode the parallelism is containers, so `task` is *removed*: a sub-agent
+        inside a role container is a second answer to a question the architecture has
+        already answered, and it spends tokens to give it (CLAUDE.md 1).
+        """
+        from stcode.core.team import Mailbox, make_send_message_tool
+
+        mailbox = Mailbox(shared_dir, role)
+        try:
+            mailbox.ensure()
+        except OSError as exc:
+            raise RuntimeError(
+                f"Team mode needs a writable shared volume at {mailbox.root} ({exc}). "
+                "Mount one, point [team] shared_dir somewhere else, or clear [team] role "
+                "to run solo."
+            ) from exc
+        self.mailbox = mailbox
+        self.harness.registry.register(make_send_message_tool(self.mailbox), replace=True)
+        self.harness.allow("send_message")
+        self.harness.teammates = [name for name in self.mailbox.roles() if name != role]
+        if self.harness.allowed and "task" in self.harness.allowed:
+            self.harness.allowed.remove("task")
 
     # ---- driving ----
 
@@ -238,6 +284,7 @@ class Agent:
         self.harness.cancel.clear()
         self._busy = True
         try:
+            self._drain_inbox()
             self.session.append(type="user", content=text)
 
             for iteration in range(self.max_turns):
@@ -299,6 +346,28 @@ class Agent:
             )
         finally:
             self._busy = False
+
+    def _drain_inbox(self) -> None:
+        """Take delivery of anything waiting, at the top of the turn.
+
+        Written as `inbox` records, which `Session.messages()` renders as prefixed user
+        messages — the same route the supervisor's nudges take, and for the same reason:
+        the cached system prefix must not move.
+
+        Top of the turn rather than mid-turn on purpose. A message arriving while the
+        agent is working waits for the next turn, exactly as a `push` does (CLAUDE.md 8
+        point 3) — splicing into a turn in flight is how you destroy work in progress.
+        """
+        if self.mailbox is None:
+            return
+        for message in self.mailbox.drain():
+            self.session.append(
+                type="inbox",
+                **{"from": message.sender},
+                subject=message.subject,
+                body=message.body,
+                refs=message.refs,
+            )
 
     async def _supervise(self, iteration: int) -> AsyncGenerator[AgentEvent, None]:
         """Let the supervisor look, on its own schedule.

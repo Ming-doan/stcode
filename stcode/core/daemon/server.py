@@ -193,13 +193,17 @@ class Daemon:
         agent = await Agent.create(
             self.config,
             cwd=cwd,
-            role=role,
+            role=role or self.config.team.role,
             approval_mode=mode,
             session=session,
             gateway=self.gateway(),
         )
         runner = SessionRunner(agent)
         runner.start()
+        # Team mode only: a role container should react to a colleague, not wait to be
+        # poked by a human who may not be attached.
+        if agent.mailbox is not None and self.config.team.wake_on_message:
+            runner.watch_inbox(agent.mailbox, self.config.team.poll_interval)
         self.sessions[runner.id] = runner
         log.info("session %s created at %s", runner.id, agent.harness.context.cwd)
         return runner

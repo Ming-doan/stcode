@@ -17,6 +17,7 @@ dynamic value to an early section silently doubles the cost of every turn.
 from __future__ import annotations
 
 from datetime import date
+from typing import Sequence
 
 IDENTITY = """\
 You are stcode, a coding agent working in a terminal alongside a software engineer.
@@ -199,6 +200,25 @@ def mcp_section(catalogue: str, directory: str) -> str:
     )
 
 
+def role_section(body: str, teammates: Sequence[str] = ()) -> str:
+    """This agent's role on the team, plus who else there is to talk to.
+
+    The body is markdown, loaded from `roles/<name>.md` and passed through unchanged —
+    a role is data, and rewriting it here would make it code again.
+    """
+    if not body.strip():
+        return ""
+    section = "## Your role on this team\n\n" + body.strip()
+    if teammates:
+        section += (
+            "\n\nOther roles you can `send_message`: "
+            + ", ".join(f"`{name}`" for name in teammates)
+            + ".\nShared files live in `/team/knowledge/` and `/team/artifacts/` — read and "
+            "write them with the ordinary file tools. Messages carry paths, not contents."
+        )
+    return section
+
+
 def project_section(instructions: str) -> str:
     """Repository-specific instructions (a CLAUDE.md or AGENTS.md).
 
@@ -225,6 +245,7 @@ __all__ = [
     "environment_section",
     "mcp_section",
     "project_section",
+    "role_section",
     "skills_section",
     "tools_section",
 ]

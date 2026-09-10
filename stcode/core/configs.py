@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
 from stcode.core.providers import Difficulty, ProviderConfig, RetryConfig, RouteConfig, default_model_for
 from stcode.core.session import DEFAULT_SESSION_DIR
+from stcode.core.team.mailbox import DEFAULT_TEAM_DIR
 
 DEFAULT_SOCKET_PATH = "~/.stcode/daemon.sock"
 
@@ -85,6 +86,33 @@ class DaemonConfig(BaseModel):
     port: int = 7717
 
 
+class TeamConfig(BaseModel):
+    """Team mode: one container, one agent, one role, one shared volume.
+
+    Off unless `role` is set, so nothing about a solo session changes by accident.
+    `role` must match a file in `harness/prompts/roles/` — a typo refuses to start
+    rather than running an agent that owns nothing.
+
+    `git` is the settled answer to EXPECTED.md 12.5: the origin is a **bare repository
+    on the shared volume**, `/team/repo.git`. It needs no credentials and no network,
+    every role clones and pushes branches, and exactly one role merges. Point `remote`
+    at a real URL instead if you would rather integrate through pull requests; the
+    difference is a line here and a sentence in the role prompts.
+    """
+
+    role: str = ""
+    shared_dir: str = DEFAULT_TEAM_DIR
+    max_agents: int = 6
+    wake_on_message: bool = True
+    """Whether the daemon starts a turn when a message arrives and the agent is idle.
+    False means the agent only ever runs because you pushed it."""
+
+    poll_interval: float = 1.0
+    remote: str = "/team/repo.git"
+    ssh_key: str = ""
+    """Only needed if `remote` is a real URL. Mounted read-only; never copied."""
+
+
 class SupervisorConfig(BaseModel):
     """The second pair of eyes on the trajectory (CLAUDE.md 2.2).
 
@@ -129,6 +157,7 @@ class GatewayConfig(BaseModel):
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
+    team: TeamConfig = Field(default_factory=TeamConfig)
 
 
 DEFAULT_CONFIG_TOML = """\
@@ -183,6 +212,13 @@ difficulty = "high"
 [session]
 dir = "~/.stcode/sessions"
 keep = 100
+
+# Team mode. Empty role = solo; anything else must match harness/prompts/roles/<role>.md.
+# The origin is a bare repo on the shared volume — no credentials, no network.
+# [team]
+# role       = "backend-dev"
+# shared_dir = "/team"
+# remote     = "/team/repo.git"
 
 # Watches for loops: same call 3x, most calls failing, no file written. Counting is
 # free; only a hit costs one cheap model call. `every` is tool calls within a turn.
@@ -305,6 +341,7 @@ def apply_cli_overrides(
     port: int | None = None,
     approval_mode: ApprovalMode | None = None,
     model: str | None = None,
+    role: str | None = None,
 ) -> GatewayConfig:
     """Fold command-line overrides into a loaded config, in place, for this run only.
 
@@ -327,6 +364,10 @@ def apply_cli_overrides(
         config.defaults.approval_mode = approval_mode
     if model:
         config.defaults.model = model
+    if role is not None:
+        # Setting a role is what turns team mode on, so `--role` is how one image serves
+        # every role (CLAUDE.md 9.4) without a config file per container.
+        config.team.role = role
     return config
 
 

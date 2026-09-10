@@ -422,6 +422,14 @@ class StcodeApp(App[None]):
                     )
                 case "supervisor":
                     self._notice(labels.supervisor_nudge(str(record.get("content", ""))))
+                case "inbox":
+                    self._notice(
+                        labels.inbox_message(
+                            str(record.get("from", "")),
+                            str(record.get("subject", "")),
+                            [str(ref) for ref in record.get("refs", [])],
+                        )
+                    )
                 case "error":
                     self._error(str(record.get("message", "")))
 

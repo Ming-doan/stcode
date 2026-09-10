@@ -49,6 +49,13 @@ NO_CLIENT = (
     "what you can decide yourself and state the assumption you made."
 )
 
+WAKE = (
+    "A message arrived while you were idle. It is above this line. Deal with it, or say "
+    "why it is not yours to deal with."
+)
+"""What an inbox-woken turn is pushed. Short on purpose: the message itself is already
+in the history as an `inbox` record, and repeating it here would pay for it twice."""
+
 
 class SessionRunner:
     """One session the daemon is holding: its agent, its watchers, its open requests."""
@@ -62,6 +69,7 @@ class SessionRunner:
         # is waiting for, rather than a session that looks hung.
         self._pending: dict[str, tuple["asyncio.Future[Any]", dict[str, Any]]] = {}
         self._task: asyncio.Task[None] | None = None
+        self._watch: asyncio.Task[None] | None = None
 
         # The harness asks; this runner answers over the wire. Set here rather than at
         # `Harness.create` because the harness must not know a socket exists (§3.2).
@@ -93,7 +101,44 @@ class SessionRunner:
                 ErrorMessage(session=self.id, message=f"{type(exc).__name__}: {exc}").model_dump()
             )
 
+    def watch_inbox(self, mailbox: Any, interval: float = 1.0) -> None:
+        """Start a turn when a message lands and the agent is idle.
+
+        Polling rather than inotify: one `listdir` a second costs nothing measurable,
+        works the same on every filesystem a volume might be, and needs no dependency.
+        This is the whole of "how a colleague gets your attention" (CLAUDE.md 9.2).
+
+        Only when **idle**. A message arriving mid-turn is already delivered — the agent
+        drains its inbox at the top of the next turn either way — and interrupting the
+        turn in flight would break the rule that a push never splices (section 8 point 3).
+        """
+        if self._watch is not None and not self._watch.done():
+            return
+        self._watch = asyncio.create_task(
+            self._poll_inbox(mailbox, interval), name=f"stcode-inbox-{self.id}"
+        )
+
+    async def _poll_inbox(self, mailbox: Any, interval: float) -> None:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                if self.agent.busy or not mailbox.pending():
+                    continue
+                await self.push(WAKE)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a broken volume must not be silent
+                self.broadcast(
+                    ErrorMessage(session=self.id, message=f"inbox watch: {exc}").model_dump()
+                )
+                return
+
     async def aclose(self) -> None:
+        if self._watch is not None:
+            self._watch.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._watch
+            self._watch = None
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

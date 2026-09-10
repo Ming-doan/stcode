@@ -21,6 +21,7 @@ addition the *caller* supplies; nothing here is writable from inside a turn.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal, Sequence
 
 from stcode.core.harness.approvals import ApprovalMode
@@ -36,11 +37,39 @@ from stcode.core.harness.prompts.sections import (
     environment_section,
     mcp_section,
     project_section,
+    role_section,
     skills_section,
     tools_section,
 )
 
 PromptMode = Literal["plan", "execute"]
+
+ROLES_DIR = Path(__file__).parent / "roles"
+"""One markdown file per role. A new role is a new file, never a code change
+(CLAUDE.md 9.3) — which is only true for as long as nothing here reads a role by name.
+"""
+
+
+def available_roles() -> list[str]:
+    """Every role this build knows about. Any file in `roles/` is a valid one."""
+    if not ROLES_DIR.is_dir():
+        return []
+    return sorted(path.stem for path in ROLES_DIR.glob("*.md"))
+
+
+def load_role(name: str) -> str:
+    """A role's markdown, or "" when it has none.
+
+    An unknown name raises: a container started with `[team] role = "backedn-dev"`
+    should refuse loudly, not run a nameless agent that quietly owns nothing.
+    """
+    if not name:
+        return ""
+    path = ROLES_DIR / f"{name}.md"
+    if not path.is_file():
+        known = ", ".join(available_roles()) or "(none installed)"
+        raise FileNotFoundError(f"No role named {name!r}. Available: {known}.")
+    return path.read_text(encoding="utf-8").strip()
 
 _APPROVAL_NOTES: dict[ApprovalMode, str] = {
     "plan": "Writes and commands are switched off. Research and propose only.",
@@ -67,6 +96,8 @@ def build_system_prompt(
     approval_mode: ApprovalMode = "suggest",
     tool_names: Sequence[str] = (),
     skill_catalogue: str = "",
+    role: str = "",
+    teammates: Sequence[str] = (),
     mcp_catalogue: str = "",
     mcp_directory: str = ".stcode/mcp_servers",
     project_instructions: str = "",
@@ -84,6 +115,8 @@ def build_system_prompt(
         approval_mode: What the agent may do unattended; also decides the note shown.
         tool_names: Tools advertised this turn.
         skill_catalogue: Output of `SkillRegistry.catalogue()`.
+        role: The role's markdown body, from `load_role`. Team mode only.
+        teammates: Other roles with an inbox on the shared volume.
         mcp_catalogue: Output of `MCPManager.catalogue()` — server and tool names only.
         mcp_directory: Where the generated stubs live.
         project_instructions: Contents of the repository's CLAUDE.md / AGENTS.md.
@@ -103,6 +136,11 @@ def build_system_prompt(
     if mode == "execute":
         sections.append(VERIFICATION)
     sections += [SCOPE, RECOVERY, TONE]
+    # Above the optional sections and below the fixed ones: a role is static for the
+    # life of a container, so it belongs in the cached prefix, and it outranks the
+    # general guidance about what to work on.
+    if role:
+        sections.append(role_section(role, teammates))
 
     for optional in (
         skills_section(skill_catalogue),
@@ -132,8 +170,11 @@ def build_system_prompt(
 __all__ = [
     "EXECUTE_MODE",
     "PLAN_MODE",
+    "ROLES_DIR",
     "SUBAGENT",
     "PromptMode",
+    "available_roles",
     "build_system_prompt",
+    "load_role",
     "mode_for",
 ]
