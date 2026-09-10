@@ -15,7 +15,9 @@ coded in the wrong direction.
 | ✓ | Exists and works today |
 | ⟳ | Exists, but changes in the named step |
 | ✗ | Does not exist yet — build in the named step |
-| ✂ | Exists, scheduled for deletion in step 1 |
+
+Steps 1–10 are all built, so nothing carries ✗ today. The legend stays because the next
+thing anyone adds will start there.
 
 ---
 
@@ -73,7 +75,10 @@ and never touch the context.
 
 This is also the honest remnant of the RLM idea: *context as a variable*, obtained
 without the kernel↔harness RPC bridge that the original design required.
-→ §6.2 / §6.3 of `EXPECTED.md`, step 7–8.
+→ §6.2 / §6.3 of `EXPECTED.md`, step 7–8. **Built.** Measured here on three servers and
+twelve tools: **9,869 → 0 chars** of tool definitions in the prefix, every turn
+(`smoke_mcp.py`). The stubs open their own connection inside the REPL, so there is no
+reverse-RPC bridge either.
 
 ### 2.2 A supervisor watches the trajectory
 
@@ -85,7 +90,9 @@ repeated unproductive cycles** and redirects the agent.
 reader. Cheap counting heuristics run first at zero token cost (same tool+args ≥3×, error
 rate >50%, no file written in N turns, same file edited ≥4×); only when one fires does it
 spend a `difficulty="low"` call. Its nudge is appended as a `user` message, never as a
-system-prompt edit, so prompt caching survives. → step 9.
+system-prompt edit, so prompt caching survives. → step 9. **Built.** `every` counts
+iterations *within* a turn, because that is where a loop actually happens. The cheap
+model may answer NONE, and usually should.
 
 ### 2.3 Agent-to-agent messaging has no protocol
 
@@ -95,7 +102,9 @@ turn. Shared knowledge is a directory the existing `read`/`write`/`grep` already
 
 No registry, no routing table, no service discovery, no N² socket mesh. Messages carry
 `refs` (paths) rather than content — Anthropic's filesystem-output pattern, and the thing
-that keeps team token cost from exploding. → step 10.
+that keeps team token cost from exploding. → step 10. **Built**, and `refs` is enforced
+rather than requested: `send_message` refuses a body over 2000 chars and refuses a ref
+that does not exist.
 
 ### 2.4 Daemon-first, so containerization is not a rewrite
 
@@ -108,10 +117,10 @@ not architecture. → step 5.
 | | Claude Code | Cline / Kilo | **stcode** |
 | --- | --- | --- | --- |
 | Tool quality (read/edit/grep/bash) | excellent | good | ✓ comparable already |
-| MCP | tool defs per turn | tool defs per turn | ⟳ as code, ~50× cheaper |
+| MCP | tool defs per turn | tool defs per turn | ✓ as code, measured at 9.9k → 0 chars/turn |
 | Runs headless in a container | partial | no | ✓ core design, step 5 |
-| Multi-agent team across containers | no | no | ✗ step 10 |
-| Stagnation detection | no | no | ✗ step 9 |
+| Multi-agent team across containers | no | no | ✓ step 10 — but see §11 |
+| Stagnation detection | no | no | ✓ step 9 |
 | Maturity, polish, ecosystem | **far ahead** | ahead | behind, and will stay behind |
 
 We are not competing on polish. We are betting on the four rows in the middle.
@@ -130,11 +139,11 @@ flowchart TB
     subgraph container["One container = one agent = one role"]
         daemon["<b>Daemon</b> ✓<br/>socket · JSONL · session registry"]
         agent["<b>Agent</b> ✓<br/>the turn loop"]
-        sup["<b>Supervisor</b> ✗<br/>stagnation detection"]
+        sup["<b>Supervisor</b> ✓<br/>stagnation detection"]
         sess["<b>Session</b> ✓<br/>JSONL append-only"]
         harn["<b>Harness</b> ✓<br/>tools · role prompt · approvals"]
         gw["<b>LLMGateway</b> ✓<br/>difficulty routing · retry"]
-        repl["<b>PyREPL</b> ⟳<br/>subprocess + JSONL"]
+        repl["<b>PyREPL</b> ✓<br/>subprocess + JSONL"]
 
         daemon --> agent
         agent --> sess
@@ -143,7 +152,7 @@ flowchart TB
         sup -.->|reads| sess
         sup -.->|nudge| agent
         harn -.->|tool repl| repl
-        repl -.->|import| mcpcode["mcp_servers/*.py ✗"]
+        repl -.->|import| mcpcode["mcp_servers/*.py ✓"]
     end
 
     subgraph vol["/team volume — mounted into every container"]
@@ -212,11 +221,21 @@ await agent.interrupt();  await agent.aclose()
 `run(text)` is a shortcut: `push()` then `events()` until the first `TurnFinished`.
 One machine, two doors — do not write a second loop.
 
-**`PyREPL`** ✗ step 7, `core/repl/` — a `python -u` subprocess speaking JSONL on
-stdin/stdout. Persistent namespace, top-level `await` via
-`compile(..., PyCF_ALLOW_TOP_LEVEL_AWAIT)`, SIGINT to interrupt, and an `inject` message
-that pushes `tool_out` across. `core/kernel/` (jupyter) is already gone; until this
-lands, the `repl` tool is registered but advertised to nobody.
+**`PyREPL`** ✓ `core/repl/` — a `python -u` subprocess speaking JSONL on stdin/stdout.
+Persistent namespace, top-level `await` via `compile(..., PyCF_ALLOW_TOP_LEVEL_AWAIT)`,
+SIGINT to interrupt, and an `inject` message that pushes `tool_out` across.
+
+```py
+repl = PyREPL(cwd=root)                    # lazy: no subprocess until the first cell
+result = await repl.execute(code, timeout=120, on_stream=...)
+await repl.inject({output_id: payload})    # what `elide` cut, made reachable
+```
+
+Two things that only showed up under a real load, both fixed and both worth keeping in
+mind if you touch it: a cell that spawns a subprocess needs a real `fileno()` on the
+redirected stderr, and the parent must drain that pipe continuously or a chatty child
+deadlocks on a full buffer. A cell that answers its SIGINT keeps its namespace; one that
+ignores it is killed and the caller is told the namespace is gone.
 
 **`Daemon`** ✓ `core/daemon/` — **one daemon, many sessions**, addressed by id. Solo mode
 runs a single daemon for every project you work on, one session per repo — not one
@@ -238,7 +257,30 @@ code). Approvals live in the **runner**, not the connection: the client that ask
 gone by the time the answer comes, and a second client on the same session may answer
 instead.
 
-**`Supervisor`** ✗ step 9 · **`Mailbox`** ✗ step 10 — see §2.2 and §9.
+**`Supervisor`** ✓ `core/agent/supervisor.py` — reads the trajectory, counts first,
+asks a cheap model only when a count fires.
+
+```py
+Supervisor.smell(records)                  # -> str | None, zero tokens
+await supervisor.check(records)            # -> a nudge, or None
+```
+
+Four heuristics: the same call three times, over half the calls failing, ten calls with
+no file written, one file rewritten four times. A positive costs one `difficulty="low"`
+call, which may answer NONE — and for ordinary work it should.
+
+**`Mailbox`** ✓ `core/team/mailbox.py` — a message is a file.
+
+```py
+mailbox = Mailbox("/team", role="ba")
+mailbox.send("backend-dev", "spec v2", refs=["/team/knowledge/spec.md"])
+mailbox.drain()                            # -> list[TeamMessage], moved to .read/
+mailbox.pending()                          # what the daemon's watcher polls
+```
+
+It imports nothing from the harness, which is what keeps the arrow one-way: the
+`send_message` *tool* lives in `core/team/tools.py` and closes over a mailbox, the same
+shape `task` uses for the `Agent`.
 
 ### 3.2 Dependency direction
 
@@ -260,10 +302,11 @@ Seven. Each one exists because violating it produced a specific, known failure.
 
 1. **Tool output is elided at 8192 chars, never LLM-summarised.** Summarising loses
    information; eliding does not — *provided the full value is somewhere the model can
-   actually reach*. The elision hint may only name a real location: `tool_out["..."]`
-   once the REPL bridge exists (step 7), and until then `NARROW_REQUEST_HINT` — "call
-   again with a narrower offset/limit". Promising a variable that isn't there is the bug
-   described in `EXPECTED.md` §4.1, and it is fixed.
+   actually reach*. The hint names `tool_out["..."]` when a REPL is attached to carry
+   the payload across, and `NARROW_REQUEST_HINT` — "call again with a narrower
+   offset/limit" — when one is not. `Runtime.outputs_reachable` is the single place that
+   decides, so the promise cannot drift from the fact. Promising a variable that isn't
+   there is the bug in `EXPECTED.md` §4.1, and it is fixed.
 2. **One agent = one role = one checkout = one merge boundary.** If two agents need to
    write the same file, the roles are split wrong. That is a design error, not a signal
    to add locking.
@@ -296,8 +339,8 @@ stcode/
     banner.py          ✓  ASCII wordmark
     labels.py          ✓  every user-facing string, in one place
   core/
-    configs.py         ⟳  location, schema, load/save, .env, [agent]/[session]/[daemon]
-                          (+ [team], step 10)
+    configs.py         ✓  location, schema, load/save, .env,
+                          [agent]/[session]/[daemon]/[mcp]/[supervisor]/[team]
     common/            ✓  vocabulary shared across core/ — ToolDefinition, ToolResult
       truncate.py      ✓  elide() and the 8192 cap
     providers/         ✓  adapters + gateway
@@ -309,30 +352,31 @@ stcode/
       registry.py      ✓  provider lookup + static metadata
       gateway.py       ✓  LLMGateway, with config fallback in _resolve_route
     harness/           ✓  the tools, prompts and skills an agent works with
-      harness.py       ⟳  facade (+ role=, step 10)
+      harness.py       ✓  facade, incl. role= and the MCP catalogue
       approvals.py     ✓  ApprovalMode, ToolPermission, mode policy
       errors.py        ✓  ToolError family
-      context.py       ⟳  HarnessContext — cwd, scope, reads, todos, git
+      context.py       ✓  HarnessContext — cwd, scope, reads, todos, git, repl
                           (+ written_files, later)
       registry.py      ✓  which tools exist, which an agent may see
-      mcp.py           ⟳  MCP servers → generates mcp_servers/*.py (step 8)
+      mcp.py           ✓  MCP servers → generates mcp_servers/*.py, or advertises them
       tools/           ✓  base.py (@tool, Runtime), schema.py, files/search/shell/repl/…
       prompts/         ✓  one prompt + mode note + sub-agent briefing
-        roles/         ✗  ba.md, frontend-dev.md, backend-dev.md, devops.md (step 10)
+        roles/         ✓  ba.md, frontend-dev.md, backend-dev.md, devops.md — data
       skills/          ✓  SKILL.md discovery, loaded on demand
     session/           ✓  JSONL store, resume, messages()/tail()
-    agent/             ✓  the turn loop, events, task tool
+    agent/             ✓  the turn loop, events, task tool, supervisor.py
     daemon/            ✓  socket server, protocol, registry, autonomy guard
       protocol.py      ✓  the JSONL message shapes — the only thing on the wire
       runner.py        ✓  SessionRunner: fan-out, approval correlation, set_mode
       server.py        ✓  Daemon + one connection per client
       autonomy.py      ✓  guard_autonomy / in_container — rule 5, enforced
-    repl/              ✗  _worker.py subprocess + JSONL client — step 7
-      supervisor.py    ✗  (lives in agent/) stagnation detection — step 9
-    team/              ✗  Mailbox, send_message, shared-volume conventions — step 10
-Dockerfile             ✗  one image, all roles — step 10 (§9.4)
+    repl/              ✓  _worker.py subprocess + client.py — the persistent namespace
+    team/              ✓  mailbox.py (no harness imports), tools.py (send_message)
+Dockerfile             ✓  one image, all roles; --role / STCODE_ROLE picks one (§9.4)
+smoke_*.py             ✓  one per phase gate, run by hand against real processes
 docs/
   EXPECTED.md          ✓  the architecture decision (Vietnamese) — the authority
+  evals.md             ✓  ~20 team-mode evaluation tasks — written, not yet run
 ```
 
 No `docker-compose.yml`, no k8s manifests. The repo ships an image and an environment
@@ -383,17 +427,22 @@ See `core/harness/tools/base.py`.
 | `todo_write` | `todo_write(items)` | ✓ not a real tool — a device to keep the plan in context. Keep it |
 | `ask_user_question` | `ask_user_question(question, options=None)` | ✓ fails clearly with no user attached, rather than hanging |
 | `skill` | `skill(name)` | ✓ loads a `SKILL.md` body on demand |
-| `repl` | `repl(code, timeout=120)` | ✗ registered, advertised to nobody until its backend lands (step 7) |
-| `web_search` | `web_search(query=None, url=None)` | ✂ deferred, same as `repl`: registered, unadvertised |
-| `task` | `task(prompt, name, tools=None, scope=None, difficulty=...)` | ✓ sub-agent, solo mode only; lives in `core/agent/` |
-| `send_message` | `send_message(to, subject, body, refs=None)` | ✗ step 10 — team mode only |
+| `repl` | `repl(code, timeout=120)` | ✓ persistent namespace; top-level agents only (rule 3) |
+| `web_search` | `web_search(query=None, url=None)` | ✓ needs `TAVILY_API_KEY`; says so on the first call if missing |
+| `task` | `task(prompt, name, tools=None, scope=None, difficulty=...)` | ✓ sub-agent, solo mode only; lives in `core/agent/`. **Removed** when a team is joined |
+| `send_message` | `send_message(to, subject, body, refs=None)` | ✓ team mode only; lives in `core/team/` |
 
 **Named sets** (`core/harness/tools/__init__.py`): `MAIN_TOOLS` is a top-level agent's
 allowance and `WORKER_TOOLS` is a sub-agent's — no `repl`, no `task`, because a sub-agent
 that can spawn is a sub-agent for which `max_depth` stops bounding anything.
 `READ_ONLY_TOOLS` is derived from declared permissions, not hand-listed, so it cannot
-drift. Registered is not advertised: a tool with no working backend stays out of every
-set, because being offered a capability and then refused it wastes a turn.
+drift. Registered is still not advertised: a tool with no working backend stays out of
+every set, because being offered a capability and then refused it wastes a turn.
+
+Two tools are added from outside the harness, both as factories closing over something
+`core/harness` must not import: `task` over an `Agent`, `send_message` over a `Mailbox`.
+Joining a team removes `task` — in team mode the parallelism is containers, and a
+sub-agent inside a role container answers a question the architecture already answered.
 
 **Permissions are declared once and enforced elsewhere.** `@tool(permission=...)` states
 the class of side effect; `requires_approval(mode, permission)` and
@@ -566,19 +615,28 @@ The repo ships a `Dockerfile` and this contract, nothing more:
 | Mounts | `/team` (shared volume), `/workspace` (where the agent clones), config read-only |
 | Env | `STCODE_CONFIG`, `STCODE_SANDBOX=1` (unlocks `full-auto`, rule 5), provider keys |
 | Port | `[daemon] transport="tcp"`, default 7717 |
-| Role | `[team] role`, which must match a file in `prompts/roles/` |
-| Credentials | SSH key mounted read-only, if git integration uses a real remote |
+| Role | `[team] role`, or `--role` / `STCODE_ROLE` — must match a file in `prompts/roles/` |
+| Credentials | none. The origin is a bare repo on the volume (§9.5) |
 
-### 9.5 Open decision — how work gets integrated
+### 9.5 Settled at step 10 — how work gets integrated
 
-**Not decided. Settle it at step 10, not before.** The current leaning: your git SSH
-credential is mounted into every container (path in `[team.git]`), and the role prompt
-tells the agent to check out before writing code; a private repo with no credential
-available means the agent writes into the shared volume instead.
+**A bare repository on the shared volume.** `/team/repo.git` is the origin. Each role
+clones it into `/workspace`, works on its own branch, pushes, and **exactly one role
+merges** — devops, by default.
 
-This affects **no step before 10**, and the three candidates — real remote + PRs, a bare
-repo on `/team`, a shared checkout — differ more in `roles/*.md` wording than in code.
-Recorded here so nobody later mistakes the leaning for a decision.
+Chosen over the documented leaning (SSH credential + a real remote) for two reasons:
+
+- **No credential, no network.** The phase-5 gate — two containers, two roles, one
+  feature — runs on your machine as it stands. The SSH route needs a real repository, a
+  real key inside each container, and egress; and a private repo with no key degrades
+  silently into "write into the shared volume", which is not integration.
+- **It is still real git.** Real branches, a real merge, a real merge boundary. That is
+  what the third candidate, a shared checkout, throws away — and the boundary is the
+  whole point of rule 2.
+
+Want pull requests instead? Point `[team] remote` at a URL and mount a key at
+`[team] ssh_key`. The difference really is one config line and one sentence in
+`roles/*.md`, exactly as predicted.
 
 **Failure modes to design against** — these are the ones that actually show up:
 
@@ -675,10 +733,10 @@ The full table with estimates is `EXPECTED.md` §15.
 Providers + gateway, config, CLI, chat/settings UI, harness tools, approval modes.
 `stcode` runs, configures itself, streams a flat reply. **~9k lines, and no turn loop.**
 
-### Phase 1 — The loop (steps 1–4) ✓ code done
+### Phase 1 — The loop (steps 1–4) ✓ done
 > *Done when: a two-file change completes end to end with a readable session log.*
-> **Not yet demonstrated** — no client drives `Agent` until step 6, so the loop is
-> covered by tests against a scripted gateway rather than by a real task.
+> **Demonstrated** since step 6 — every `smoke_*.py` drives the real loop against a real
+> model, and the session file is the readable log.
 
 1. **Cleanup ✓.** `core/kernel/`, `store.py`, `namespace()`, `stcode/platform/` deleted;
    `truncate.py` → `core/common/`; elide hint fixed (rule 1); `_resolve_route` falls back;
@@ -699,31 +757,42 @@ Providers + gateway, config, CLI, chat/settings UI, harness tools, approval mode
 6. **TUI is a client ✓.** `cli/app.py` opens a socket instead of the gateway; Esc →
    `interrupt`; approval and question modals; `--headless` / `--daemonless`.
 
-### Phase 3 — Token economics (steps 7–8)
+### Phase 3 — Token economics (steps 7–8) ✓ done
 > *Done when: three MCP servers are connected and the prompt prefix does not grow.*
+> **Demonstrated.** `smoke_mcp.py` connects three servers offering twelve tools and
+> measures the prefix in both modes: MCP tool definitions go 9,869 chars → 0.
 
-7. **`core/repl/`, ~120 lines.** Subprocess worker, `inject` for `tool_out`.
-8. **MCP-as-code, ~90 lines.** `mcp.py` generates `mcp_servers/*.py` instead of
-   registering tool definitions.
+7. **`core/repl/` ✓.** Subprocess worker, `inject` for `tool_out`, output streamed per
+   line. The elision hint now names a place that really holds the value.
+8. **MCP-as-code ✓.** `[mcp] expose = "code"` generates `.stcode/mcp_servers/*.py`;
+   `"tools"` keeps the old behaviour for a server small enough not to care.
 
-### Phase 4 — Autonomy (step 9)
+### Phase 4 — Autonomy (step 9) ✓ done
 > *Done when: a deliberately looping task is caught and redirected.*
+> **Demonstrated.** `smoke_supervisor.py` shows a real cheap model reading a real
+> looping trajectory, naming the loop, and — shown healthy work — answering NONE.
 
-9. **Supervisor, ~80 lines.** Heuristics first, cheap model second, nudge into `messages`.
+9. **Supervisor ✓.** Heuristics first, cheap model second, nudge into `messages`.
+   Checks every 8 iterations *within* a turn, which is where a loop actually happens.
 
-### Phase 5 — Team (step 10)
+### Phase 5 — Team (step 10) ✓ built
 > *Done when: two containers, two roles, one feature shipped through `/team`.*
+> **Partly demonstrated.** `smoke_team.py` brings up two real containers on one volume
+> and checks delivery, the idle-agent wake, and invariant 5 from both sides. A whole
+> feature shipped end to end is a longer run than a smoke test, and is what
+> `docs/evals.md` is for.
 
-10. **`core/team/`, ~120 lines**, plus the `Dockerfile` (§9.4). Mailbox, `send_message`,
+10. **`core/team/` ✓**, plus the `Dockerfile` (§9.4). Mailbox, `send_message`,
     `roles/*.md`, daemon watches the inbox and wakes an idle agent.
-    **Settle the git integration question (§9.5) here.**
-    **Before starting: write ~20 real evaluation tasks.** Without them there is no way to
-    tell whether team mode helps or merely spends 15× the tokens — and §11 says that is
-    the live question, not a rhetorical one.
+    Git integration settled (§9.5): a bare repo on `/team`.
+    **~20 evaluation tasks are written (`docs/evals.md`) and not yet run.** Until they
+    are, "does team mode help or merely spend 15× the tokens" is unanswered — and §11
+    says that is the live question, not a rhetorical one.
 
 ### Later
-`web_search`, compaction with a visible threshold, sessions in a live database, provider
-failover, `@`-mention in the TUI, `written_files` tracking.
+Compaction with a visible threshold, sessions in a live database, provider failover,
+`@`-mention in the TUI, `written_files` tracking. **And running `docs/evals.md`**, which
+is the only thing that can tell you whether phase 5 was worth building.
 
 ---
 

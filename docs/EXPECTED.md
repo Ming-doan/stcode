@@ -297,8 +297,24 @@ file** vào workspace của REPL:
     └── create_issue.py
 ```
 
-Mỗi file là một stub mỏng: docstring lấy từ schema của server, thân hàm gọi ngược về
-`MCPManager` qua chính đường JSONL của REPL. Agent làm việc thế này:
+Mỗi file là một stub mỏng: docstring lấy từ schema của server, thân hàm gọi
+`mcp.call(server, tool, args)`.
+
+**Chốt ở bước 8 — stub tự kết nối, KHÔNG có cầu RPC ngược.** Bản v2 viết là "gọi ngược
+về `MCPManager` qua đường JSONL của REPL". Bỏ, vì cái giá không đáng: worker phải nói
+hai chiều và tái nhập được *trong lúc* một cell đang chạy, tức giao thức "một request
+một dòng" không còn đơn giản nữa (~+80 dòng).
+
+Thay vào đó: REPL chạy cùng interpreter, nên stub `import` thẳng `stcode.core.harness.mcp`
+và tự mở connection, cache một `MCPManager` mỗi server trong tiến trình REPL. Harness chỉ
+connect *một lần* lúc khởi động để hỏi schema rồi sinh file và đóng — nên vẫn đúng một
+connection sống mỗi server, không phải hai.
+
+Kèm theo: `[mcp] expose = "code" | "tools"`. Mặc định `code`. Giữ `tools` làm đường lui —
+một server nhỏ hai tool nằm trong prompt vẫn rẻ hơn ba lượt REPL đi khám phá. Lập luận
+token là thật, nhưng không phải lúc nào cũng đúng.
+
+Agent làm việc thế này:
 
 ```py
 # Lượt 1 — khám phá, tốn ~200 token thay vì 30k
@@ -367,9 +383,22 @@ Phía agent: `create_subprocess_exec(sys.executable, "-u", worker)`, ghi một d
 **`ExecResult` / `elide()` / `view()` giữ nguyên, không đổi một dòng** — chúng vốn không
 biết gì về Jupyter.
 
-**Cái phải trả bằng tay:** stream output real-time. stdout đã dùng cho giao thức, nên cần
-pipe thứ hai (fd 3) hoặc chèn `{"type":"chunk"}` xen giữa. Với TUI thì cần; với container
-chạy nền thì không. **Làm ở bước sau, không phải bước đầu.**
+**Cái phải trả bằng tay:** stream output real-time. **Đã làm luôn ở bước 7**, không hoãn:
+tool `repl` vốn đã nối sẵn `on_stream`, nên hoãn nghĩa là để một nhánh code chết. Chọn
+chèn `{"type":"chunk"}` xen giữa, không cần fd 3 — ~10 dòng mỗi phía.
+
+**Một cái bẫy chỉ lộ ra khi chạy thật.** `redirect_stderr` trỏ vào buffer không có
+`fileno()`, nên mọi cell sinh subprocess chết ngay với `io.UnsupportedOperation: fileno`
+— tức là chính ca dùng chính của REPL (chạy stdio MCP server) hỏng. Hai sửa:
+
+1. Tee của worker trả về fd stderr thật, để `subprocess.Popen` có cái để kế thừa.
+2. Tiến trình cha **liên tục** rút pipe stderr đó. Một server ghi log thoải mái vào pipe
+   không ai đọc sẽ chặn ở buffer đầy và treo cell đã khởi động nó.
+
+**Bẫy thứ hai:** transport của MCP SDK là anyio cancel scope, và anyio **không cho** task
+khác task đã vào được phép thoát scope. Mở ở `Harness.create` rồi đóng ở `Harness.aclose`
+chính là hai task khác nhau. Nên `MCPManager` giao stack cho **một task riêng** giữ suốt
+đời nó; request thì task nào gọi cũng được, chỉ vào/ra là bị ghim.
 
 ---
 
@@ -594,6 +623,18 @@ class Supervisor:
             return "sửa đi sửa lại cùng một file"
         return None
 ```
+
+**Chốt ở bước 9:** `every` đếm **vòng lặp tool trong MỘT lượt**, không phải số lượt của
+người dùng. Task lặp vô ích lặp *bên trong* một lượt (tối đa `max_turns = 40`), nên đếm
+theo lượt người dùng sẽ không bao giờ bắt được đúng cái nó sinh ra để bắt. Mặc định 8,
+bật sẵn, cấu hình ở `[supervisor]`.
+
+Thêm hai thứ nhỏ mà thiếu là hỏng:
+
+- **Model rẻ có quyền phủ quyết.** Trả `NONE` = "vẫn ổn, đi tiếp". Heuristic báo động
+  nhầm là chuyện thường; một supervisor không biết nói "cứ làm đi" là supervisor bạn sẽ
+  tắt đi.
+- **Không nhắc lại y hệt một câu.** Nhắc hai lần cũng là một vòng lặp.
 
 **Ba quyết định thiết kế:**
 
@@ -838,15 +879,22 @@ như một section của system prompt — cùng cơ chế `project_instructions
 **Không cần git worktree.** Container đã cho cách ly thật, và `git` đã là công cụ merge.
 Thêm worktree là thêm một cơ chế thứ ba làm việc mà hai cơ chế kia đã làm xong.
 
-**Cách tích hợp: QUYẾT ĐỊNH MỞ, chốt ở bước 10.** Hướng đang nghiêng về:
+**Cách tích hợp: ĐÃ CHỐT ở bước 10 — bare repo trên `/team`.**
 
-- SSH credential của bạn mount vào mọi container, đường dẫn khai trong `[team] git`.
-- Prompt vai trò dặn agent **checkout trước khi viết code**.
-- Repo private mà container không có credential ⇒ agent ghi thẳng vào volume chung.
+`/team/repo.git` là origin của team. Mỗi vai `git clone` về `/workspace` của mình, đẩy
+branch riêng, và **đúng một vai được merge** (mặc định devops).
 
-Không xây gì cho phần này trước bước 10. Nó **không ảnh hưởng bước 1–9**, và ba phương án
-(remote thật + PR / bare repo trên `/team` / checkout chung) khác nhau ở *quy ước trong
-`roles/*.md`* nhiều hơn là ở code. Ghi lại đây để lần sau khỏi tưởng là đã chốt.
+Vì sao chọn phương án này thay vì hướng nghiêng cũ (SSH credential + remote thật):
+
+- **Không cần credential, không cần mạng.** Cửa nghiệm thu của bước 10 — 2 container,
+  2 vai, xong một feature — chạy được ngay trên máy bạn. Phương án SSH cần một repo
+  thật, một key thật trong container, và mạng; và repo private không có key thì tụt
+  xuống "ghi thẳng vào volume chung" một cách âm thầm.
+- **Vẫn là git thật.** Branch thật, merge thật, ranh giới merge thật. Đây là điều mà
+  "checkout chung" không có — nó xoá mất chính ranh giới mà bất biến 2 sinh ra để tạo.
+
+Muốn PR thật thì đổi `[team] remote` sang URL và mount key vào `[team] ssh_key`. Khác
+biệt đúng bằng một dòng config và một câu trong `roles/*.md` — đúng như đã dự đoán.
 
 ### 12.6 Chế độ hỏng phải biết trước
 
@@ -1022,16 +1070,21 @@ Mỗi bước đều để lại thứ chạy được.
 | 4 | **Prompt caching + git context** (§14 mục 1–2) + `bash(cwd=)` (mục 3) | ~65 dòng | Lượt 2 rẻ hơn ~10×; agent biết nhánh và `git status` |
 | 5 | ✓ **`core/daemon/`** — giao thức §11.1 + §11.1b, approval correlation §11.2, guard §11.3 | ~200 dòng | Attach/detach không giết agent; `full-auto` bị chặn trên host |
 | 6 | ✓ **TUI thành client.** Thay `cli/app.py:_stream_reply` bằng socket; Esc → interrupt; `--headless` / `--daemonless` | ~120 dòng | Dùng được hằng ngày như Cline/Kilo |
-| 7 | **`core/repl/`** — worker subprocess §6.3 + `inject` sửa bug `tool_out` | ~120 dòng | `repl` chạy, biến sống qua các lượt |
-| 8 | **MCP-as-code** (§6.2) — `mcp.py` sinh file thay vì đăng ký tool | ~90 dòng | 3 MCP server mà prefix không phình |
-| 9 | **Supervisor** (§10) | ~80 dòng | Bơm một task lặp vô ích vào → nó bắt được và bẻ lái |
-| 10 | **`core/team/`** (§12) — mailbox, `send_message`, `roles/*.md`, daemon watch inbox, `Dockerfile` (§12.7). **Chốt cách tích hợp git (§12.5)** | ~120 dòng | 2 container, 2 vai, trao đổi qua `/team`, làm xong một feature |
+| 7 | ✓ **`core/repl/`** — worker subprocess §6.3 + `inject` sửa bug `tool_out` | ~330 dòng | `repl` chạy, biến sống qua các lượt |
+| 8 | ✓ **MCP-as-code** (§6.2) — `mcp.py` sinh file thay vì đăng ký tool | ~200 dòng | 3 MCP server mà prefix không phình |
+| 9 | ✓ **Supervisor** (§10) | ~200 dòng | Bơm một task lặp vô ích vào → nó bắt được và bẻ lái |
+| 10 | ✓ **`core/team/`** (§12) — mailbox, `send_message`, `roles/*.md`, daemon watch inbox, `Dockerfile` (§12.7). **Chốt cách tích hợp git (§12.5)** | ~120 dòng | 2 container, 2 vai, trao đổi qua `/team`, làm xong một feature |
 | 11 | *Hoãn:* web_search, compaction, session-vào-db, provider failover | — | Khi có nhu cầu thật |
 
 **Bước 1–6 (~1 tuần) = một coding agent dùng được hằng ngày.** Bước 7–8 là phần RLM còn
 lại sau khi gỡ chỗ đắt tiền. Bước 9–10 là team.
 
 Đọc lại §1.1 trước khi bắt đầu bước 10.
+
+**Bước 1–10 đã xong.** Ước tính dòng ở trên thấp hơn thực tế khoảng 2–2,5 lần, và chỗ
+chênh nằm gần hết ở docstring cùng các ca lỗi mà chỉ khi chạy thật mới lộ ra (§6.3).
+Còn thiếu: ~20 task đánh giá đã viết ở `docs/evals.md` nhưng **chưa chạy** — nên câu
+"team mode có lãi hay chỉ tốn 15× token" (§1.1) vẫn đang bỏ ngỏ, và nó là câu hỏi thật.
 
 ---
 

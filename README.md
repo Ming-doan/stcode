@@ -9,11 +9,14 @@ config key — `transport = "tcp"` — rather than a rewrite. And because a cont
 real boundary, `full-auto` is allowed to exist without being a foot-gun: the daemon
 refuses to start in that mode anywhere its blast radius is not contained.
 
-> **Status: phase 2 of 5.** The turn loop, the tools, the session transcript, the
-> daemon and the TUI client all work. MCP-as-code, the stagnation supervisor, and
-> multi-container team mode are designed and not yet built — see
-> [`CLAUDE.md`](CLAUDE.md) §12 for exactly what exists and what does not. That file is
-> deliberately honest about the difference; so is this one.
+> **Status: all five phases built.** The turn loop, tools, transcript, daemon and TUI
+> client; the REPL and MCP-as-code; the stagnation supervisor; multi-container team
+> mode. Each phase has a `smoke_*.py` that proves its gate against real processes.
+>
+> What is *not* done: the ~20 team-mode evaluation tasks in
+> [`docs/evals.md`](docs/evals.md) are written and have not been run. Until they are,
+> whether team mode helps or merely spends 15× the tokens is an open question, and
+> [`CLAUDE.md`](CLAUDE.md) §11 explains why that is the honest thing to say about it.
 
 ---
 
@@ -38,8 +41,16 @@ uv run stcode config                 # where config lives and what it selects
 ```
 
 Useful flags: `--cwd` (workspace for the session), `--mode` (`plan` | `suggest` |
-`auto-edit` | `full-auto`), `--model`, `--config`, and `--transport` / `--socket` /
-`--host` / `--port` to point at a daemon for this run without editing the config file.
+`auto-edit` | `full-auto`), `--model`, `--role` (team mode), `--config`, and
+`--transport` / `--socket` / `--host` / `--port` to point at a daemon for this run
+without editing the config file.
+
+```bash
+uv run python smoke_repl.py         # step 7  — the REPL, and tool_out
+uv run python smoke_mcp.py          # step 8  — three MCP servers, prefix unchanged
+uv run python smoke_supervisor.py   # step 9  — a loop caught and redirected
+uv run python smoke_team.py         # step 10 — two containers, one volume (needs Docker)
+```
 
 ### Attaching to an agent in a container
 
