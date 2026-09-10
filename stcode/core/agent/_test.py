@@ -425,3 +425,171 @@ def test_run_closes_the_generator_chain_when_it_returns_early(tmp_path: Path, ru
 
     run(scenario())
     run(agent.aclose())
+
+
+# ---- step 9: the supervisor -----------------------------------------------------
+#
+# Two halves to test separately, because they fail differently. The heuristics are
+# pure counting and must not fire on ordinary work. The nudge must reach the model as
+# a `user` message and must leave the system prompt untouched, or prompt caching pays
+# for every piece of advice.
+
+
+def _calls(name: str, count: int, **arguments: Any) -> list[dict[str, Any]]:
+    return [
+        {"type": "tool_call", "id": str(n), "name": name, "arguments": arguments}
+        for n in range(count)
+    ]
+
+
+def test_heuristics_stay_quiet_on_ordinary_work() -> None:
+    """The property that matters most. A supervisor that fires on normal work is one
+    you switch off, and then it catches nothing at all."""
+    from stcode.core.agent.supervisor import Supervisor
+
+    records = [
+        {"type": "user", "content": "add a retry"},
+        *_calls("grep", 1, pattern="retry"),
+        {"type": "tool_result", "id": "0", "name": "grep", "content": "hit", "is_error": False},
+        *_calls("read", 1, path="a.py"),
+        {"type": "tool_result", "id": "0", "name": "read", "content": "...", "is_error": False},
+        *_calls("edit", 1, path="a.py"),
+        {"type": "tool_result", "id": "0", "name": "edit", "content": "ok", "is_error": False},
+        *_calls("bash", 1, command="pytest"),
+        {"type": "tool_result", "id": "0", "name": "bash", "content": "1 failed", "is_error": True},
+    ]
+    assert Supervisor.smell(records) is None
+
+
+def test_heuristics_catch_the_four_shapes_of_stuck() -> None:
+    from stcode.core.agent.supervisor import Supervisor
+
+    repeated = Supervisor.smell(_calls("grep", 3, pattern="middleware"))
+    assert repeated and "identical arguments 3 times" in repeated
+
+    failing = Supervisor.smell(
+        [
+            {"type": "tool_result", "id": str(n), "is_error": n < 3, "content": ""}
+            for n in range(4)
+        ]
+    )
+    assert failing and "3 of its last 4" in failing
+
+    # Four *different* edits to one file — not repetition, which the first check would
+    # have caught, but the same file being reworked over and over.
+    rewritten = Supervisor.smell(
+        [
+            {"type": "tool_call", "id": str(n), "name": "edit",
+             "arguments": {"path": "src/main.py", "old": f"a{n}", "new": f"b{n}"}}
+            for n in range(4)
+        ]
+    )
+    assert rewritten and "src/main.py" in rewritten
+
+    # Ten different reads is not repetition, and nothing was written: the "all looking,
+    # no doing" shape, which needs its own check.
+    idle = Supervisor.smell(
+        [
+            {"type": "tool_call", "id": str(n), "name": "read", "arguments": {"path": f"{n}.py"}}
+            for n in range(10)
+        ]
+    )
+    assert idle and "without writing a single file" in idle
+
+
+def test_a_false_alarm_costs_nothing_beyond_one_cheap_call(run: Any) -> None:
+    """The cheap model has a veto, and NONE is the common answer."""
+    from stcode.core.agent.supervisor import Supervisor
+
+    supervisor = Supervisor(ScriptedGateway([_text("NONE")]))  # type: ignore[arg-type]
+    assert run(supervisor.check(_calls("grep", 3, pattern="x"))) is None
+
+
+def test_the_same_nudge_is_not_repeated(run: Any) -> None:
+    """Saying it twice is itself a loop, and an agent that ignored it once will ignore
+    the repeat."""
+    from stcode.core.agent.supervisor import Supervisor
+
+    gateway = ScriptedGateway([_text("Stop grepping. Read mw.py."), _text("Stop grepping. Read mw.py.")])
+    supervisor = Supervisor(gateway)  # type: ignore[arg-type]
+    records = _calls("grep", 3, pattern="x")
+    assert run(supervisor.check(records)) == "Stop grepping. Read mw.py."
+    assert run(supervisor.check(records)) is None
+
+
+def test_a_broken_supervisor_cannot_break_the_turn(run: Any) -> None:
+    from stcode.core.agent.supervisor import Supervisor
+
+    supervisor = Supervisor(ExplodingGateway(RuntimeError("down")))  # type: ignore[arg-type]
+    assert run(supervisor.check(_calls("grep", 3, pattern="x"))) is None
+
+
+def test_a_looping_agent_is_caught_and_redirected(tmp_path: Path, run: Any) -> None:
+    """Phase 4's gate, against a scripted model: an agent that will not stop grepping.
+
+    Eight identical calls, then the checkpoint. The nudge must arrive as a `user`
+    message in the *next* request, and the system prompt must be byte-identical to the
+    one before it.
+    """
+    from stcode.core.agent.supervisor import Supervisor
+
+    looping = [_call(f"c{n}", "grep", pattern="middleware") for n in range(8)]
+    gateway = ScriptedGateway([*looping, _text("Fine, I will read the file.")])
+    agent = build(tmp_path, gateway, supervisor=Supervisor(ScriptedGateway([_text("You have grepped 'middleware' 8 times. Read mw.py instead.")])))  # type: ignore[arg-type]
+
+    events = run(drain(agent, "find the middleware"))
+    nudges = [e for e in events if type(e).__name__ == "SupervisorNudge"]
+    assert len(nudges) == 1 and "Read mw.py" in nudges[0].text
+
+    # It reached the model, as a user message rather than a prompt edit.
+    last_request = gateway.calls[-1]
+    rendered = [
+        block.text
+        for message in last_request["messages"]
+        if message.role == "user"
+        for block in (message.content if isinstance(message.content, list) else [])
+        if getattr(block, "text", None)
+    ] + [
+        message.content
+        for message in last_request["messages"]
+        if message.role == "user" and isinstance(message.content, str)
+    ]
+    assert any("[supervisor]" in text and "Read mw.py" in text for text in rendered)
+
+    # And the cached prefix did not move.
+    assert last_request["system"] == gateway.calls[0]["system"]
+    assert [r["type"] for r in agent.session.records()].count("supervisor") == 1
+
+
+def test_sub_agents_get_no_supervisor(tmp_path: Path, run: Any) -> None:
+    """A nudge for a one-shot worker arrives about when the worker is finishing."""
+    from stcode.core.configs import GatewayConfig
+
+    config = GatewayConfig.model_validate(
+        {
+            "providers": {"anthropic": {"api_key": "not-used"}},
+            "routing": {"low": {"provider": "anthropic", "model": "claude-haiku-4-5"}},
+            "session": {"dir": str(tmp_path / "sessions")},
+        }
+    )
+    parent = run(Agent.create(config, cwd=tmp_path / "work", load_mcp=False, load_repl=False))
+    try:
+        assert parent.supervisor is not None
+        child_harness = parent.harness.for_subagent("worker")
+        assert child_harness.depth == 1
+        child = run(
+            Agent.create(
+                config,
+                cwd=tmp_path / "work",
+                load_mcp=False,
+                load_repl=False,
+                context=child_harness.context,
+                depth=1,
+            )
+        )
+        try:
+            assert child.supervisor is None
+        finally:
+            run(child.aclose())
+    finally:
+        run(parent.aclose())

@@ -384,6 +384,9 @@ class StcodeApp(App[None]):
                 self._ask_approval(frame)
             case "question":
                 self._ask_question(frame)
+            case "supervisor":
+                self._end_stream()
+                self._notice(labels.supervisor_nudge(str(frame.get("text", ""))))
             case "progress":
                 self._notice(str(frame.get("text", "")))
             case "history":
@@ -417,6 +420,8 @@ class StcodeApp(App[None]):
                             str(record.get("name", "")), dict(record.get("arguments", {}))
                         )
                     )
+                case "supervisor":
+                    self._notice(labels.supervisor_nudge(str(record.get("content", ""))))
                 case "error":
                     self._error(str(record.get("message", "")))
 

@@ -36,10 +36,12 @@ from stcode.core.agent.events import (
     PREVIEW_CHARS,
     AgentEvent,
     AgentFailed,
+    SupervisorNudge,
     ToolFinished,
     ToolStarted,
     TurnFinished,
 )
+from stcode.core.agent.supervisor import Supervisor
 from stcode.core.harness import Harness
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
 from stcode.core.providers.gateway import Difficulty, LLMGateway
@@ -70,12 +72,17 @@ class Agent:
         max_turns: int = DEFAULT_MAX_TURNS,
         max_concurrent: int = 4,
         owns_gateway: bool = False,
+        supervisor: Supervisor | None = None,
     ) -> None:
         self.gateway = gateway
         self.harness = harness
         self.session = session
         self.difficulty = difficulty
         self.max_turns = max_turns
+        self.supervisor = supervisor
+        """Checked every `supervisor.every` iterations *inside* a turn. None disables
+        it entirely — sub-agents get none, since a nudge for a one-shot worker arrives
+        about when the worker is finishing anyway."""
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._owns_gateway = owns_gateway
         self._inbox: asyncio.Queue[str] = asyncio.Queue()
@@ -131,6 +138,16 @@ class Agent:
             max_turns=config.agent.max_turns,
             max_concurrent=config.agent.max_concurrent,
             owns_gateway=owns_gateway,
+            supervisor=(
+                Supervisor(
+                    gateway,
+                    every=config.supervisor.every,
+                    window=config.supervisor.window,
+                    difficulty=config.supervisor.difficulty,
+                )
+                if config.supervisor.enabled and harness.depth == 0
+                else None
+            ),
         )
         if config.agent.enable_task and harness.depth < config.agent.max_depth:
             agent.enable_task()
@@ -223,7 +240,7 @@ class Agent:
         try:
             self.session.append(type="user", content=text)
 
-            for _ in range(self.max_turns):
+            for iteration in range(self.max_turns):
                 reply, calls, usage, failure = "", [], Usage(), None
                 try:
                     async with aclosing(self._stream()) as stream:
@@ -271,6 +288,9 @@ class Agent:
                     yield AgentFailed(message="Interrupted.")
                     return
 
+                async for event in self._supervise(iteration + 1):
+                    yield event
+
             yield AgentFailed(
                 message=(
                     f"Reached the ceiling of {self.max_turns} tool calls in one turn "
@@ -279,6 +299,22 @@ class Agent:
             )
         finally:
             self._busy = False
+
+    async def _supervise(self, iteration: int) -> AsyncGenerator[AgentEvent, None]:
+        """Let the supervisor look, on its own schedule.
+
+        The nudge is written to the session as a `supervisor` record, which
+        `Session.messages()` renders as a prefixed `user` message on the next request.
+        Never into the system prompt: that is the cached prefix, and moving it would
+        turn every piece of advice into a full cache miss (EXPECTED.md 10).
+        """
+        if self.supervisor is None or not self.supervisor.due(iteration):
+            return
+        nudge = await self.supervisor.check(self.session.records())
+        if not nudge:
+            return
+        self.session.append(type="supervisor", content=nudge)
+        yield SupervisorNudge(text=nudge)
 
     async def _stream(self) -> AsyncIterator[Any]:
         async for event in self.gateway.stream(

@@ -46,6 +46,19 @@ class ToolFinished(BaseModel):
     preview: str = ""
 
 
+class SupervisorNudge(BaseModel):
+    """The supervisor spotted a loop and said something.
+
+    An event so a client can show it — the agent is about to change direction and the
+    reason should not be invisible. The nudge itself reaches the model as a `supervisor`
+    record in the session, not through this.
+    """
+
+    type: str = "supervisor"
+    text: str
+    symptom: str = ""
+
+
 class TurnFinished(BaseModel):
     """The model replied without calling a tool. That is the only stop condition.
 
@@ -68,13 +81,16 @@ class AgentFailed(BaseModel):
     recoverable: bool = True
 
 
-AgentEvent = Union[TextDelta, ReasoningDelta, ToolStarted, ToolFinished, TurnFinished, AgentFailed]
+AgentEvent = Union[
+    TextDelta, ReasoningDelta, ToolStarted, ToolFinished, SupervisorNudge, TurnFinished, AgentFailed
+]
 
 __all__ = [
     "PREVIEW_CHARS",
     "AgentEvent",
     "AgentFailed",
     "ReasoningDelta",
+    "SupervisorNudge",
     "TextDelta",
     "ToolFinished",
     "ToolStarted",

@@ -154,6 +154,16 @@ def tool_finished(name: str, ok: bool, preview: str) -> str:
     return f"  {mark} {name} — {_short(preview, 100) or '(no output)'}"
 
 
+def supervisor_nudge(text: str) -> str:
+    """A redirection, shown in full.
+
+    Not shortened, unlike a tool preview: the agent is about to change direction and
+    this is the only place the reason appears. A session that silently changes course
+    is the debuggability problem §11 warns about.
+    """
+    return f"◆ supervisor — {' '.join(text.split())}"
+
+
 def _short(text: str, limit: int = 60) -> str:
     flat = " ".join(text.split())
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"

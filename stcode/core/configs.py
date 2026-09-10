@@ -85,6 +85,23 @@ class DaemonConfig(BaseModel):
     port: int = 7717
 
 
+class SupervisorConfig(BaseModel):
+    """The second pair of eyes on the trajectory (CLAUDE.md 2.2).
+
+    On by default and almost free: four counting heuristics run at zero token cost, and
+    only a positive spends one `difficulty="low"` call.
+
+    `every` counts tool-call iterations *within* a turn, not user messages. A task that
+    loops does so inside one turn, so per-message checking would miss the exact failure
+    this exists to catch.
+    """
+
+    enabled: bool = True
+    every: int = 8
+    window: int = 30
+    difficulty: Difficulty = "low"
+
+
 class MCPConfig(BaseModel):
     """How MCP servers reach the agent.
 
@@ -111,6 +128,7 @@ class GatewayConfig(BaseModel):
     session: SessionConfig = Field(default_factory=SessionConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+    supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
 
 
 DEFAULT_CONFIG_TOML = """\
@@ -165,6 +183,12 @@ difficulty = "high"
 [session]
 dir = "~/.stcode/sessions"
 keep = 100
+
+# Watches for loops: same call 3x, most calls failing, no file written. Counting is
+# free; only a hit costs one cheap model call. `every` is tool calls within a turn.
+[supervisor]
+enabled = true
+every = 8
 
 # MCP servers (from .mcp.json). "code" writes them to .stcode/mcp_servers/ and lets the
 # agent import what it needs; "tools" advertises them in the prompt every turn.
