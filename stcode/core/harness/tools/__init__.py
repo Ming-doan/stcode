@@ -1,22 +1,16 @@
 """
 Built-in tools, and the named sets an agent is spawned with.
 
-The sets matter as much as the tools.
+The sets matter as much as the tools:
 
-`MAIN_TOOLS` is what a top-level agent gets. `WORKER_TOOLS` is what `task` hands a
-sub-agent, and it is deliberately smaller: no `task` and no `repl`, because a sub-agent
-that can spawn is a sub-agent for which `max_depth = 1` stops bounding anything
-(CLAUDE.md §4 rule 3).
+* `MAIN_TOOLS` — a top-level agent's allowance.
+* `WORKER_TOOLS` — what `task` hands a sub-agent. No `task` and no `repl`: one that can
+  spawn is one for which `max_depth` bounds nothing, and one holding a persistent
+  namespace is doing the parent's job without the parent's oversight.
+* `READ_ONLY_TOOLS` — derived from declared permissions, so it cannot drift.
 
-`READ_ONLY_TOOLS` is defined by permission rather than by taste, so a tool that later
-gains the ability to write cannot quietly stay on the list.
-
-`repl` is a top-level tool only. A sub-agent that can hold a persistent namespace and
-import MCP stubs is doing the parent's job with none of the parent's oversight, and it
-is half of what rule 3 bounds.
-
-`web_search` is in both sets. It needs `TAVILY_API_KEY`; without one the tool says so
-plainly on the first call rather than being missing with no explanation.
+`web_search` is in both. Without `TAVILY_API_KEY` it says so on the first call rather
+than being missing with no explanation.
 """
 
 from stcode.core.harness.tools.base import (

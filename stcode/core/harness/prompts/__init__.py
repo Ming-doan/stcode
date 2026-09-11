@@ -1,22 +1,16 @@
 """
 Prompts — assembling the system prompt for a turn.
 
-One axis, not two. **Mode** — `plan` researches and cannot write; `execute` makes
-changes — tracks the approval mode the user selected, so the prompt and the permission
-gate never disagree about what the agent is allowed to do. A prompt that says "make the
-change" while `harness/approvals.py` forbids writes produces an agent that spends its
-turn discovering it is not allowed to work.
+One axis: **mode**. `plan` researches and cannot write, `execute` makes changes. It
+tracks the approval mode, so the prompt and the permission gate never disagree — a
+prompt saying "make the change" while `approvals.py` forbids writes produces an agent
+that spends its turn discovering it may not work.
 
-The old second axis (`orchestrator` vs `worker`) went with the RLM design in
-EXPECTED.md §16. What replaced it is narrower and derived rather than declared:
-`subagent=True` appends the briefing a `task` child needs, and `Harness` passes
-`self.depth > 0` for it, so a spawned agent cannot be handed the wrong one.
+`subagent=True` appends the briefing a `task` child needs; `Harness` derives it from
+`depth`, so a spawned agent cannot be handed the wrong one.
 
-`build_system_prompt` concatenates fixed sections, then the session's variable state.
-That order is not cosmetic — see `sections.py` on prompt caching.
-
-CLAUDE.md §4 rule 6: the agent never edits its own harness. `extra` is a harness-layer
-addition the *caller* supplies; nothing here is writable from inside a turn.
+Fixed sections first, then the session's variable state — see `sections.py` on caching.
+`extra` comes from the *caller*; nothing here is writable from inside a turn.
 """
 
 from __future__ import annotations
@@ -45,9 +39,8 @@ from stcode.core.harness.prompts.sections import (
 PromptMode = Literal["plan", "execute"]
 
 ROLES_DIR = Path(__file__).parent / "roles"
-"""One markdown file per role. A new role is a new file, never a code change
-(CLAUDE.md 9.3) — which is only true for as long as nothing here reads a role by name.
-"""
+"""One markdown file per role. A new role is a new file, never a code change — true only
+for as long as nothing here reads a role by name."""
 
 
 def available_roles() -> list[str]:
@@ -60,8 +53,8 @@ def available_roles() -> list[str]:
 def load_role(name: str) -> str:
     """A role's markdown, or "" when it has none.
 
-    An unknown name raises: a container started with `[team] role = "backedn-dev"`
-    should refuse loudly, not run a nameless agent that quietly owns nothing.
+    An unknown name raises: a container started with a typo'd role should refuse loudly
+    rather than run a nameless agent that owns nothing.
     """
     if not name:
         return ""
@@ -80,11 +73,8 @@ _APPROVAL_NOTES: dict[ApprovalMode, str] = {
 
 
 def mode_for(approval_mode: ApprovalMode) -> PromptMode:
-    """The prompt mode implied by an approval mode.
-
-    One function so the mapping exists in a single place: the moment the prompt and the
-    permission gate derive this separately, they will eventually disagree.
-    """
+    """The prompt mode implied by an approval mode. One function, so the prompt and the
+    permission gate cannot derive it separately and disagree."""
     return "plan" if approval_mode == "plan" else "execute"
 
 
@@ -127,8 +117,8 @@ def build_system_prompt(
     """
     sections: list[str] = [IDENTITY]
 
-    # Static first, and in a fixed order, so the cached prefix stays byte-identical
-    # across turns for as long as the mode holds.
+    # Static first, in a fixed order, so the cached prefix stays byte-identical across
+    # turns for as long as the mode holds.
     sections.append(PLAN_MODE if mode == "plan" else EXECUTE_MODE)
     if subagent:
         sections.append(SUBAGENT)
@@ -136,9 +126,9 @@ def build_system_prompt(
     if mode == "execute":
         sections.append(VERIFICATION)
     sections += [SCOPE, RECOVERY, TONE]
-    # Above the optional sections and below the fixed ones: a role is static for the
-    # life of a container, so it belongs in the cached prefix, and it outranks the
-    # general guidance about what to work on.
+    # Above the optional sections, below the fixed ones: a role is static for the life
+    # of a container, so it belongs in the cached prefix, and it outranks the general
+    # guidance about what to work on.
     if role:
         sections.append(role_section(role, teammates))
 

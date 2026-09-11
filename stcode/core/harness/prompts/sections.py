@@ -1,17 +1,13 @@
 """
 Prompt sections — the parts every system prompt is assembled from.
 
-Written as Python string constants rather than `.md` files loaded from package data,
-for the same reason `cli/app.py` inlines its CSS: nothing should depend on data files
-surviving an install. A prompt that goes missing at runtime is a session that behaves
-subtly differently with no error to explain it.
+Python constants rather than `.md` package data, for the same reason `cli/app.py`
+inlines its CSS: a prompt that goes missing at runtime is a session that behaves subtly
+differently with no error.
 
-**Order is load-bearing.** CLAUDE.md §8 calls prompt caching the single biggest cost
-lever, and caching works on a byte-stable *prefix*. So everything static — identity,
-tone, tool policy, mode instructions — comes first and never varies within a session,
-and everything that changes turn to turn (working directory, approval mode, the todo
-list) goes at the very end where it invalidates as little as possible. Adding a
-dynamic value to an early section silently doubles the cost of every turn.
+**Order is load-bearing.** Caching works on a byte-stable *prefix*, so the static
+sections come first and never vary within a session, and everything turn-varying goes
+last. Adding a dynamic value to an early section silently doubles the cost of every turn.
 """
 
 from __future__ import annotations
@@ -130,10 +126,9 @@ def environment_section(
 ) -> str:
     """The turn-varying tail of the prompt. Keep it last — see the module docstring.
 
-    `git` is sampled once per session rather than per turn (`context.git_context`), so
-    it does not move within a session either — but it belongs down here anyway, because
-    it is a fact about *this* workspace and putting it above the static sections would
-    make the cached prefix differ between two agents running the same prompt.
+    `git` is sampled once per session, so it does not move within one either; it belongs
+    here anyway, because putting a fact about *this* workspace above the static sections
+    would make the cached prefix differ between two agents running the same prompt.
     """
     lines = [
         "## This session",
@@ -156,9 +151,8 @@ def environment_section(
 def skills_section(catalogue: str) -> str:
     """The skill catalogue — names and one-line descriptions, nothing more.
 
-    Deliberately not the instructions themselves. Loading every installed skill upfront
-    would spend most of a context window on advice about tasks this session is not
-    doing; `skill(name)` fetches the body when a description actually matches.
+    Not the instructions: loading every skill upfront would spend most of a context
+    window on tasks this session is not doing. `skill(name)` fetches a body on a match.
     """
     if not catalogue:
         return ""
@@ -178,11 +172,10 @@ def tools_section(names: list[str]) -> str:
 
 
 def mcp_section(catalogue: str, directory: str) -> str:
-    """MCP servers, as files rather than as tool definitions.
+    """MCP servers, as files rather than tool definitions.
 
-    Names only. The schemas are the expensive half — that is the entire reason they are
-    on disk instead of in this prompt — so the agent is told where to look, not what it
-    would find.
+    Names only: the schemas are the expensive half, which is why they are on disk. The
+    agent is told where to look, not what it would find.
     """
     if not catalogue:
         return ""
@@ -201,10 +194,10 @@ def mcp_section(catalogue: str, directory: str) -> str:
 
 
 def role_section(body: str, teammates: Sequence[str] = ()) -> str:
-    """This agent's role on the team, plus who else there is to talk to.
+    """This agent's role, plus who else there is to talk to.
 
-    The body is markdown, loaded from `roles/<name>.md` and passed through unchanged —
-    a role is data, and rewriting it here would make it code again.
+    The body is markdown from `roles/<name>.md`, passed through unchanged: a role is
+    data, and rewriting it here would make it code again.
     """
     if not body.strip():
         return ""
@@ -222,8 +215,8 @@ def role_section(body: str, teammates: Sequence[str] = ()) -> str:
 def project_section(instructions: str) -> str:
     """Repository-specific instructions (a CLAUDE.md or AGENTS.md).
 
-    Marked as the user's, and given precedence, because these are the conventions of
-    the code being edited — they beat any general habit in the sections above.
+    Given precedence because these are the conventions of the code being edited; they
+    beat any general habit above.
     """
     if not instructions.strip():
         return ""

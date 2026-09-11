@@ -1,16 +1,13 @@
 """
 Web access — one tool, three Tavily endpoints, chosen by which arguments arrive.
 
-`web_search(query=...)` searches, `web_search(url=...)` extracts that page, and passing
-both crawls from that URL looking for the query. One tool rather than three because the
-distinction is not a decision the model should have to make correctly before it knows
-what it will find: "read this page", "find pages about this", and "explore this site for
-this" are the same intent at three scopes, and the arguments already say which.
+`web_search(query=...)` searches, `web_search(url=...)` extracts that page, both
+together crawls from that URL looking for the query. One tool rather than three: those
+are the same intent at three scopes, and the arguments already say which — not a
+decision the model should have to make before it knows what it will find.
 
-Everything here is deliberately expensive to reach. CLAUDE.md §5 marks web output as
-"always huge" and sub-agent-only, and the reason shows up immediately in practice — a
-single search returns more tokens than most files in a repository. The default result
-counts are low for that reason, not to save credits.
+Web output is always huge; one search returns more tokens than most files in a repo. The
+low default result counts are for that, not to save credits.
 """
 
 from __future__ import annotations

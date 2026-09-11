@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "code-simplification": {
+      "source": "addyosmani/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/code-simplification/SKILL.md",
+      "computedHash": "7973e746e8e2ea5004d520da970c15a106824b8d6be1bcff48908aec021f3677"
+    },
+    "i-have-adhd": {
+      "source": "ayghri/i-have-adhd",
+      "sourceType": "github",
+      "skillPath": "skills/i-have-adhd/SKILL.md",
+      "computedHash": "2be8f3214ebd0907429eafacc95c1cc3b4f21fe9d1892a30df9be7f32dc09d65"
+    }
+  }
+}

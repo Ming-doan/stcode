@@ -219,3 +219,7 @@ __marimo__/
 
 # Scratch workspace for main.py, the hand-run agent smoke test.
 temp/
+
+# Agents config
+.agents/
+.claude/

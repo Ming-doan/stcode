@@ -1,12 +1,12 @@
 """
-Approval modes — how much the agent may do without asking the human first.
+Approval modes — how much the agent may do without asking.
 
-This module owns the *vocabulary* and its ordering, nothing about how it's shown: the
-help text and colours the chat screen renders live in `stcode/cli/labels.py`.
+Owns the *vocabulary* and its ordering, nothing about how it is shown; the help text and
+colours live in `stcode/cli/labels.py`.
 
-`ToolPermission` and the policy below are the enforcement half: a tool declares what
-class of side effect it has, once, at definition; this module — not the tool — decides
-whether the current mode lets that class run unattended.
+`ToolPermission` and the policy below are the enforcement half: a tool declares its
+class of side effect once, at definition, and this module — not the tool — decides
+whether that class runs unattended under the current mode.
 """
 
 from __future__ import annotations
@@ -43,10 +43,9 @@ def parse_approval_mode(value: str) -> ApprovalMode | None:
 class ToolPermission(StrEnum):
     """What class of side effect a tool has — the axis approval modes gate on.
 
-    A tool declares one of these once, at definition (`@tool(permission=...)`), and the
-    policy below decides whether that class needs a human in the loop under the current
-    mode. Tools never test the mode themselves: a tool that knows about `full-auto` is a
-    tool that will disagree with the next one about what `full-auto` means.
+    Declared once at definition; the policy below decides what it means under the
+    current mode. Tools never test the mode themselves — one that knows about
+    `full-auto` will eventually disagree with the next one about what it means.
     """
 
     READ = "read"
@@ -70,10 +69,9 @@ class ToolPermission(StrEnum):
 
 # Which permissions run unattended, which ask, and which are refused outright.
 #
-# The mode ordering is about *workspace mutation*, and along that axis each mode adds
-# one class to the previous: nothing, then writes, then arbitrary execution. NETWORK is
-# orthogonal to it — the risk there is disclosure, not corruption — so it is gated on
-# its own line rather than wedged into the ordering.
+# The ordering is about *workspace mutation*: each mode adds one class to the previous —
+# nothing, then writes, then arbitrary execution. NETWORK is orthogonal (the risk is
+# disclosure, not corruption), so it is gated on its own rather than wedged in.
 _UNATTENDED: dict[ApprovalMode, frozenset[ToolPermission]] = {
     "plan": frozenset({ToolPermission.READ, ToolPermission.INTERACTIVE}),
     "suggest": frozenset({ToolPermission.READ, ToolPermission.INTERACTIVE}),
@@ -89,10 +87,9 @@ _UNATTENDED: dict[ApprovalMode, frozenset[ToolPermission]] = {
 }
 
 _FORBIDDEN: dict[ApprovalMode, frozenset[ToolPermission]] = {
-    # `plan` is a research mode: the human reads a plan before a byte changes, so a
-    # mid-plan "may I write this file?" prompt would defeat it rather than enforce it.
-    # Network research is *not* refused here — it only mutates what the agent knows —
-    # it just has to ask, because egress is a disclosure the user should authorise.
+    # `plan` is a research mode: a mid-plan "may I write this file?" prompt would
+    # defeat it rather than enforce it. Network is not refused — it only mutates what
+    # the agent knows — but it asks, because egress is a disclosure to authorise.
     "plan": frozenset({ToolPermission.WRITE, ToolPermission.EXECUTE}),
 }
 
@@ -103,10 +100,10 @@ def requires_approval(mode: ApprovalMode, permission: ToolPermission) -> bool:
 
 
 def is_forbidden(mode: ApprovalMode, permission: ToolPermission) -> bool:
-    """Whether this mode refuses the tool outright, with no approval prompt to offer.
+    """Whether this mode refuses the tool outright, with no prompt to offer.
 
-    Distinct from `requires_approval` on purpose: "ask first" is a pause the human can
-    resolve, while this is a capability the mode does not have. The agent should be told
-    which one it hit — retrying a forbidden tool is never going to work.
+    Distinct from `requires_approval`: "ask first" is a pause a human can resolve, while
+    this is a capability the mode does not have. The agent needs to know which it hit —
+    retrying a forbidden tool is never going to work.
     """
     return permission in _FORBIDDEN.get(mode, frozenset())

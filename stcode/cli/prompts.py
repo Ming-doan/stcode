@@ -1,14 +1,13 @@
 """
 The two modal screens the daemon can ask for: approve this, and answer this.
 
-Both are the client half of a request–response pair correlated by `execution_id`
-(CLAUDE.md §8 point 1). The screen returns a value; the caller sends it back under the
-id it came with. Neither screen knows the id — that is the chat screen's bookkeeping,
-and a modal that knew about correlation would be a modal that had to be told about the
-socket.
+Both are the client half of a request–response pair correlated by `execution_id`. The
+screen returns a value; the caller sends it back under the id it came with. Neither
+screen knows the id — that is the chat screen's bookkeeping, and a modal that knew about
+correlation would be a modal that had to be told about the socket.
 
-Approval defaults to **deny**: Enter on a dialog you have not read should not be how a
-`rm -rf` gets run. The Escape key does the same thing, for the same reason.
+Approval defaults to **deny**, and Escape does the same: Enter on a dialog you have not
+read should not be how a `rm -rf` gets run.
 """
 
 from __future__ import annotations

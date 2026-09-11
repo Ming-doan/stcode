@@ -5,14 +5,11 @@ CLI entrypoint — one command, three shapes.
     stcode --headless      the daemon alone — a container's whole process
     stcode --daemonless    the chat UI alone, pointed at a daemon somewhere else
 
-The three are one binary because they are one system: the middle one is what runs in a
-container, the last one is what you attach to it with, and the first is both halves on
-your laptop. Nothing switches implementation between them — `--headless` skips the UI,
-`--daemonless` skips starting a daemon, and the socket in between is the same socket.
+One binary because they are one system, and nothing switches implementation:
+`--headless` skips the UI, `--daemonless` skips starting a daemon, and the socket
+between them is the same socket.
 
-Transport and address flags override `[daemon]` in the config for this run only, which
-is what makes `stcode --daemonless --host 10.0.0.4` a thing you can type once without
-editing a file first.
+Transport and address flags override `[daemon]` for this run only.
 """
 
 from __future__ import annotations

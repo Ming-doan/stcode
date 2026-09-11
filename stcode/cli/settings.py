@@ -1,12 +1,12 @@
 """
 Settings screen — the first-run wizard and the `/model` config page.
 
-One screen serves both: on first run it's the "pick a provider and paste a key" prompt
-that can be skipped, and afterwards it's where `/model` sends you. Keeping it single
-means the two can't drift apart.
+One screen for both, so they cannot drift apart: on first run it is the "pick a provider
+and paste a key" prompt that can be skipped, and afterwards it is where `/model` sends
+you.
 
 It never writes to disk. It dismisses with a new `GatewayConfig` (or `None` if the user
-backed out) and lets the app own persistence — the screen stays a pure editor.
+backed out) and lets the app own persistence.
 """
 
 from __future__ import annotations

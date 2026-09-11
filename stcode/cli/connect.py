@@ -1,16 +1,13 @@
 """
 Connect screen — point this client at a daemon.
 
-`--daemonless` is the mode this exists for: the agent runs somewhere else, usually in a
-container, and this terminal is only a window onto it. There is nothing to start here,
-so a failed connection is a question — *which daemon?* — rather than an error.
+`--daemonless` is what this exists for: the agent runs somewhere else, and this terminal
+is only a window onto it. Nothing starts here, so a failed connection is a question —
+*which daemon?* — rather than an error.
 
-It edits `[daemon]` and nothing else. Transport is the only field that changes what the
-other fields mean, so switching it swaps which pair is shown rather than presenting four
-inputs of which two are always ignored.
-
-Like `SettingsScreen`, it never writes to disk: it dismisses with a `DaemonConfig` and
-lets the app decide whether that is worth persisting.
+It edits `[daemon]` and nothing else, and switching transport swaps which pair of fields
+is shown rather than offering four of which two are ignored. Like `SettingsScreen`, it
+never writes to disk.
 """
 
 from __future__ import annotations

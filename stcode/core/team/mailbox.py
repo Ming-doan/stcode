@@ -1,25 +1,17 @@
 """
 Mailbox — agent-to-agent messaging, with no protocol.
 
-Containers already share a volume, so a message is a **file**. Sending writes JSON into
-`/team/inbox/<role>/`; receiving is reading your own directory. That is the whole
-design, and the things it does not need are the point: no registry, no routing table,
-no service discovery, no N-squared socket mesh.
+Containers share a volume, so a message is a **file**: sending writes JSON into
+`/team/inbox/<role>/`, receiving is reading your own directory.
 
     /team/inbox/backend-dev/01HX…-from-ba.json     <- unread
-    /team/inbox/backend-dev/.read/…               <- drained
+    /team/inbox/backend-dev/.read/…                <- drained
 
-**Messages carry `refs`, not content.** A path into `/team/knowledge` or
-`/team/artifacts` costs a few tokens; the document costs thousands, to every recipient,
-on every turn it stays in their history. This one convention is what keeps a team's
-token cost from growing with the square of its size.
+No registry, no routing table, no service discovery, no N² socket mesh.
 
-Delivery is a write then a rename. A reader can therefore never see half a message —
-the file appears in the inbox only once it is complete.
-
-Nothing here imports the harness, so the dependency arrow stays one-way: the
-`send_message` *tool* lives in `tools.py` and closes over a Mailbox, the same shape
-`task` uses for the Agent.
+**Messages carry `refs`, not content** — that one convention is what keeps a team's
+token cost from growing with the square of its size. Delivery is a write then a rename,
+so a reader never sees half a message. Nothing here imports the harness.
 """
 
 from __future__ import annotations
@@ -39,13 +31,13 @@ INBOX = "inbox"
 KNOWLEDGE = "knowledge"
 ARTIFACTS = "artifacts"
 READ_DIRNAME = ".read"
-"""Where a drained message goes. Moved rather than deleted: the trajectory is the
-debugging story, and "who told it that?" is a question you will ask."""
+"""Where a drained message goes. Moved, not deleted — "who told it that?" is a question
+you will ask."""
 
 
 class TeamMessage(BaseModel):
     """One message. Named `TeamMessage` because `Message` is already the provider wire
-    format, and two things called Message in one codebase is a bug waiting to happen."""
+    format, and two of those in one codebase is a bug waiting to happen."""
 
     id: str = ""
     sender: str = ""
@@ -111,8 +103,8 @@ class Mailbox:
     ) -> Path:
         """Write one message into `to`'s inbox. Returns the file it landed in.
 
-        Write-then-rename: a reader draining the directory at the same moment sees
-        either nothing or a complete message, never a half-written one.
+        Write-then-rename, so a reader draining at the same moment sees either nothing
+        or a complete message.
         """
         from stcode.core.session import new_id  # ULID: sorts by time, so inboxes do too
 
@@ -149,9 +141,8 @@ class Mailbox:
     def drain(self) -> list[TeamMessage]:
         """Read every waiting message and mark it read. Called at the top of a turn.
 
-        A message that cannot be parsed is moved aside too. Leaving it would mean
-        draining it again on every turn forever, which is a louder failure than losing
-        one malformed file.
+        An unparseable message is moved aside too: leaving it would mean re-draining it
+        every turn forever, a louder failure than losing one malformed file.
         """
         read_dir = self.inbox / READ_DIRNAME
         messages: list[TeamMessage] = []

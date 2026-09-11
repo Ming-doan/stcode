@@ -11,9 +11,6 @@ Agent — the turn loop, and the sub-agent tool that spawns another one.
             case TurnFinished():  idle(ev.usage)
             case AgentFailed():   error(ev.message)
 
-    await agent.interrupt()
-    await agent.aclose()
-
 `push()` + `events()` is the same machine with the door left open — see `agent.py`.
 """
 

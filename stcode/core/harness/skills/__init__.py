@@ -1,8 +1,8 @@
 """
 Skills — reusable instructions the agent loads on demand.
 
-See `loader.py` for the format and the progressive-disclosure design; `tools/skill.py`
-is how an agent actually pulls one in.
+`loader.py` has the format and the progressive-disclosure design; `tools/skill.py` is
+how an agent pulls one in.
 """
 
 from stcode.core.harness.skills.loader import (

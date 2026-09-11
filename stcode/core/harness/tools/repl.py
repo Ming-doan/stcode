@@ -1,20 +1,15 @@
 """
 `repl` — a persistent Python interpreter for the session.
 
-The namespace lives in a subprocess (`core/repl/`) and survives between calls, so a
-variable set on turn 2 is still there on turn 20.
+The namespace lives in a subprocess (`core/repl/`) and survives between calls. Two jobs,
+both about keeping bulk out of the context window:
 
-Two jobs, and both are about keeping bulk out of the context window:
+* **MCP-as-code.** Tool definitions in the prompt prefix cost 10-30k tokens every turn;
+  the same servers under `.stcode/mcp_servers/` cost a grep and an import.
+* **`tool_out`.** What `elide` cut is injected here under the result's `output_id`, so
+  eliding loses nothing — the whole value is one slice away.
 
-* **MCP-as-code** (CLAUDE.md 2.1). Tool *definitions* in the prompt prefix cost
-  10-30k tokens every turn. The same servers written to `.stcode/mcp_servers/` cost a
-  `grep` and an `import`, and the result stays in a variable here.
-* **`tool_out`.** Whatever `elide` cut from a tool result is injected into this
-  namespace under the result's `output_id`. That is what makes rule 1's promise true:
-  eliding loses nothing, because the whole value is one slice away.
-
-Not for sub-agents (rule 3), and not a replacement for `read`/`edit`/`bash` — those are
-shorter and their output is already shaped for the model.
+Not for sub-agents, and not a replacement for `read`/`edit`/`bash`.
 """
 
 from __future__ import annotations

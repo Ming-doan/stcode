@@ -1,17 +1,13 @@
 """
-Tool registry — which tools exist, and which of them a given agent may see.
+Tool registry — which tools exist, and which an agent may see.
 
-Two responsibilities, and the second is the interesting one.
+Holding tools by name is trivial; *selecting* them is where the architecture shows up. A
+sub-agent spawned with `tools=["read", "grep"]` must not reach `write`, and plan mode
+must not advertise tools it forbids — being offered a capability and then refused it
+wastes a turn and reads, to the model, like a bug to work around.
 
-Holding tools by name is trivial. *Selecting* them is where the architecture shows up:
-a sub-agent is spawned with `tools=["read", "grep"]` and must not be able to reach
-`write`, and an agent in plan mode must not be advertised tools the mode forbids —
-being told about a capability and then refused it wastes a turn and reads, to the
-model, like a bug it should work around.
-
-Selection is therefore by name *and* by permission, and unknown names are an error
-rather than a silent omission. A typo in a spawn call that quietly produces a smaller
-tool set is the kind of thing that gets diagnosed as "the model is being lazy".
+Selection is by name *and* permission, and unknown names raise: a typo that quietly
+produced a smaller tool set would get diagnosed as "the model is being lazy".
 """
 
 from __future__ import annotations
@@ -55,9 +51,9 @@ class ToolRegistry:
     def register(self, entry: Tool[Any], *, replace: bool = False) -> None:
         """Add a tool. Refuses to shadow an existing name unless asked to.
 
-        Silent replacement is the failure this guards against: an MCP server or a
-        `/refine`-authored tool taking over the name `read` would redirect every file
-        read in the session with nothing in the log to say so.
+        Silent replacement is the failure this guards: an MCP server taking over the
+        name `read` would redirect every file read in the session, with nothing in the
+        log to say so.
         """
         if entry.name in self._tools and not replace:
             raise ToolError(
@@ -78,9 +74,9 @@ class ToolRegistry:
     ) -> list[Tool[Any]]:
         """The tools an agent may use, by name and by what the mode permits.
 
-        `names=None` means everything registered. Tools the mode forbids outright are
-        dropped rather than advertised-and-refused; tools that merely need approval are
-        kept, since asking is a normal part of using them.
+        `names=None` means everything registered. Tools the mode forbids are dropped
+        rather than advertised-and-refused; ones that merely need approval are kept,
+        since asking is a normal part of using them.
         """
         if names is None:
             chosen = list(self._tools.values())
@@ -104,8 +100,8 @@ class ToolRegistry:
     ) -> list[ToolDefinition]:
         """What goes on the wire to a provider.
 
-        Sorted by name so the list is byte-identical between turns with the same tool
-        set — §8's prompt-caching lever depends on tool definitions not reordering.
+        Sorted by name, so the list is byte-identical between turns with the same tool
+        set — prompt caching depends on tool definitions not reordering.
         """
         chosen = self.select(names, approval_mode=approval_mode)
         return [entry.to_tool_definition() for entry in sorted(chosen, key=lambda t: t.name)]

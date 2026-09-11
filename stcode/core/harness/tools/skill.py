@@ -1,15 +1,12 @@
 """
 `skill` — pull a set of instructions into context on demand.
 
-The catalogue of available skills is in the system prompt: one line each, name and
-description. That is all a session pays for a skill it never uses. This tool is the
-second half — the agent reads a line, recognises that the task is the one that skill
-describes, and loads the instructions.
+The catalogue is in the system prompt, one line per skill. That is all a session pays
+for a skill it never uses; this tool is the second half.
 
-Why a tool rather than injecting every skill upfront: nine installed skills are roughly
-90,000 tokens of instructions and 400 tokens of catalogue. Loading all of them would
-spend most of a context window on advice about tasks the session is not doing, and
-CLAUDE.md's whole premise is that context is the scarce resource.
+Nine installed skills are roughly 90,000 tokens of instructions and 400 of catalogue.
+Loading everything upfront would spend most of a context window on advice about tasks
+the session is not doing.
 """
 
 from __future__ import annotations

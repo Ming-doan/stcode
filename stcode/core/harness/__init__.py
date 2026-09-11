@@ -6,16 +6,12 @@ Harness — the tools, prompts, and skills an agent works with.
     tools   = harness.tool_definitions()
     result  = await harness.invoke("read", {"path": "src/main.py"})
 
-Layout, and why each piece is where it is:
-
 * `tools/base.py` — `@tool`, and `Runtime[T]`, the parameter the model cannot see.
-* `tools/schema.py` — signature + docstring → JSON Schema. A tool is described once.
-* `tools/*.py` — the built-ins, grouped by what they touch.
-* `approvals.py` — the permission vocabulary and the mode policy. Tools declare a
-  class; this module decides whether that class needs a human.
-* `context.py` — `HarnessContext`, the workspace state tools share and the `T` above.
+* `tools/schema.py` — signature + docstring → JSON Schema.
+* `approvals.py` — the permission vocabulary and the mode policy.
+* `context.py` — `HarnessContext`, the workspace state tools share.
 * `registry.py` — which tools exist and which an agent may see.
-* `skills/` — `SKILL.md` discovery, loaded on demand rather than upfront.
+* `skills/` — `SKILL.md` discovery, loaded on demand.
 * `prompts/` — the plan and execute prompts, and the sub-agent briefing.
 * `mcp.py` — external tool servers, adapted to the same `Tool` interface.
 * `harness.py` — the facade that composes all of it.

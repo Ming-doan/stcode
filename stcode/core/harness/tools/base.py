@@ -1,35 +1,23 @@
 """
-Tool base — what `@tool` is, and what a tool is handed when it runs.
-
-Three ideas, and everything else here serves one of them.
-
-**A Python function is already a tool.** Its name, its parameters, their types and
-defaults, and its docstring are a complete description of a call. `@tool` reads that
-description rather than asking for it a second time in schema form (`schema.py` does
-the reading), so a tool's interface cannot drift from its implementation — there is
-only one copy of it.
-
-**`Runtime` is the parameter the model cannot see.** A tool needs things that are not
-arguments: where the session is rooted, which agent is calling, whether the human has
-approved writes, how to report progress, where to stash a 4 MB result. Threading those
-through as ordinary arguments would put them in the JSON Schema, and a model that can
-see `approval_mode` is a model that will try to set it. A parameter annotated
-`Runtime[T]` is filtered out of the schema and injected at call time instead. `T` is
-the agent's own context type, so a tool that needs `HarnessContext` says so and type-checks.
-
-**A tool never decides its own permissions.** It declares a `ToolPermission` once, at
-definition. Whether that class runs unattended under the current mode is
-`harness/approvals.py`'s call, applied uniformly in `invoke()` — see that module for
-why the decision cannot live in the tools.
+`@tool` — turn a Python function into a tool.
 
     @tool(permission=ToolPermission.WRITE)
     async def write(path: str, content: str, runtime: Runtime[HarnessContext]) -> str:
         '''Write `content` to `path`, creating parent directories as needed.'''
-        ...
 
-    write.to_tool_definition()          # -> ToolDefinition, ready for a provider
+    write.to_tool_definition()                      # -> the schema a provider sees
     await write.invoke({"path": ...}, runtime=rt)   # gated, validated, never raises
     await write(path, content, runtime=rt)          # plain call, raises like Python
+
+Three rules:
+
+* **The signature is the schema, the docstring is the description.** Both are read off
+  the function (`schema.py`), so a tool's interface cannot drift from its code.
+* **`Runtime` is the parameter the model cannot see.** cwd, approval mode, progress
+  callbacks — injected at call time, filtered out of the schema. A model that can see
+  `approval_mode` is a model that will try to set it.
+* **A tool never decides its own permissions.** It declares a `ToolPermission` once;
+  `approvals.py` decides what that means under the current mode.
 """
 
 from __future__ import annotations
@@ -83,8 +71,7 @@ from stcode.core.common.truncate import (
 CtxT = TypeVar("CtxT")
 
 DEFAULT_MAX_OUTPUT = DEFAULT_VIEW_LIMIT
-"""Chars of a tool's result the model sees (CLAUDE.md §4 rule 1). Tools whose whole job
-is bulk retrieval raise it explicitly."""
+"""Chars of a result the model sees. Bulk-retrieval tools raise it explicitly."""
 
 logger = logging.getLogger("stcode.harness.tools")
 
@@ -93,12 +80,10 @@ logger = logging.getLogger("stcode.harness.tools")
 
 
 class ApprovalRequest(BaseModel):
-    """What the UI is asked to show when a tool needs a human's yes.
+    """What the UI shows when a tool needs a human's yes.
 
-    Carries the validated arguments rather than a pre-rendered sentence: the CLI knows
-    how to show a diff for `edit` and a command line for `bash`, and `cli/labels.py`
-    owns that wording. The engine's job is to say what is about to happen, not how it
-    reads (CLAUDE.md §3).
+    Carries validated arguments, not a rendered sentence — the wording is
+    `cli/labels.py`'s job, not the engine's.
     """
 
     tool_name: str
@@ -118,7 +103,7 @@ class Question(BaseModel):
 
 
 ProgressFn = Callable[[str], Any]
-"""`(text) -> None | Awaitable[None]`. Streams a line of progress to the UI."""
+"""`(text) -> None | Awaitable[None]`. Streams one line of progress to the UI."""
 
 ApprovalFn = Callable[[ApprovalRequest], Awaitable[bool]]
 AskFn = Callable[[Question], Awaitable[str]]
@@ -129,25 +114,12 @@ AskFn = Callable[[Question], Awaitable[str]]
 
 @dataclass
 class Runtime(Generic[CtxT]):
-    """Everything a tool needs that is not an argument.
+    """Everything a tool needs that is not an argument. Injected, never advertised.
 
-    Injected, never advertised. The fields fall into four groups, and the grouping is
-    the point — mixing them is what makes agent plumbing unreadable:
-
-    * **`context`** — the agent's own state, typed by the caller. Built-in tools use
-      `HarnessContext` (cwd, path scope, todos, skills); a different agent can define
-      its own and its tools will type-check against that instead.
-    * **identity** — who is calling. `session_id`/`agent_name`/`depth` are what the
-      trajectory log groups by, and §9 is explicit that debuggability has to be
-      designed in: agent spawns agent spawns tool leaves no natural stack, so the
-      lineage has to be carried explicitly or it does not exist.
-    * **this call** — `execution_id` is ours and always present; `tool_call_id` is the
-      provider's `tool_use` id and is empty when the tool was called from the REPL
-      rather than from a model. `attempt` lets a tool behave differently on a retry.
-    * **capabilities** — the approval mode in force, the cancellation flag, the
-      deadline, and the three callbacks a tool may reach for (progress, approval,
-      asking the user). All optional: a headless run wires none of them and tools that
-      need one get a clear failure rather than a hang.
+    Four groups: `context` (the agent's own state, typed by the caller), identity
+    (who is calling — the trajectory log groups by this), this call (ids, attempt
+    count), and capabilities (approval mode, cancellation, the three callbacks).
+    Callbacks are optional; a tool that needs a missing one fails clearly.
     """
 
     context: CtxT
@@ -168,16 +140,13 @@ class Runtime(Generic[CtxT]):
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
 
     outputs: MutableMapping[str, Any] = field(default_factory=dict)
-    """The in-process mirror of the REPL's `tool_out`. Anything elided out of a result
-    is still here under the result's `output_id`; `Harness.invoke` pushes it across. A
-    plain dict by default so a tool is testable without a REPL."""
+    """In-process mirror of the REPL's `tool_out`. Anything elided from a result is
+    here under its `output_id`; `Harness.invoke` pushes it across."""
 
     outputs_reachable: bool = False
-    """Whether a REPL is attached, so the model can actually read `tool_out`.
-
-    This is the whole of rule 1's proviso, as a boolean. True and an elision may name
-    `tool_out["..."]`; False and it may only say "ask for a narrower range". Set by
-    `Harness.runtime()`, never guessed here."""
+    """Whether a REPL is attached, so `tool_out` is somewhere the model can read.
+    True and an elision may name `tool_out["..."]`; False and it may only say "ask for
+    a narrower range". Set by `Harness.runtime()`, never guessed here."""
 
     on_progress: ProgressFn | None = None
     on_approval: ApprovalFn | None = None
@@ -200,21 +169,19 @@ class Runtime(Generic[CtxT]):
         return self.cancel.is_set()
 
     def raise_if_cancelled(self) -> None:
-        """Cooperative cancellation checkpoint for long loops inside a tool.
+        """Cancellation checkpoint for long loops inside a tool.
 
-        §8 asks that Ctrl-C with five sub-agents in flight leave no orphans and no
-        half-written files. `asyncio.CancelledError` handles the awaits; this handles
-        the stretches between them, where a tool is busy in Python and unreachable.
+        `asyncio.CancelledError` covers the awaits; this covers the stretches between
+        them, where a tool is busy in Python and otherwise unreachable.
         """
         if self.cancel.is_set():
             raise ToolCancelled(f"{self.tool_name or 'tool'} was cancelled")
 
     def for_tool(self, tool_name: str, *, tool_call_id: str = "", attempt: int = 1) -> "Runtime[CtxT]":
-        """A copy scoped to one specific invocation.
+        """A copy scoped to one invocation.
 
-        Copied rather than mutated because sibling tools genuinely do run concurrently
-        (that is the whole of §6's turn 3), and a shared runtime whose `tool_name`
-        changes underneath them mislabels every log line they emit.
+        Copied, not mutated: sibling tools run concurrently, and a shared runtime whose
+        `tool_name` changes underneath them mislabels every log line they emit.
         """
         clone = Runtime(context=self.context)
         for slot, value in vars(self).items():
@@ -239,9 +206,8 @@ class Runtime(Generic[CtxT]):
     async def request_approval(self, permission: ToolPermission, arguments: dict[str, Any]) -> bool:
         """Ask the human to approve this call, per the mode in force.
 
-        Returns True when the tool may proceed. With no approval callback wired, a call
-        that needs one is refused rather than allowed: a headless run that silently
-        upgrades itself to `full-auto` is exactly the failure §9 says never to have.
+        True when the tool may proceed. With no approval callback wired the call is
+        refused, not allowed — a headless run must never upgrade itself to `full-auto`.
         """
         if is_forbidden(self.approval_mode, permission):
             raise ToolForbidden(
@@ -281,10 +247,8 @@ current_runtime: contextvars.ContextVar[Runtime[Any] | None] = contextvars.Conte
 )
 """The runtime a bare `await read(...)` picks up.
 
-A context variable rather than a global because sub-agents run concurrently in one
-process and each needs its own cwd, scope, and approval mode. `Harness.bind()` sets it
-for the duration of a turn; `Tool.bind()` closes over one explicitly when that is
-clearer.
+A context variable, not a global: sub-agents run concurrently in one process and each
+needs its own cwd, scope, and approval mode. `Harness.bind()` sets it for a turn.
 """
 
 
@@ -294,8 +258,8 @@ clearer.
 def _runtime_parameter(fn: Callable[..., Any]) -> str | None:
     """Find the parameter annotated `Runtime` / `Runtime[T]`, if any.
 
-    Matched on the annotation, not the name: a tool is free to call it `rt`, and a tool
-    with a plain parameter that happens to be named `runtime` should keep it.
+    Matched on the annotation, not the name — a tool may call it `rt`, and a plain
+    parameter that happens to be named `runtime` should stay a real parameter.
     """
     try:
         hints = get_type_hints(fn, include_extras=True)
@@ -315,17 +279,14 @@ def _runtime_parameter(fn: Callable[..., Any]) -> str | None:
 class Tool(Generic[CtxT]):
     """One callable, presented three ways.
 
-    Built from a decorated Python function in almost every case. The exception is a
-    tool whose schema is authored elsewhere (an MCP server's), which is passed in as
-    `input_schema` and short-circuits both derivation and validation.
-
     * `to_tool_definition()` — the schema a provider advertises.
     * `invoke(arguments, runtime)` — the gated, validated path the agent loop uses.
-      It reports failures as results and never raises for a tool-level problem, because
-      the loop's next move is always to hand a `tool_result` back to the model.
-    * `__call__(...)` — an ordinary Python call for REPL and test code, which raises
-      like ordinary Python. The runtime comes from the `current_runtime` context
-      variable, or from an explicit keyword.
+      Never raises for a tool-level problem; failures come back as results.
+    * `__call__(...)` — an ordinary Python call for REPL and test code, raising
+      normally. Takes the runtime from `current_runtime` or an explicit keyword.
+
+    Built from a decorated function, except when the schema is authored elsewhere (an
+    MCP server's), passed as `input_schema`.
     """
 
     def __init__(
@@ -354,17 +315,15 @@ class Tool(Generic[CtxT]):
         if not self.description:
             raise ValueError(
                 f"tool {self.name!r} has no description: give it a docstring, or pass "
-                "description=... . The description is the entire prompt the model reads "
-                "for this tool (CLAUDE.md §11)."
+                "description=... . The description is the whole prompt the model reads "
+                "for this tool."
             )
 
         self.runtime_param = _runtime_parameter(fn)
         if input_schema is not None:
-            # The schema came from somewhere authoritative — an MCP server describing
-            # its own tool — so it is used verbatim and arguments are passed through
-            # unvalidated. Re-deriving it from a `**kwargs` shim would throw away the
-            # server's types, and validating against a model we invented would reject
-            # calls the server would have accepted.
+            # Authored elsewhere (an MCP server describing its own tool), so used
+            # verbatim and unvalidated: a model we invented would reject calls the
+            # server would have accepted.
             self.params_model = None
             self.input_schema = input_schema
         else:
@@ -373,8 +332,7 @@ class Tool(Generic[CtxT]):
             self.input_schema = json_schema_for(self.params_model)
         self.is_async = inspect.iscoroutinefunction(fn)
 
-        # Keep the wrapped function introspectable — `help(read)` in the REPL should
-        # show the tool's own docstring, not this class's.
+        # `help(read)` in the REPL should show the tool's docstring, not this class's.
         self.__doc__ = inspect.getdoc(fn)
         self.__name__ = self.name
         self.__signature__ = inspect.signature(fn)
@@ -383,8 +341,8 @@ class Tool(Generic[CtxT]):
         return f"<tool {self.name}({', '.join(self.input_schema.get('properties', {}))})>"
 
     def to_tool_definition(self) -> ToolDefinition:
-        """The provider-facing shape. Stable across turns for a given tool, which is
-        what keeps it inside the cached prompt prefix (§8)."""
+        """The provider-facing shape. Byte-stable across turns, so it stays inside the
+        cached prompt prefix."""
         return ToolDefinition(
             name=self.name, description=self.description, input_schema=self.input_schema
         )
@@ -396,11 +354,9 @@ class Tool(Generic[CtxT]):
     def effective_permission(self, arguments: dict[str, Any]) -> ToolPermission:
         """The permission this *particular* call needs.
 
-        Almost always the declared one. `bash` is the exception that justifies the
-        hook: `git status` and `rm -rf build/` arrive through the same tool, and gating
-        them identically means either prompting for every `ls` or never prompting at
-        all. A tool may narrow the class it claims per call — it may not widen its own
-        latitude, since the declared permission is still what the mode was checked
+        Almost always the declared one. `bash` is the exception: `git status` and
+        `rm -rf build/` arrive through the same tool. A call may narrow the class it
+        claims, never widen it — the declared permission is what the mode was checked
         against when the tool set was assembled.
         """
         if self.permission_for is None:
@@ -410,11 +366,8 @@ class Tool(Generic[CtxT]):
     # ---- calling ----
 
     def bind(self, runtime: Runtime[CtxT]) -> Callable[..., Awaitable[Any]]:
-        """A plain async callable with `runtime` already supplied.
-
-        This is what gets injected into a kernel namespace, so REPL code reads as
-        `await read("src/main.py")` rather than carrying plumbing through every call.
-        """
+        """A plain async callable with `runtime` already supplied, so REPL code reads
+        as `await read("src/main.py")` instead of threading plumbing through."""
 
         async def bound(*args: Any, **kwargs: Any) -> Any:
             return await self._call(args, kwargs, runtime)
@@ -447,13 +400,12 @@ class Tool(Generic[CtxT]):
         *,
         tool_call_id: str = "",
     ) -> ToolResult:
-        """Run the tool for a model-issued call: validate, gate, execute, render.
+        """Run a model-issued call: validate, gate, execute, render.
 
-        Never raises for a tool-level failure. Every outcome the model needs to react to
-        — bad arguments, a denied approval, a timeout, a bug inside the tool — comes
-        back as a `ToolResult` with `is_error` set, because the agent loop's only move
-        is to return a `tool_result` block and let the model try something else. A raise
-        here would instead take down the turn.
+        Never raises for a tool-level failure. Bad arguments, a denied approval, a
+        timeout, a bug inside the tool — all come back as `ToolResult(is_error=True)`,
+        because the loop's only move is to hand a `tool_result` back. A raise here
+        would take down the whole turn.
         """
         runtime = runtime or current_runtime.get()
         if runtime is None:
@@ -470,9 +422,8 @@ class Tool(Generic[CtxT]):
                     f"Invalid arguments for `{self.name}`:\n{_render_validation_error(exc)}",
                     tool=self.name,
                 )
-            # Attribute access, not `model_dump()`: dumping recursively converts nested
-            # models back into dicts, so a tool declaring `todos: list[TodoItem]` would
-            # be handed a list of dicts and fail on the first attribute access.
+            # Attribute access, not `model_dump()`: dumping converts nested models back
+            # into dicts, so `todos: list[TodoItem]` would arrive as a list of dicts.
             kwargs = {name: getattr(validated, name) for name in type(validated).model_fields}
         try:
             call.raise_if_cancelled()
@@ -487,8 +438,7 @@ class Tool(Generic[CtxT]):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            # A bug inside the tool, not a message for the model. Log the traceback for
-            # whoever is reading the trajectory; send back only what is actionable.
+            # A bug in the tool. Log the traceback; send back only what is actionable.
             call.logger.exception("tool %s raised", self.name, extra={"tool": self.name})
             return ToolResult.error(f"`{self.name}` failed: {type(exc).__name__}: {exc}", tool=self.name)
 
@@ -501,8 +451,8 @@ class Tool(Generic[CtxT]):
         if self.is_async:
             coro = self.fn(**kwargs)
         else:
-            # §11: no blocking I/O inside the agent loop. A sync tool is assumed to
-            # block — that is usually why it is sync — so it runs off the loop thread.
+            # No blocking I/O in the agent loop. A sync tool is assumed to block, so
+            # it runs off the loop thread.
             coro = asyncio.to_thread(self.fn, **kwargs)
 
         budget = self.timeout if self.timeout is not None else call.remaining
@@ -517,15 +467,11 @@ class Tool(Generic[CtxT]):
             ) from None
 
     def _render(self, value: Any, call: Runtime[CtxT]) -> ToolResult:
-        """Turn whatever the function returned into what the model reads.
+        """Turn what the function returned into what the model reads.
 
-        A tool that already knows how it wants to be seen returns a `ToolResult` and is
-        passed straight through; everything else is stringified, and anything over
-        `max_output` is elided.
-
-        The elision marker names `tool_out["..."]` only when a REPL is attached to
-        carry the payload across, and otherwise says to re-call with a narrower range.
-        Rule 1 permits exactly one hint: a true one.
+        A `ToolResult` passes straight through; anything else is stringified and elided
+        at `max_output`. The elision hint names `tool_out["..."]` only when a REPL is
+        attached to hold it — the only hint allowed is a true one.
         """
         if isinstance(value, ToolResult):
             result = value
@@ -560,8 +506,8 @@ def _stringify(value: Any) -> str:
 
 
 def _render_validation_error(exc: ValidationError) -> str:
-    """Pydantic's default rendering names a model the tool author invented and the model
-    has never heard of. Report the argument instead."""
+    """Pydantic names a model the tool author invented and the LLM has never heard of.
+    Report the argument instead."""
     lines = []
     for error in exc.errors():
         where = ".".join(str(part) for part in error["loc"]) or "(arguments)"
@@ -604,24 +550,22 @@ def tool(
     """Turn a function into a tool. Usable bare (`@tool`) or configured (`@tool(...)`).
 
     Args:
-        name: Overrides the function's name. The model sees this, so prefer renaming
-            the function — a tool whose advertised name and Python name disagree is a
-            grep away from confusing whoever reads the trajectory next.
-        description: Overrides the docstring. Same caveat: the docstring is the prompt
-            (CLAUDE.md §11), and keeping it next to the code is why that works.
-        permission: The class of side effect this tool has, which decides whether it
-            needs a human's yes under the current mode. Defaults to `READ` — the
-            conservative direction is to under-claim capability, since an under-claimed
-            tool asks too often while an over-claimed one writes without asking.
+        name: Overrides the function's name. Prefer renaming the function — an
+            advertised name that disagrees with the Python one confuses whoever reads
+            the trajectory next.
+        description: Overrides the docstring. Prefer the docstring: it is the prompt,
+            and keeping it next to the code is why that works.
+        permission: The class of side effect, which decides whether this needs a
+            human's yes. Defaults to `READ` — under-claiming just asks too often,
+            over-claiming writes without asking.
         timeout: Seconds before the call is abandoned. `None` inherits the runtime's
-            remaining deadline, so a tool with no opinion still cannot outlive its turn.
-        max_output: Chars of result the model sees before elision. Raise it for tools
-            whose entire job is bulk retrieval; the elided remainder is still in
-            `tool_out` either way.
-        spill: Whether an over-long result is parked in `tool_out`. Off only for tools
-            whose output is worthless once truncated (a progress echo, a confirmation).
-        permission_for: Narrows `permission` per call, given the validated arguments.
-            For tools like `bash` whose risk lives in the argument rather than the tool.
+            remaining deadline, so a tool with no opinion cannot outlive its turn.
+        max_output: Chars the model sees before elision. Raise it for bulk retrieval;
+            the remainder is in `tool_out` either way.
+        spill: Whether an over-long result is parked in `tool_out`. Off only when the
+            output is worthless truncated (a progress echo, a confirmation).
+        permission_for: Narrows `permission` per call from the validated arguments.
+            For tools like `bash`, whose risk is in the argument rather than the tool.
     """
 
     def decorate(target: Callable[..., Any]) -> Tool[Any]:
@@ -640,11 +584,10 @@ def tool(
 
 
 def to_tool_definition(target: Tool[Any] | Callable[..., Any]) -> ToolDefinition:
-    """The `ToolDefinition` for a tool, or for a plain function that was never decorated.
+    """The `ToolDefinition` for a tool, or for an undecorated function.
 
-    Accepting an undecorated callable is deliberate: MCP-backed and dynamically
-    generated tools arrive as functions, and the schema derivation is the same work
-    either way.
+    MCP-backed and generated tools arrive as plain functions, and deriving their schema
+    is the same work either way.
     """
     if isinstance(target, Tool):
         return target.to_tool_definition()

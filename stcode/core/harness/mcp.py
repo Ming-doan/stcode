@@ -1,44 +1,35 @@
 """
 MCP client — external tool servers, loaded from a JSON config.
 
-CLAUDE.md's non-goals say we are not reimplementing MCP, and this module takes that
-literally: the official `mcp` SDK owns the protocol, and everything here is the
-adapter between it and `harness/tools/base.py`. Two things happen at this boundary.
-
-**Schemas pass through untouched.** A server describes its own tools, and that
-description is authoritative. `Tool` accepts it via `input_schema` and skips the
-pydantic model it would otherwise derive — validating an MCP call against a model we
-invented would reject calls the server would have accepted.
-
-**Names are namespaced.** `mcp__<server>__<tool>`, the same convention Claude Code
-uses. Two servers offering `search` is the normal case, not the exotic one, and a
-collision that silently shadows one of them is very hard to notice from the outside.
-
-Config is the familiar `mcpServers` object, so an existing `.mcp.json` works unchanged:
+We do not reimplement MCP: the official `mcp` SDK owns the protocol, and this is the
+adapter to `harness/tools/base.py`. Config is the familiar `mcpServers` object, so an
+existing `.mcp.json` works unchanged:
 
     {"mcpServers": {
-      "fs":     {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]},
-      "docs":   {"type": "http", "url": "https://example.com/mcp"}
+      "fs":   {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]},
+      "docs": {"type": "http", "url": "https://example.com/mcp"}
     }}
 
-Every MCP tool is declared `EXECUTE`. We cannot see what a server does — the name says
-"search" and the implementation may write files — so the permission reflects what is
-actually known, which is nothing.
+Three rules at the boundary:
+
+* **Schemas pass through untouched.** The server's own description is authoritative;
+  validating against a model we invented would reject calls it would have accepted.
+* **Names are namespaced** `mcp__<server>__<tool>`. Two servers offering `search` is
+  normal, and a silent shadow is very hard to notice from outside.
+* **Every MCP tool is `EXECUTE`.** We cannot see what a server does — the name says
+  "search" and the code may write files — so the permission reflects what is known.
 
 ## Two ways to expose a server (`[mcp] expose`)
 
-**`"code"` — the default, and the point of step 8.** Nothing is registered. Each tool
-is written out as a Python file under `.stcode/mcp_servers/<server>/<tool>.py`, and the
-agent finds them with `ls`/`grep`, reads the one it needs, and calls it from `repl`.
+**`"code"`, the default.** Nothing is registered. Each tool becomes a Python file under
+`.stcode/mcp_servers/<server>/<tool>.py`; the agent greps, reads the one it needs, and
+calls it from `repl`. Tool definitions live in the prompt prefix, so three mid-sized
+servers cost 10-30k tokens *per turn, forever*; as code they cost a grep and an import,
+and the result stays in a REPL variable.
 
-Why it matters: tool definitions live in the prompt prefix, so three mid-sized servers
-cost 10-30k tokens **per turn, forever**. As code they cost a `grep` and an `import`,
-and the result stays in a REPL variable instead of passing through the context.
-Anthropic measured this at 150k -> 2k tokens.
-
-**`"tools"` — the old way, kept as an escape hatch.** One small server with two tools
-is cheaper advertised directly than discovered over three REPL round-trips. The token
-argument is real; it is not universal.
+**`"tools"`, the escape hatch.** One small server with two tools is cheaper advertised
+directly than discovered over three REPL round-trips. The token argument is real but
+not universal.
 """
 
 from __future__ import annotations
@@ -85,9 +76,8 @@ class MCPServerConfig(BaseModel):
 def load_mcp_config(path: str | Path | None = None, cwd: Path | None = None) -> dict[str, MCPServerConfig]:
     """Read `mcpServers` from the first config file found.
 
-    Search order is explicit path, `$STCODE_MCP_CONFIG`, then `.mcp.json` in the
-    project. A missing config is not an error — most sessions have no MCP servers, and
-    that is a normal state rather than a misconfiguration.
+    Order: explicit path, `$STCODE_MCP_CONFIG`, `.mcp.json` in the project. A missing
+    config is normal, not an error — most sessions have no MCP servers.
     """
     candidates: list[Path] = []
     if path:
@@ -117,17 +107,14 @@ def load_mcp_config(path: str | Path | None = None, cwd: Path | None = None) -> 
 class MCPManager:
     """Owns the live connections and the tools they expose.
 
-    Connections are opened once for the session and held on an `AsyncExitStack`, not
-    reopened per call: a stdio server is a subprocess, and paying process startup on
-    every tool call turns a 20 ms call into a 2 s one. `aclose()` unwinds them in
-    reverse, which is what stops a Ctrl-C from leaving orphaned server processes (§8).
+    Opened once per session and held on an `AsyncExitStack`, not reopened per call: a
+    stdio server is a subprocess, and process startup turns a 20 ms call into a 2 s one.
 
     **One task owns the stack.** The SDK's transports are anyio cancel scopes, and
-    anyio refuses to let a scope be exited by a task other than the one that entered
-    it. Opening in `Harness.create` and closing in `Harness.aclose` is exactly that —
-    two different tasks — so `open()` hands the stack to a task of its own that holds
-    it until `aclose()` says stop. Requests may still come from any task; it is only
-    entering and leaving that is pinned.
+    anyio refuses to let one be exited by a task other than the one that entered it.
+    Opening in `Harness.create` and closing in `Harness.aclose` are different tasks, so
+    `open()` hands the stack to a task of its own. Requests may come from any task; only
+    entering and leaving is pinned.
     """
 
     def __init__(self) -> None:
@@ -139,16 +126,16 @@ class MCPManager:
         self.tools: dict[str, Tool[Any]] = {}
         self.problems: list[str] = []
         """Servers that failed to connect. One broken server must not take down the
-        session — the rest of its tools still work, and the agent is told which are
-        missing rather than silently getting a shorter tool list."""
+        session; the agent is told which are missing rather than silently getting a
+        shorter tool list."""
 
     async def open(
         self, servers: dict[str, MCPServerConfig], *, timeout: float = CONNECT_TIMEOUT
     ) -> None:
         """Connect to every server and keep them open until `aclose()`.
 
-        The way to use this class. `connect`/`connect_all` are the pieces it is built
-        from, and calling them directly means owning the task problem yourself.
+        The way to use this class. `connect`/`connect_all` are its pieces; calling them
+        directly means owning the task problem yourself.
         """
         if self._owner is not None:
             return
@@ -156,10 +143,8 @@ class MCPManager:
         await self._ready.wait()
 
     async def _hold(self, servers: dict[str, MCPServerConfig], timeout: float) -> None:
-        """Enter the stack, connect, then sit here until told to stop.
-
-        The whole body runs in one task, which is the point — see the class docstring.
-        """
+        """Enter the stack, connect, then sit here until told to stop. One task, which
+        is the point — see the class docstring."""
         try:
             async with self._stack:
                 await self.connect_all(servers, timeout=timeout)
@@ -192,8 +177,8 @@ class MCPManager:
             target = StdioServerParameters(
                 command=config.command,
                 args=config.args,
-                # Layered over the real environment, not replacing it: a server launched
-                # with only its own `env` loses PATH and cannot find its interpreter.
+                # Layered over the real environment: a server given only its own `env`
+                # loses PATH and cannot find its interpreter.
                 env={**os.environ, **config.env},
                 cwd=config.cwd,
             )
@@ -239,7 +224,7 @@ class MCPManager:
         return by_server
 
     def catalogue(self) -> str:
-        """Server and tool names, for the prompt. Names only — the schemas are the
+        """Server and tool names for the prompt. Names only — the schemas are the
         expensive half, and reading the generated file is how you get them."""
         lines = []
         for server, tools in sorted(self.schemas().items()):
@@ -267,10 +252,9 @@ class MCPManager:
 
 # ---- MCP as code ----------------------------------------------------------------
 #
-# Generated stubs run inside the REPL subprocess, which is the same interpreter, so
-# they import `call` from here rather than carrying a copy of the client. That keeps
-# the generated file small enough to be worth reading, and it keeps credentials out of
-# the workspace — the connection is built from the same `.mcp.json` the harness read.
+# Stubs run in the REPL subprocess — the same interpreter — so they import `call` from
+# here instead of carrying a copy of the client. That keeps each generated file small
+# enough to be worth reading, and credentials out of the workspace.
 
 MCP_CODE_DIRNAME = ".stcode/mcp_servers"
 
@@ -282,20 +266,18 @@ Generated by stcode from {source}. Do not edit — regenerated every session.
 '''
 
 _REPL_MANAGERS: dict[str, "MCPManager"] = {}
-"""One manager per server, in the REPL process. Per server rather than one shared: each
-manager owns a task holding its stack (see `MCPManager`), and a second server joining a
-manager that is already open would never actually connect."""
+"""One manager per server, in the REPL process. Each owns a task holding its stack, so
+a second server joining an already-open manager would never actually connect."""
 
 
 async def call(server: str, tool: str, arguments: dict[str, Any]) -> Any:
     """Call one MCP tool. What every generated stub ends up in.
 
-    Connects on first use and holds the connection for the life of the REPL process, so
-    a second call to the same server does not pay process startup again.
+    Connects on first use and holds the connection for the life of the REPL process.
 
-    Returns structured data when the server provides it, then parsed JSON, then text.
-    That order is deliberate: the reason to call a tool from code is to filter its
-    result *before* printing, and you cannot filter a paragraph.
+    Returns structured data when the server provides it, then parsed JSON, then text —
+    the reason to call a tool from code is to filter before printing, and you cannot
+    filter a paragraph.
     """
     manager = _REPL_MANAGERS.get(server)
     if manager is None:
@@ -352,9 +334,8 @@ def generate_server_code(
 ) -> Path:
     """Write `.stcode/mcp_servers/` from `{server: {tool: schema}}`. Returns the root.
 
-    Rewritten from scratch each session. A stale stub for a tool the server no longer
-    has is worse than a missing one — the agent reads it, believes it, and calls
-    something that is not there.
+    Rewritten from scratch each session: a stale stub is worse than a missing one, as
+    the agent reads it, believes it, and calls something that is not there.
     """
     package = root / MCP_CODE_DIRNAME
     if package.exists():
@@ -394,8 +375,8 @@ def generate_server_code(
 def _render_stub(server: str, tool: str, schema: dict[str, Any], source: str) -> str:
     """One tool, as a Python file the agent can read and import.
 
-    The docstring is the whole interface: the server's own description, then one line
-    per argument. Reading this file is what replaces having its schema in the prompt.
+    The docstring is the whole interface — the server's description, then one line per
+    argument. Reading this file replaces having its schema in the prompt.
     """
     properties: dict[str, Any] = schema.get("input_schema", {}).get("properties", {}) or {}
     required = list(schema.get("input_schema", {}).get("required", []) or [])
@@ -405,8 +386,8 @@ def _render_stub(server: str, tool: str, schema: dict[str, Any], source: str) ->
     for name, spec in properties.items():
         safe = _identifier(name)
         if safe != name:
-            # A name Python cannot spell. Passing it positionally is impossible, so say
-            # so rather than generating a call the agent cannot make.
+            # A name Python cannot spell. Say so rather than generating a call the
+            # agent cannot make.
             skipped.append(name)
             continue
         annotation = _annotation(spec if isinstance(spec, dict) else {})
@@ -452,9 +433,8 @@ def _identifier(name: str) -> str:
 def _render_content(result: Any) -> str:
     """Flatten an MCP `CallToolResult` into text.
 
-    Servers return a list of typed content blocks. Text blocks are joined; anything
-    else is named rather than dropped, because "the server returned an image" is
-    information the agent can act on and an empty string is not.
+    Text blocks are joined; other block types are named rather than dropped — "the
+    server returned an image" is actionable, an empty string is not.
     """
     parts: list[str] = []
     for block in getattr(result, "content", None) or []:

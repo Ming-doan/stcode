@@ -1,8 +1,8 @@
 """
-Provider Types — unified message, tool, and streaming-event shapes shared by every provider.
+Unified message, tool and streaming-event shapes, shared by every provider.
 
-Providers translate to/from these types at their boundary, so the rest of the
-agent (planning loop, tool executor, TUI) never touches a provider SDK type directly.
+Providers translate to and from these at their boundary, so the agent loop, the tool
+executor and the TUI never touch a provider SDK type directly.
 """
 
 from __future__ import annotations

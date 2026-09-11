@@ -1,25 +1,15 @@
 """
 The wire — JSONL, one message per line, same framing on unix and TCP.
 
-Everything that crosses a process boundary is shaped here and nowhere else
-(CLAUDE.md §5.1). Two rules the rest of the package leans on:
+Everything crossing a process boundary is shaped here and nowhere else.
 
-* **Framing is one line, flushed.** The same discipline as the session file and the
-  REPL worker. `\\n` terminates a message, so nothing on the wire may contain a raw
-  newline — `json.dumps` guarantees that, which is why the encoder is not optional.
-* **Agent events are not re-wrapped.** `core/agent/events.py` already carries
-  primitives with a `type` field that reads the way the wire should, so a `TextDelta`
-  is dumped as-is with a `session` field added. A parallel set of wire models would be
-  a translation layer whose only job is to be kept in sync.
-
-Two deliberate differences from the sketch in EXPECTED.md §11.1, both recorded in
-CLAUDE.md §8:
-
-* `turn_finished` carries the full `Usage` (four fields) rather than `{"in","out"}`.
-  The cache counts are the evidence for the prompt-caching claim, and dropping them on
-  the wire would mean the one client that could show them cannot.
-* `set_mode` exists. The TUI has had `/mode` since phase 0; without a message for it,
-  cycling the approval mode would silently affect only sessions created afterwards.
+* **One line, flushed** — the same discipline as the session file and the REPL worker.
+  Nothing on the wire may hold a raw newline, so the encoder is not optional.
+* **Agent events are not re-wrapped.** `core/agent/events.py` already carries primitives
+  with the right `type`, so a `TextDelta` is dumped as-is plus a `session` field.
+* `turn_finished` carries the **full four-field `Usage`** — the cache counts are the
+  evidence for the prompt-caching claim.
+* `set_mode` exists, so `/mode` reaches the live session rather than only later ones.
 """
 
 from __future__ import annotations

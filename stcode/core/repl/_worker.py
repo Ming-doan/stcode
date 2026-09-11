@@ -1,7 +1,7 @@
 """
 The REPL subprocess. Run as `python -u _worker.py`.
 
-One line in, one or more lines out. That is the whole protocol.
+One line in, one or more lines out.
 
     in   {"type":"exec","id":"c1","code":"x = 1\nprint(x)"}
     out  {"type":"chunk","text":"1"}            <- while the cell runs
@@ -10,15 +10,11 @@ One line in, one or more lines out. That is the whole protocol.
     in   {"type":"inject","id":"i1","values":{"read_ab12": "..."}}
     out  {"type":"ok","id":"i1"}
 
-Three things to know:
+`ns` persists between cells. `tool_out` lives in `ns` and `inject` fills it, so the
+elided half of a tool result really is reachable. Top-level `await` works, via
+`PyCF_ALLOW_TOP_LEVEL_AWAIT`.
 
-* `ns` persists. A variable set in one cell is there in the next.
-* `tool_out` lives in `ns`, and `inject` is how the harness fills it. That is the
-  fix for the bug in EXPECTED.md 4.1 — the elided half of a tool result now really
-  is reachable from here.
-* Top-level `await` works, via `PyCF_ALLOW_TOP_LEVEL_AWAIT`.
-
-Kept dependency-free and importable by nothing: it is spawned, not imported.
+Dependency-free and imported by nothing: it is spawned, not imported.
 """
 
 from __future__ import annotations

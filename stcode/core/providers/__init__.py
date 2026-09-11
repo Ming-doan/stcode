@@ -1,10 +1,9 @@
 """
-Provider package — LLM adapters, unified request/event types, the provider registry,
-and the difficulty-routing gateway built on top of them.
+Providers — LLM adapters, unified request/event types, the registry, and the
+difficulty-routing gateway built on them.
 
-This `__init__` is a thin re-export hub; each concern lives in its own leaf module
-(`base.py`, `<provider>.py`, `registry.py`, `gateway.py`) so nothing outside this
-package needs to know the internal layout.
+A thin re-export hub; each concern is its own leaf module (`base.py`, `<provider>.py`,
+`registry.py`, `gateway.py`) so nothing outside needs the internal layout.
 """
 
 from stcode.core.providers.anthropic_claude import AnthropicProvider

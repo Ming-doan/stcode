@@ -1,16 +1,12 @@
 """
 Execution mode — the prompt for an agent that can change things.
 
-There used to be a second constant here, `ORCHESTRATOR`: the RLM main agent whose only
-tool was `repl` and who reached everything else by writing Python. EXPECTED.md §16
-struck that design — it required a kernel↔harness RPC bridge whose benefit is bought
-more cheaply by MCP-as-code plus `task` — so the role axis went with it. What is left
-is one prompt for the agent, plus `SUBAGENT` for the narrowed copy `task` spawns.
+One prompt for the agent, plus `SUBAGENT` for the narrowed copy `task` spawns.
 
-`SUBAGENT` survives the trim because it is not a variant of `EXECUTE_MODE`, it is the
-part a sub-agent cannot infer: that it gets one shot, that its parent sees only its
-final message, and that everything outside its scope belongs to someone else. CLAUDE.md
-§11 names a vaguely-briefed sub-agent as the top cause of duplicated, off-target work.
+`SUBAGENT` is not a variant of `EXECUTE_MODE`; it is the part a sub-agent cannot infer —
+that it gets one shot, that its parent sees only its final message, and that everything
+outside its scope belongs to someone else. A vaguely-briefed sub-agent is the top cause
+of duplicated, off-target work.
 """
 
 from __future__ import annotations

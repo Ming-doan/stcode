@@ -1,31 +1,18 @@
 """
 Shell tools — `bash`, and `bash_output` for the background case.
 
-This is the tool CLAUDE.md §9 is warning about. The agent writes a command and it runs
-with the user's privileges; containerize before any autonomous run. What this module
-can do from inside the process is narrower, and it does three things:
+Commands run with the user's privileges; containerize before any autonomous run. From
+inside the process this module does four things:
 
-**Refuse the unrecoverable.** A short denylist of commands whose damage cannot be
-undone by any later turn — reformatting a disk, `rm -rf /`, piping a URL into a shell.
-This is not a security boundary and is not pretending to be one: anything on the list
-is reachable via a script, an alias, or base64. It is a guard against the *plausible*
-failure, which is a model that writes a destructive command by accident.
-
-**Ask proportionally.** `git status` and `rm -rf build/` are the same tool call with
-different arguments. Gating both as EXECUTE means either a prompt for every `ls` or no
-prompt at all, so an allowlist of read-only commands is downgraded to READ per call
-(`permission_for` in `base.py`) and the rest still asks.
-
-**Never hang.** stdin is closed, pagers are disabled, and every prompt-driven variable
-is set to non-interactive. A command that stops to ask a question stops the whole turn,
-and unlike a failure it produces nothing to react to.
-
-**Each call is a fresh process, and the model will assume otherwise.** `cd src && ...`,
-`export`, and `source .venv/bin/activate` all vanish when the call returns. A persistent
-shell would need a sentinel protocol to know when a command finished, so the answer is
-the `cwd` argument plus a docstring that says so outright (EXPECTED.md §14 item 3). This
-goes from annoying to broken in team mode, where an agent clones a repository and then
-has to work inside it.
+* **Refuses the unrecoverable** — a short denylist of damage no later turn could undo.
+  Not a security boundary (a script or base64 goes round it); it guards against a model
+  writing something destructive by accident.
+* **Asks proportionally.** `git status` and `rm -rf build/` are the same tool call, so
+  read-only commands drop to READ per call and the rest still ask.
+* **Never hangs.** stdin closed, pagers off, prompts disabled. A command that stops to
+  ask a question stops the turn and produces nothing to react to.
+* **Each call is a fresh process** — `cd`, `export` and `source` do not carry over. Pass
+  `cwd` instead. The model will assume otherwise, so the docstring says so outright.
 """
 
 from __future__ import annotations
@@ -60,7 +47,7 @@ NON_INTERACTIVE_ENV = {
     "TERM": "dumb",
 }
 """Set on every command. `TERM=dumb` and `NO_COLOR` matter as much as the prompt
-suppressors — ANSI escapes are invisible to the reader and expensive in the context."""
+suppressors: ANSI escapes are invisible to the reader and expensive in the context."""
 
 _DESTRUCTIVE = (
     (re.compile(r"\bmkfs(\.\w+)?\b"), "filesystem format"),
@@ -72,10 +59,9 @@ _DESTRUCTIVE = (
     (re.compile(r"\bchmod\s+-[a-zA-Z]*R[a-zA-Z]*\s+777\s+/\s*$"), "world-writable root"),
     (re.compile(r"\bgit\s+(push\s+[^|;]*--force(?!-with-lease)|reset\s+--hard\s+\S*origin)"), "irreversible git history rewrite"),
 )
-"""Patterns refused outright. Each one names damage that survives the session — the
-test for belonging here is "could the next turn undo it?", not "is it dangerous?".
-Deletion is judged by `_deletes_something_irreplaceable` instead, because a delete is
-only unrecoverable depending on *what* it deletes: `rm -rf build/` is fine."""
+"""Refused outright. The test for belonging here is "could the next turn undo it?", not
+"is it dangerous?". Deletion is judged by target instead, since `rm -rf build/` is
+fine."""
 
 _IRREPLACEABLE = frozenset(
     {
@@ -85,18 +71,16 @@ _IRREPLACEABLE = frozenset(
         "/root", "/run", "/sbin", "/srv", "/sys", "/usr", "/var",
     }
 )
-"""Delete targets with nothing behind them. `.` and `*` are on the list because from
-the session's working directory they mean the user's whole project — the one thing an
-agent can destroy that no rebuild brings back."""
+"""Delete targets with nothing behind them. `.` and `*` are here because from the
+session's cwd they mean the user's whole project."""
 
 
 def _deletes_something_irreplaceable(command: str) -> str | None:
-    """Whether any `rm` in this line points at a path that cannot be recreated.
+    """Whether any `rm` here points at a path that cannot be recreated.
 
-    Judged on the target, not the flags. `rm -rf node_modules/` and `rm -rf /` differ
-    only in the argument, and refusing on `-rf` alone would block the routine cleanup
-    that build tooling does constantly — which trains whoever reads the refusals to
-    ignore them.
+    Judged on the target, not the flags: `rm -rf node_modules/` and `rm -rf /` differ
+    only in the argument, and refusing on `-rf` would block routine cleanup until
+    whoever reads the refusals learns to ignore them.
     """
     for segment in _split_command(command):
         if os.path.basename(segment[0]) != "rm":
@@ -116,7 +100,7 @@ _INTERACTIVE = (
     (re.compile(r"\bssh\b(?![^|;]*\s-o\s*BatchMode)"), "ssh, which may prompt for a passphrase"),
 )
 """Commands that wait for a human at a TTY there is no way to reach. Refused with an
-alternative rather than allowed to consume the whole timeout in silence."""
+alternative rather than left to consume the whole timeout in silence."""
 
 _READ_ONLY_COMMANDS = frozenset(
     {
@@ -134,18 +118,17 @@ _READ_ONLY_SUBCOMMANDS = {
     "npm": frozenset({"ls", "view", "outdated"}),
     "cargo": frozenset({"tree", "metadata"}),
 }
-"""`sed` and `awk` are here on the strength of the overwhelmingly common case — a pipe
-filter. `sed -i` edits in place, so `_is_read_only` checks for that explicitly rather
-than trusting the command name alone."""
+"""`sed` and `awk` are here for the overwhelmingly common case, a pipe filter. `sed -i`
+edits in place, so `is_read_only` checks for that rather than trusting the name."""
 
 
 @dataclass
 class BackgroundShell:
     """A command still running after `bash` returned.
 
-    Output is drained continuously into `buffer` rather than read on demand: a process
-    whose pipe fills up blocks forever, and a build that stalls at 64 KB of output with
-    no error is close to impossible to diagnose from the outside.
+    Output drains continuously into `buffer` rather than on demand: a process whose pipe
+    fills up blocks forever, and a build stalled at 64 KB with no error is close to
+    impossible to diagnose from outside.
     """
 
     id: str
@@ -168,11 +151,11 @@ class BackgroundShell:
 
 
 def _split_command(command: str) -> list[list[str]]:
-    """Best-effort split into the individual commands a line runs.
+    """Best-effort split into the commands a line runs.
 
-    `shlex` is not a shell parser and this is not trying to be one. It is enough to
+    `shlex` is not a shell parser and this is not trying to be one — it is enough to
     decide whether every segment of `git status | head -20` is read-only, and it fails
-    closed: an unparseable line is simply not treated as read-only.
+    closed: an unparseable line is simply not read-only.
     """
     try:
         tokens = shlex.split(command, comments=True)
@@ -296,8 +279,8 @@ async def bash(
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        # Its own process group, so a timeout kills the whole pipeline rather than the
-        # shell that spawned it and orphaning the actual work (§8's "no orphans").
+        # Its own process group, so a timeout kills the whole pipeline rather than just
+        # the shell that spawned it, orphaning the actual work.
         start_new_session=True,
     )
 
@@ -318,8 +301,7 @@ async def bash(
     code = process.returncode or 0
     if code == 0:
         return output or "(no output)"
-    # The exit code goes last: it is the part the model most needs and the part most
-    # likely to survive elision from the tail (`truncate.elide` keeps head and tail).
+    # Exit code last: the part the model most needs, and `elide` keeps the tail.
     return f"{output}\n\n[exit {code}]" if output else f"[exit {code}, no output]"
 
 

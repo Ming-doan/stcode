@@ -6,18 +6,15 @@ PyREPL — the parent half of the REPL. Owns one `python -u` subprocess.
     await repl.inject({"read_ab12": "...the elided remainder..."})
     await repl.aclose()
 
-Why a subprocess and not `exec()` in this process: a model that writes `while True:`
-would otherwise hang the whole daemon, and in a container nobody is there to press
-Ctrl-C. Here it costs one SIGINT.
+A subprocess rather than `exec()` here, because a model that writes `while True:` would
+otherwise hang the whole daemon, and in a container nobody can press Ctrl-C. Here it
+costs one SIGINT.
 
-Three rules this class keeps:
-
-* **One cell at a time.** A lock, because the namespace is shared state and two
-  concurrent cells in it is a race with no upside.
-* **Start on first use.** Most sessions never call `repl`. Spawning a Python for them
-  is pure waste, so `start()` happens on the first `execute`.
-* **A dead worker is replaced, not mourned.** If it stops answering it is killed and
-  the next call gets a fresh one — with an empty namespace, which the caller is told.
+* **One cell at a time** — the namespace is shared state, and two concurrent cells in it
+  is a race with no upside.
+* **Start on first use.** Most sessions never call `repl`.
+* **A dead worker is replaced, not mourned** — killed, and the next call gets a fresh
+  one with an empty namespace, which the caller is told about.
 """
 
 from __future__ import annotations
@@ -40,12 +37,12 @@ WORKER = Path(__file__).with_name("_worker.py")
 
 DEFAULT_TIMEOUT = 120.0
 STDERR_TAIL_LINES = 50
-"""How much of the worker's stderr is kept for a crash report. Bounded because the
-alternative is holding every warning a long session produced."""
+"""Worker stderr kept for a crash report. Bounded — the alternative is holding every
+warning a long session produced."""
 
 INTERRUPT_GRACE = 5.0
-"""After SIGINT, how long the worker gets to report back before it is killed. A cell
-stuck in a C call cannot be interrupted at all, and waiting forever for it is how a
+"""How long the worker gets to report back after SIGINT before it is killed. A cell
+stuck in a C call cannot be interrupted at all, and waiting forever for one is how a
 daemon becomes something you `kill -9` instead of trusting."""
 
 StreamFn = Callable[[str, str], Awaitable[None]]
@@ -58,8 +55,8 @@ class ExecResult:
 
     ok: bool = True
     outcome: str = "ok"
-    """`ok` | `error` | `timeout` | `crashed`. The model needs these apart: a timeout
-    means make it smaller, an error means fix it, a crash means the namespace is gone."""
+    """`ok` | `error` | `timeout` | `crashed`. The model needs these apart: timeout means
+    make it smaller, error means fix it, crashed means the namespace is gone."""
 
     stdout: str = ""
     error: str | None = None
@@ -72,7 +69,7 @@ class ExecResult:
         return "\n".join(parts)
 
     def view(self, limit: int = DEFAULT_VIEW_LIMIT) -> str:
-        """What the model reads. Elided at `limit`, never summarised (rule 1)."""
+        """What the model reads. Elided at `limit`, never summarised."""
         return elide(self.text(), limit, hint=NARROW_REQUEST_HINT)
 
 
@@ -97,9 +94,8 @@ class PyREPL:
         self._lock = asyncio.Lock()
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
-        # Injections that arrived before anything started the worker. Held rather than
-        # spawning a Python for them: a big tool result is not a reason to pay for an
-        # interpreter the session may never use.
+        # Injections that arrived before the worker started. Held rather than spawning
+        # a Python for them — the session may never use one.
         self._pending_injects: dict[str, Any] = {}
 
     @property
@@ -113,9 +109,9 @@ class PyREPL:
         if self.running:
             return
         environment = {**os.environ, **self.env}
-        # The generated MCP stubs live under the workspace, so the workspace has to be
-        # importable from inside a cell. This is what makes `from mcp_servers.github
-        # import list_issues` work (step 8).
+        # The generated MCP stubs live under the workspace, so it must be importable
+        # from inside a cell — this is what makes `from mcp_servers.github import ...`
+        # work.
         roots = [str(self.cwd), str(self.cwd / ".stcode")]
         existing = environment.get("PYTHONPATH", "")
         environment["PYTHONPATH"] = os.pathsep.join([*roots, existing]) if existing else os.pathsep.join(roots)
@@ -141,9 +137,8 @@ class PyREPL:
     async def _drain_stderr(self) -> None:
         """Keep the worker's stderr pipe empty, and keep the last of it.
 
-        Two reasons, and the second is the one that bites: a subprocess started from a
-        cell inherits this pipe, and a server that logs freely into a pipe nobody reads
-        will block on a full buffer and hang the cell that started it.
+        The second half is the one that bites: a subprocess started from a cell inherits
+        this pipe, and a chatty child blocks on a full buffer and hangs its own cell.
         """
         process = self._process
         if process is None or process.stderr is None:
@@ -220,8 +215,7 @@ class PyREPL:
     async def inject(self, values: dict[str, Any]) -> None:
         """Push values into the cell namespace's `tool_out`.
 
-        This is the bridge rule 1 depends on: what `elide` cut from a tool result is
-        parked here, so the hint that names `tool_out["..."]` is telling the truth.
+        What `elide` cut is parked here, so the hint naming `tool_out["..."]` is true.
         """
         if not values:
             return
@@ -274,9 +268,9 @@ class PyREPL:
     ) -> dict[str, Any]:
         """Read until a real answer arrives. Chunks are forwarded, not returned.
 
-        `wanted` matches on the request id. Without it, one late frame — the result of
-        a cell that answered its SIGINT after we stopped waiting — would be handed to
-        the *next* call, and every reply after that would be off by one.
+        `wanted` matches the request id. Without it a late frame — a cell answering its
+        SIGINT after we stopped waiting — would be handed to the *next* call, and every
+        reply after that would be off by one.
         """
         process = self._process
         if process is None or process.stdout is None:
@@ -302,10 +296,9 @@ class PyREPL:
     ) -> ExecResult:
         """Interrupt, then give the worker a moment to report what it had.
 
-        A cell that answers the SIGINT keeps its namespace, which is the whole reason to
-        try this before reaching for the kill. We wait for the interrupted cell's *own*
-        result frame — sending anything else here would leave that frame in the pipe for
-        the next call to trip over.
+        A cell that answers its SIGINT keeps its namespace, which is why this comes
+        before the kill. We wait for that cell's *own* result frame — anything else
+        would leave it in the pipe for the next call to trip over.
         """
         await self.interrupt()
         elapsed = asyncio.get_running_loop().time() - started

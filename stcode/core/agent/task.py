@@ -2,15 +2,11 @@
 `task` — a sub-agent as a tool. Solo mode only.
 
 Here rather than in `core/harness/tools/` because of the dependency arrow: this spawns
-an `Agent`, and a tool inside `core/harness/` that did so would point the harness at its
-own caller (CLAUDE.md §3.2). A factory closing over the parent agent keeps the arrow
-pointing one way and needs no registry, no contextvar, and no lookup.
+an `Agent`, and a tool inside the harness that did so would point it at its own caller.
 
-Two things the docstring has to do, and they are the difference between this being
-useful and being expensive. CLAUDE.md §11: no model is trained on this scaffold, so
-expect `task` to be under-used; and a vaguely-described sub-agent is the number one
-cause of duplicated and off-target work. So the docstring both argues for delegation and
-forces the caller to state an output format and a scope.
+**The docstring does two jobs.** No model is trained on this scaffold, so expect `task`
+to be under-used; and a vaguely-described sub-agent is the top cause of duplicated,
+off-target work. So it argues for delegation *and* forces an output format and a scope.
 """
 
 from __future__ import annotations

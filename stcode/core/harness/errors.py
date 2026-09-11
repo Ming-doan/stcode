@@ -1,23 +1,17 @@
 """
-Tool failures — the vocabulary for something going wrong, shared by everything here.
+Tool failures — the vocabulary for something going wrong.
 
-A leaf module on purpose. `context.py` needs to raise these and `tools/base.py` needs
-to catch them, and putting them in either one makes the other import it — which is a
-cycle, since a tool imports the context it operates on. Exceptions are shared
-vocabulary rather than machinery, so they live below both.
+A leaf module: `context.py` raises these and `tools/base.py` catches them, so putting
+them in either would make a cycle. The agent loop reacts differently to each:
 
-The distinctions are not decorative; the agent loop reacts differently to each:
-
-* `ToolError` — the tool worked and the answer is "no, because…". The message goes
-  straight back to the model as the tool result.
+* `ToolError` — the tool worked, and the answer is "no, because…".
 * `ToolDenied` — a human said no. Could go the other way next time.
-* `ToolForbidden` — the mode does not have this capability. Retrying cannot help, and
-  the model should be told to stop rather than to try again.
-* `ToolCancelled` / `ToolTimeout` — the call did not finish. Different remedies:
-  interruption means the user wants something else, a timeout means narrow the request.
+* `ToolForbidden` — the mode lacks this capability. Retrying cannot help.
+* `ToolCancelled` / `ToolTimeout` — did not finish. An interrupt means the user wants
+  something else; a timeout means narrow the request.
 
-A bug *inside* a tool is none of these. It surfaces as whatever it is, gets logged with
-its traceback, and is summarized for the model — a stack frame is not advice.
+A bug *inside* a tool is none of these: logged with its traceback, summarised for the
+model. A stack frame is not advice.
 """
 
 from __future__ import annotations

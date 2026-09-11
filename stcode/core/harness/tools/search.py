@@ -1,17 +1,14 @@
 """
 Search tools — `glob`, `grep`, `ls`.
 
-CLAUDE.md §8 is blunt about this: shell out to `ripgrep` and `fd`, do not hand-roll.
-The reason is not only speed. `.gitignore` semantics, binary detection, encoding
-recovery, and PCRE2 are each a project's worth of edge cases that these tools have
-already settled, and a Python reimplementation gets them subtly wrong in ways that show
-up as an agent confidently reporting that a symbol does not exist.
+Shell out to `ripgrep` and `fd`; do not hand-roll. Not just for speed — `.gitignore`
+semantics, binary detection, encoding recovery and PCRE2 are each a project's worth of
+edge cases, and a Python reimplementation gets them wrong in ways that surface as an
+agent confidently reporting a symbol does not exist.
 
-`ripgrep` is a declared dependency, not a thing we hope is installed: it ships as a
-wheel that drops an `rg` binary next to the interpreter, so `grep` works on a fresh
-checkout with no system packages. `fd` has no such wheel, so `glob` degrades in two
-steps when it is absent — to `rg --files`, which is equally `.gitignore`-aware, and
-finally to `pathlib`. A missing binary should cost speed, not the tool.
+`ripgrep` is a declared dependency (a wheel drops `rg` next to the interpreter). `fd`
+has no wheel, so `glob` degrades to `rg --files`, then to `pathlib`. A missing binary
+should cost speed, not the tool.
 """
 
 from __future__ import annotations
@@ -30,8 +27,8 @@ from stcode.core.harness.context import DEFAULT_IGNORED_DIRS, HarnessContext
 from stcode.core.harness.tools.base import Runtime, ToolError, tool
 
 GREP_MAX_OUTPUT = 16384
-"""`grep -content` is the one search that legitimately returns prose. Everything above
-this is elided into `tool_out`, where the agent can filter it in Python."""
+"""`output_mode="content"` is the one search that legitimately returns prose. Above this
+it is elided into `tool_out`, where the agent can filter it in Python."""
 
 _SUBPROCESS_TIMEOUT = 60.0
 
@@ -39,11 +36,10 @@ _SUBPROCESS_TIMEOUT = 60.0
 async def run_capture(
     argv: Sequence[str], *, cwd: Path, env: dict[str, str] | None = None, timeout: float = _SUBPROCESS_TIMEOUT
 ) -> tuple[int, str, str]:
-    """Run a command and capture it. Shared by every tool here and by `bash`.
+    """Run a command and capture it. Shared by every tool here.
 
-    `create_subprocess_exec`, never `_shell`: these argv lists contain agent-authored
-    patterns, and handing `rg` a pattern through a shell means a pattern containing a
-    backtick runs a command.
+    `create_subprocess_exec`, never `_shell`: these argv lists hold agent-authored
+    patterns, and a pattern containing a backtick would run a command.
     """
     try:
         process = await asyncio.create_subprocess_exec(
@@ -73,12 +69,11 @@ async def run_capture(
 
 
 def find_binary(name: str) -> str | None:
-    """Locate a helper binary on PATH, or in the interpreter's own `bin/` directory.
+    """Locate a helper binary on PATH, or next to the interpreter.
 
-    The second half is what makes the bundled ripgrep work. A wheel-installed binary
-    lands next to `python` inside the virtualenv, which is on PATH when the environment
-    is activated and *not* on PATH when something invokes `.venv/bin/python` directly —
-    a distinction no user of this tool should have to care about.
+    The second half is what makes the bundled ripgrep work: a wheel-installed binary
+    lands beside `python` in the virtualenv, which is on PATH when it is activated and
+    not when something invokes `.venv/bin/python` directly.
     """
     found = shutil.which(name)
     if found:
@@ -124,6 +119,7 @@ async def glob(
         return f"No files matching {pattern!r} under {root}."
 
     # Stat once, sort once. Files can vanish between listing and stat in a live repo.
+
     def mtime(candidate: Path) -> float:
         try:
             return candidate.stat().st_mtime
@@ -138,30 +134,26 @@ async def glob(
     return body
 
 
+# Flags for each lister, in preference order; each is called as FLAGS + [pattern, "."].
+# fd's `--glob` matches the whole pattern instead of treating it as a regex, and
+# `--full-path` is what lets `src/**/*.py` mean what it says.
+_LISTERS = (
+    ("fd", ("--glob", "--full-path", "--type", "f", "--hidden", "--exclude", ".git")),
+    ("rg", ("--files", "--hidden", "--glob", "!.git", "--glob")),
+)
+
+
 async def _glob_paths(pattern: str, root: Path, context: HarnessContext) -> list[Path]:
-    if _have("fd"):
-        # `--glob` makes fd match the whole pattern rather than treating it as a regex;
-        # `--full-path` is what lets a pattern like `src/**/*.py` mean what it says.
-        code, out, err = await run_capture(
-            [find_binary("fd") or "fd", "--glob", "--full-path", "--type", "f",
-             "--hidden", "--exclude", ".git", pattern, "."],
-            cwd=root,
-        )
-        if code in (0, 1):
-            return [root / line for line in out.splitlines() if line]
-        raise ToolError(f"fd failed: {err.strip()}")
+    for name, flags in _LISTERS:
+        binary = find_binary(name)
+        if binary is None:
+            continue
+        code, out, err = await run_capture([binary, *flags, pattern, "."], cwd=root)
+        if code not in (0, 1):
+            raise ToolError(f"{name} failed: {err.strip()}")
+        return [root / line for line in out.splitlines() if line]
 
-    if _have("rg"):
-        code, out, err = await run_capture(
-            [find_binary("rg") or "rg", "--files", "--hidden", "--glob", "!.git",
-             "--glob", pattern, "."],
-            cwd=root,
-        )
-        if code in (0, 1):
-            return [root / line for line in out.splitlines() if line]
-        raise ToolError(f"rg failed: {err.strip()}")
-
-    # Neither binary present. Correct, just slower, and it has to do its own ignoring.
+    # Neither binary present. Correct, just slower, and it does its own ignoring.
     return [
         candidate
         for candidate in root.glob(pattern)
@@ -330,11 +322,11 @@ def _human_size(size: int) -> str:
 
 
 async def _gitignored(entries: list[Path], target: Path, context: HarnessContext) -> set[Path]:
-    """Ask git which of these entries are ignored — one subprocess, not one per entry.
+    """Ask git which entries are ignored — one subprocess, not one per entry.
 
-    `git check-ignore` is the only thing that reads `.gitignore` the way git does
-    (nested files, negations, `core.excludesFile`, `.git/info/exclude`). Outside a
-    repository it exits non-zero and we fall back to `DEFAULT_IGNORED_DIRS`.
+    `git check-ignore` is the only thing that reads `.gitignore` the way git does:
+    nested files, negations, `core.excludesFile`, `.git/info/exclude`. Outside a repo it
+    exits non-zero and we fall back to `DEFAULT_IGNORED_DIRS`.
     """
     if not entries or not _have("git"):
         return set()

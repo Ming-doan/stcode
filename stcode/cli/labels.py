@@ -1,10 +1,9 @@
 """
 Labels — every string the user reads, in one place.
 
-Screens compose widgets; this module decides what those widgets say. Keeping the copy
-together makes it possible to review tone in one pass, and keeps presentation-only
-tables (mode colours, provider display names) out of `core/`, which shouldn't know a UI
-exists.
+Screens compose widgets; this module decides what they say. Keeping the copy together
+makes it reviewable in one pass, and keeps presentation-only tables (mode colours,
+provider display names) out of `core/`, which should not know a UI exists.
 
 Anything conditional is a function rather than a constant, so the *choice* of wording
 lives here too instead of leaking back into the screens as an `if`.
@@ -250,10 +249,6 @@ def no_key_error(provider: str) -> str:
 
 def unknown_command(name: str) -> str:
     return f"Unknown command /{name} — /help for the list."
-
-
-def stream_failed(exc: Exception) -> str:
-    return f"{type(exc).__name__}: {exc}"
 
 
 # --------------------------------------------------------------------- settings screen

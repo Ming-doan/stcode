@@ -1,14 +1,12 @@
 """
 Plan mode — research and design, with writing switched off.
 
-The mode is not "execute mode, but ask first". Writes and commands are *forbidden*
-(`harness/approvals.py`), so the agent cannot get halfway into a change and then check.
-That constraint is the point: the deliverable is a plan the human reads and approves
-before a byte moves, and an agent that could edit "just this one file" while planning
-would produce a plan describing work it had already half-done.
+Not "execute mode, but ask first": writes and commands are *forbidden*, so the agent
+cannot get halfway into a change and then check. The deliverable is a plan the human
+reads before a byte moves.
 
-The prompt therefore spends most of its length on what a *good* plan contains, because
-the common failure here is not disobedience — it is a plan too vague to disagree with.
+The prompt spends most of its length on what a *good* plan contains, because the common
+failure is not disobedience — it is a plan too vague to disagree with.
 """
 
 from __future__ import annotations

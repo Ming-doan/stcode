@@ -20,7 +20,7 @@ import asyncio
 import logging
 import os
 import random
-from typing import Any, AsyncGenerator, Literal, Mapping
+from typing import Any, AsyncGenerator, Literal, Mapping, TypeVar
 
 import anthropic
 import openai
@@ -37,15 +37,13 @@ Difficulty = Literal["low", "medium", "high"]
 
 
 class ProviderConfig(BaseModel):
-    """A provider's main credentials — the fallback for any tier that doesn't override them.
+    """A provider's main credentials — the fallback for any tier that does not override.
 
-    `api_key_env` names an environment variable to read the key from at request time;
-    `api_key` is a literal fallback for people who'd rather keep it in the config file.
-    The env var wins when both are set and the variable is actually present.
+    `api_key_env` names an environment variable read at request time; `api_key` is a
+    literal for people who would rather keep it in the file. The env var wins when set.
 
-    `base_url`/`base_url_env` are for talking to anything that speaks the provider's wire
-    protocol but isn't the vendor's own endpoint (a proxy, router, or self-hosted gateway),
-    and follow the same env-wins-over-literal rule.
+    `base_url`/`base_url_env` point at anything speaking the provider's wire protocol
+    that is not the vendor's endpoint, under the same env-wins rule.
     """
 
     api_key_env: str | None = None
@@ -57,10 +55,8 @@ class ProviderConfig(BaseModel):
 class RouteConfig(BaseModel):
     """A difficulty tier's target model, with optional credential overrides.
 
-    `api_key_env`/`api_key`/`base_url`/`base_url_env` are optional: when unset, the tier
-    falls back to its provider's main config above — set them only when a tier needs
-    different credentials or a different endpoint (e.g. a higher-quota key reserved
-    for `high`).
+    Unset, the tier falls back to its provider's main config. Set them only when a tier
+    needs different credentials or endpoint — a higher-quota key reserved for `high`.
     """
 
     provider: str
@@ -104,6 +100,14 @@ _RETRYABLE_OPENAI: tuple[type[Exception], ...] = (
 )
 
 
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+
+def _coerce(model: type[_ModelT], value: Any) -> _ModelT:
+    """Accept either the model itself or a plain dict of the same shape."""
+    return value if isinstance(value, model) else model.model_validate(value)
+
+
 def _is_retryable(exc: Exception) -> bool:
     if isinstance(exc, _RETRYABLE_ANTHROPIC + _RETRYABLE_OPENAI):
         return True
@@ -116,16 +120,13 @@ def _is_retryable(exc: Exception) -> bool:
 
 
 class LLMGateway:
-    """Routes completions to a provider+model by difficulty tier, with retry on transient
+    """Routes completions to a provider+model by difficulty tier, retrying transient
     failures.
 
-    Deliberately excludes the agent loop. Tool execution, dynamically changing the tool
-    set turn-by-turn, and human-in-the-loop approval are all orchestration-level concerns
-    that live *above* this layer and vary per call — baking a loop in here would mean
-    either re-exposing every provider-specific knob through the gateway (defeating the
-    point of the abstraction) or hard-coding one harness's shape into what should stay a
-    thin "send this, stream that back" API. Callers own their loop and call `stream()`
-    once per turn with whatever messages/tools that turn needs.
+    Deliberately excludes the agent loop. Tool execution, turn-by-turn tool sets and
+    human-in-the-loop approval all vary per call and live *above* this layer; baking a
+    loop in would mean either re-exposing every provider knob through the gateway or
+    hard-coding one harness's shape into a thin "send this, stream that back" API.
     """
 
     def __init__(
@@ -134,37 +135,26 @@ class LLMGateway:
         routing: Mapping[Difficulty, RouteConfig | dict[str, Any]],
         retry: RetryConfig | dict[str, Any] | None = None,
     ) -> None:
-        """`providers`/`routing`/`retry` accept either the model instances themselves or
-        plain dicts of the same shape (e.g. inline literals in a script) — each is
-        validated/coerced here, once, so a malformed entry fails loudly at construction
-        with a clear pydantic error instead of an `AttributeError` deep inside `stream()`
-        the first time that route is actually used.
+        """Each argument takes the model instance or a plain dict of the same shape,
+        coerced here once so a malformed entry fails loudly at construction rather than
+        as an `AttributeError` inside `stream()` the first time that route is used.
 
-        `Mapping`, not `dict`, because both are copied on the next two lines and never
-        mutated: an invariant `dict[str, ProviderConfig | dict]` rejects the plain
-        `dict[str, ProviderConfig]` that `GatewayConfig` actually holds.
+        `Mapping`, not `dict`: both are copied and never mutated, and an invariant
+        `dict[str, ProviderConfig | dict]` rejects the `dict[str, ProviderConfig]` that
+        `GatewayConfig` actually holds.
         """
         self._providers_cfg = {
-            name: cfg if isinstance(cfg, ProviderConfig) else ProviderConfig.model_validate(cfg)
-            for name, cfg in providers.items()
+            name: _coerce(ProviderConfig, cfg) for name, cfg in providers.items()
         }
         self._routing = {
-            difficulty: route if isinstance(route, RouteConfig) else RouteConfig.model_validate(route)
-            for difficulty, route in routing.items()
+            difficulty: _coerce(RouteConfig, route) for difficulty, route in routing.items()
         }
-        self._retry = (
-            retry
-            if isinstance(retry, RetryConfig)
-            else RetryConfig.model_validate(retry)
-            if retry is not None
-            else RetryConfig()
-        )
+        self._retry = _coerce(RetryConfig, retry) if retry is not None else RetryConfig()
         self._provider_instances: dict[tuple[str, str | None, str | None], BaseModelProvider] = {}
 
     async def aclose(self) -> None:
-        """Close every cached provider client. Instances are cached and reused across
-        calls to `stream()` (including retries) — never close one mid-stream or
-        mid-retry; call this only once the gateway itself is being torn down."""
+        """Close every cached provider client. They are reused across `stream()` calls
+        and retries, so call this only when tearing the gateway down."""
         for instance in self._provider_instances.values():
             await instance.aclose()
         self._provider_instances.clear()
@@ -189,8 +179,7 @@ class LLMGateway:
                 f"Provider {name!r} not configured. Configured: {sorted(self._providers_cfg)}"
             ) from None
 
-        # A tier's own credentials win over the provider's; within either, an env var
-        # wins over a literal (see resolve_secret above).
+        # A tier's credentials win over the provider's; within either, env beats literal.
         resolved_key = resolve_secret(
             api_key_env or provider_cfg.api_key_env, api_key or provider_cfg.api_key
         )
@@ -204,16 +193,11 @@ class LLMGateway:
         return self._provider_instances[cache_key]
 
     def _resolve_route(self, difficulty: Difficulty) -> RouteConfig:
-        """The route for a tier, falling back to another tier when it has none.
+        """The route for a tier, falling back to another when it has none.
 
-        A missing `[routing.high]` used to raise and take down the turn. One absent
-        line of TOML is not a reason to refuse to work: `medium` first because it is
-        the least wrong answer in either direction, then whichever tier exists. Only a
-        gateway with no routes at all still raises.
-
-        This is config fallback, not provider failover — switching providers because
-        one is down only means something when you pay for two, and it would go around
-        the retry loop rather than here (EXPECTED.md §5.1).
+        One absent line of TOML is not a reason to refuse to work. `medium` first, as
+        the least wrong answer in either direction; only a gateway with no routes at all
+        raises. This is config fallback, not provider failover.
         """
         route = self._routing.get(difficulty)
         if route is not None:
@@ -251,13 +235,11 @@ class LLMGateway:
         parallel_tool_calls: bool | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Stream one completion, routed by `difficulty` unless `provider`+`model` are
-        given explicitly (which bypasses tier routing and uses that provider's main
-        credentials).
+        given explicitly — which bypasses tier routing and uses that provider's main
+        credentials.
 
-        `reasoning_effort`, `temperature`, `top_p`, `stop`, and
-        `parallel_tool_calls` pass straight through to the routed provider's
-        `stream()` — see `BaseModelProvider.stream` for the unified semantics
-        and each provider's own docstring for its mapping/caveats.
+        `reasoning_effort`, `temperature`, `top_p`, `stop` and `parallel_tool_calls`
+        pass straight through; see `BaseModelProvider.stream` for the unified semantics.
         """
         if provider and model:
             provider_name, model_name = provider, model
@@ -291,9 +273,8 @@ class LLMGateway:
                     yield event
                 return
             except Exception as exc:
-                # Once we've yielded output, the caller already has partial content —
-                # retrying from scratch would duplicate it, so only retry failures that
-                # happen before the stream produces anything.
+                # Once anything is yielded the caller has partial content, and retrying
+                # would duplicate it. Only pre-first-token failures are retryable.
                 if started or attempt == retry.max_attempts or not _is_retryable(exc):
                     raise
                 delay = min(retry.base_delay * (2 ** (attempt - 1)), retry.max_delay)

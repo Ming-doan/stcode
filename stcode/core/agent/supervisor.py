@@ -1,39 +1,18 @@
 """
 Supervisor — a second pair of eyes on the trajectory.
 
-NVIDIA AVO reached 100% on ARC-AGI-3 and credited system design rather than a stronger
-model. The component they name is a supervisor watching for **stagnation and repeated
-unproductive cycles**, redirecting the main agent when it finds one.
+The session file is already the trajectory, so this is just a reader.
 
-We already write the trajectory — it is the session file — so this is just a reader.
+**Counting first, model second.** Four plain-Python heuristics run at zero token cost;
+only a hit costs one `difficulty="low"` call, and that model may answer NONE. Always on,
+usually free.
 
-## How it stays cheap
+Three rules:
 
-Counting first, model second:
-
-1. Every N tool-call iterations, look at the last 30 records.
-2. Four **heuristics**, plain Python, zero tokens: the same call repeated, more than
-   half the calls failing, lots of work and no file written, the same file rewritten
-   over and over.
-3. Only if one fires, ask a `difficulty="low"` model what to try instead.
-4. That model may answer NONE. Most warnings are not stagnation, and a supervisor that
-   cannot say "carry on" is a supervisor that interrupts good work.
-
-So it is always on and usually free.
-
-## Three design rules
-
-**Nudges go into `messages`, never the system prompt.** Written as a `supervisor`
-record, which `Session.messages()` turns into a prefixed `user` message. The cached
-prefix stays byte-identical — editing the system prompt would mean a full cache miss
-on every nudge, which is a strange price to pay for advice.
-
-**The supervisor has no tools.** It reads and it speaks. One with write access is a
-second agent, and then you have to answer "who supervises the supervisor?".
-
-**It checks inside a turn, not between turns.** A task that loops does so within one
-turn, iterating toward `max_turns`. Checking once per user message would miss exactly
-the failure this exists to catch.
+* Nudges go into `messages`, never the system prompt — editing the cached prefix would
+  cost a full cache miss per piece of advice.
+* The supervisor has no tools. One that could write is a second agent.
+* It checks *inside* a turn, because that is where a loop happens.
 """
 
 from __future__ import annotations
@@ -47,8 +26,8 @@ from stcode.core.providers.gateway import Difficulty, LLMGateway
 from stcode.core.providers.types import Message, TextDelta
 
 DEFAULT_EVERY = 8
-"""Tool-call iterations between checks. Low enough to catch a loop before it burns the
-turn's budget, high enough that a productive stretch is never interrupted."""
+"""Iterations between checks. Low enough to catch a loop before it burns the turn's
+budget, high enough not to interrupt a productive stretch."""
 
 DEFAULT_WINDOW = 30
 """Records the heuristics look at. About two iterations' worth of calls and results."""
@@ -57,9 +36,9 @@ REPEAT_THRESHOLD = 3
 ERROR_RATE_THRESHOLD = 0.5
 SAME_FILE_THRESHOLD = 4
 IDLE_CALLS_THRESHOLD = 10
-"""Tool calls with no file written before "lots of looking, no doing" counts as a
-symptom. High on purpose: research legitimately writes nothing, and a supervisor that
-fires on reading is one you switch off."""
+"""Calls with no file written before "lots of looking, no doing" counts. High on
+purpose: research legitimately writes nothing, and a supervisor that fires on reading is
+one you switch off."""
 
 WRITING_TOOLS = frozenset({"write", "edit"})
 
@@ -93,8 +72,8 @@ class Supervisor:
         self.window = window
         self.difficulty = difficulty
         self._last_nudge = ""
-        """The previous nudge. Saying the same thing twice is itself a loop, and an
-        agent that ignored the advice once will ignore the repeat."""
+        """The previous nudge. Repeating it is itself a loop, and an agent that ignored
+        the advice once will ignore the repeat."""
 
     async def check(self, records: Sequence[dict[str, Any]]) -> str | None:
         """A nudge for the agent, or None. Costs nothing unless a heuristic fires."""
@@ -109,8 +88,7 @@ class Supervisor:
         return nudge
 
     def due(self, iteration: int) -> bool:
-        """Whether this iteration is a checkpoint. Never the first one — there is no
-        trajectory to read yet."""
+        """Whether this iteration is a checkpoint. Never the first — no trajectory yet."""
         return iteration > 0 and iteration % self.every == 0
 
     # ---- the free half ----
@@ -119,8 +97,8 @@ class Supervisor:
     def smell(records: Sequence[dict[str, Any]]) -> str | None:
         """Four countable signs of being stuck. No model, no tokens.
 
-        Returns the symptom in plain words, because that sentence is what the diagnosis
-        call is given to explain — a boolean would tell the cheap model nothing.
+        Returns the symptom in plain words: that sentence is what the diagnosis call is
+        given to explain, and a boolean would tell the cheap model nothing.
         """
         calls = [r for r in records if r.get("type") == "tool_call"]
         results = [r for r in records if r.get("type") == "tool_result"]
@@ -150,9 +128,8 @@ class Supervisor:
     async def diagnose(self, records: Sequence[dict[str, Any]], symptom: str) -> str | None:
         """Ask a small model whether the symptom is really stagnation.
 
-        A veto, not a rubber stamp: NONE means the heuristic was a false alarm, which
-        it usually is. A failure here returns None — a broken supervisor must never be
-        able to end a turn.
+        A veto, not a rubber stamp: NONE means a false alarm, which it usually is. A
+        failure returns None — a broken supervisor must never be able to end a turn.
         """
         prompt = (
             f"What the counters noticed: {symptom}.\n\n"
@@ -161,9 +138,8 @@ class Supervisor:
         )
         try:
             reply = ""
-            # `aclosing` for the same reason the agent loop uses it everywhere: an
-            # abandoned provider stream stays suspended holding a connection, and may
-            # be finalised after the event loop has closed.
+            # `aclosing` as everywhere else: an abandoned provider stream stays
+            # suspended holding a connection, possibly past the event loop's close.
             async with aclosing(
                 self.gateway.stream(
                     [Message(role="user", content=prompt)],
@@ -186,9 +162,8 @@ class Supervisor:
 def render_trajectory(records: Sequence[dict[str, Any]]) -> str:
     """The recent trajectory as a few short lines.
 
-    Deliberately lossy. The supervisor is looking for a *shape* — the same call over
-    and over, errors piling up — and sending it whole file contents would cost more
-    than the loop it is trying to prevent.
+    Deliberately lossy: the supervisor looks for a *shape*, and sending whole file
+    contents would cost more than the loop it is trying to prevent.
     """
     lines: list[str] = []
     for record in records:

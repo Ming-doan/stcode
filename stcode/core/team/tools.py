@@ -1,18 +1,14 @@
 """
 `send_message` — the one tool team mode adds.
 
-Everything else a team needs already exists. `/team/knowledge/` is a directory, so
-`read`, `write`, `grep`, `ls` and `edit` already work on it; the thing people want to
-build as a "knowledge base service" is `mkdir`. What was genuinely missing is a way to
-tell another agent that something is ready.
+Everything else already exists: `/team/knowledge/` is a directory, so the ordinary file
+tools work on it. What was missing is a way to tell another agent something is ready.
 
-Built as a factory rather than a module-level `@tool`, for the same reason as `task`:
-it closes over one role's `Mailbox`. That keeps `core/harness` from importing
-`core/team`, so the dependency arrow stays one-way.
+A factory rather than a module-level `@tool`, for the same reason as `task`: it closes
+over one role's `Mailbox`, keeping `core/harness` from importing `core/team`.
 
-**The docstring pushes `refs` over `body`, deliberately.** It is the prompt the model
-reads, and it is the only place this rule can actually be enforced — the cost of a team
-grows with the square of its size if messages carry documents instead of paths.
+**The docstring pushes `refs` over `body`, deliberately** — it is the only place that
+rule can be taught, and a team's cost grows with N² if messages carry documents.
 """
 
 from __future__ import annotations
@@ -26,8 +22,8 @@ from stcode.core.harness.tools.base import Runtime, Tool, ToolError, tool
 from stcode.core.team.mailbox import Mailbox
 
 MAX_BODY = 2000
-"""Longer than this and it is a document, not a message. Refused rather than truncated:
-truncating would deliver something that reads complete and is not."""
+"""Longer than this is a document, not a message. Refused rather than truncated —
+truncating delivers something that reads complete and is not."""
 
 
 def make_send_message_tool(mailbox: Mailbox) -> Tool[Any]:
@@ -94,12 +90,8 @@ def make_send_message_tool(mailbox: Mailbox) -> Tool[Any]:
 
 
 def _ref_exists(mailbox: Mailbox, ref: Any) -> bool:
-    """Whether a ref points at something real.
-
-    Both spellings are accepted, because both are natural things for a model to write:
-    absolute (`/team/knowledge/spec.md`) and relative to the volume
-    (`knowledge/spec.md`).
-    """
+    """Whether a ref points at something real. Both spellings are accepted — absolute
+    (`/team/knowledge/spec.md`) and relative to the volume (`knowledge/spec.md`)."""
     text = str(ref)
     try:
         return Path(text).exists() or (mailbox.root / text.lstrip("/")).exists()

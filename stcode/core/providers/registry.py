@@ -1,11 +1,9 @@
 """
-Provider registry — the set of LLM backends stcode can talk to, plus the static facts
-about each one that callers need *before* instantiating it (which model to default to,
-which environment variable conventionally holds its key).
+Provider registry — the LLM backends stcode can talk to, plus the static facts callers
+need *before* instantiating one (default model, conventional key env var).
 
-That metadata lives here rather than in config or the UI so there's one place to edit
-when a provider is added, and so the default model can't drift from the provider
-module's own `DEFAULT_MODEL`.
+That metadata lives here so there is one place to edit when a provider is added, and so
+a default model cannot drift from the provider module's own `DEFAULT_MODEL`.
 """
 
 from dataclasses import dataclass
@@ -42,16 +40,17 @@ PROVIDER_INFO: dict[str, ProviderInfo] = {
 }
 
 
+_UNKNOWN = ProviderInfo(default_model="", key_env="")
+
+
 def default_model_for(provider: str) -> str:
     """The model a provider is pointed at when the user hasn't picked one."""
-    info = PROVIDER_INFO.get(provider)
-    return info.default_model if info else ""
+    return PROVIDER_INFO.get(provider, _UNKNOWN).default_model
 
 
 def key_env_for(provider: str) -> str:
     """The environment variable a provider's key conventionally lives in."""
-    info = PROVIDER_INFO.get(provider)
-    return info.key_env if info else ""
+    return PROVIDER_INFO.get(provider, _UNKNOWN).key_env
 
 
 def get_provider(

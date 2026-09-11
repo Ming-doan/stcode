@@ -1,9 +1,5 @@
 """
-Daemon — the first layer, not the last.
-
-One process, **many sessions**, addressed by id. Solo mode runs one daemon for every
-project you work on — one session per repo, not one process per repo. A container
-usually holds one, but nothing forbids more.
+Daemon — one process, **many sessions**, addressed by id.
 
     daemon = Daemon(config)
     await daemon.start()          # bind, then get on with your life
@@ -11,16 +7,17 @@ usually holds one, but nothing forbids more.
 
     async with Daemon(config) as daemon: ...   # start + close
 
-What it owns, and deliberately nothing else: a socket, the session registry, the
-connections, and one shared `LLMGateway`. The gateway is shared because it caches
-provider clients by `(provider, key, base_url)` and a daemon holding eight sessions
-should hold one connection pool, not eight. `Agent.create` is handed it, so no agent
-closes it — the daemon does, once, at shutdown.
+Solo mode runs one daemon for every project — one session per repo, not one process per
+repo. A container usually holds one, but nothing forbids more.
 
-Approvals and questions do not appear here at all. They are the runner's, because they
-belong to a session rather than to a connection: the client that asked may be gone by
-the time the answer arrives, and a second client attached to the same session can
-answer instead.
+It owns a socket, the session registry, the connections, and one shared `LLMGateway`.
+Shared because the gateway caches provider clients by `(provider, key, base_url)`, and
+a daemon holding eight sessions should hold one connection pool. No agent closes it —
+the daemon does, once, at shutdown.
+
+Approvals and questions are not here at all: they belong to a session, not a
+connection. The client that asked may be gone by the time the answer arrives, and a
+second client on the same session can answer instead.
 """
 
 from __future__ import annotations
@@ -63,8 +60,8 @@ from stcode.core.session import Session
 log = logging.getLogger("stcode.daemon")
 
 SHUTDOWN_TIMEOUT = 5.0
-"""How long shutdown waits for the listening socket to drain. Bounded because a
-shutdown that can hang is a shutdown you learn to `kill -9` instead of trusting."""
+"""How long shutdown waits for the listening socket to drain. Bounded, because a
+shutdown that can hang is one you learn to `kill -9` instead of trusting."""
 
 
 class Daemon:
@@ -77,9 +74,9 @@ class Daemon:
         has_approver: bool = False,
         gateway: LLMGateway | None = None,
     ) -> None:
-        """`has_approver` is False for everything stcode ships — see `autonomy.py` for
-        why an attached human is not one under `full-auto`. `gateway` is for tests and
-        for embedding; left None, the daemon builds and owns one."""
+        """`has_approver` is False for everything stcode ships — `autonomy.py` says why
+        an attached human is not one under `full-auto`. `gateway` is for tests and for
+        embedding; left None, the daemon builds and owns one."""
         self.config = config
         self.has_approver = has_approver
         self.sessions: dict[str, SessionRunner] = {}
@@ -99,10 +96,10 @@ class Daemon:
         return f"{settings.host}:{settings.port}"
 
     async def start(self) -> None:
-        """Bind and begin accepting. Returns as soon as the socket is listening.
+        """Bind and begin accepting. Returns once the socket is listening.
 
-        The guard runs *before* the bind: refusing after clients can connect would mean
-        the refusal is a message rather than a refusal.
+        The guard runs *before* the bind: refusing after clients can connect makes the
+        refusal a message rather than a refusal.
         """
         guard_autonomy(self.config.defaults.approval_mode, self.has_approver)
 
@@ -112,8 +109,8 @@ class Daemon:
             path.parent.mkdir(parents=True, exist_ok=True)
             _clear_stale_socket(path)
             self._server = await asyncio.start_unix_server(self._handle, path=str(path))
-            # The socket is the access control on a unix transport: anyone who can open
-            # it can drive an agent with your privileges.
+            # The socket is the access control here: anyone who can open it can drive
+            # an agent with your privileges.
             with contextlib.suppress(OSError):
                 path.chmod(0o600)
         else:
@@ -130,11 +127,10 @@ class Daemon:
     async def aclose(self) -> None:
         """Close the door, then everything behind it.
 
-        Order is load-bearing, and not the obvious one. `Server.wait_closed()` waits for
-        every *handler* to finish, not just for the listening socket — so closing the
-        server while a client is still attached waits for a connection that is waiting
-        for us, forever. Clients first, then the server, then the sessions (each of
-        which kills its background shells and MCP connections), then the gateway.
+        Order is load-bearing and not the obvious one: `Server.wait_closed()` waits for
+        every *handler*, not just the listening socket, so closing the server with a
+        client still attached waits forever on a connection that is waiting for us.
+        Clients, then the server, then the sessions, then the gateway.
         """
         for connection in list(self._connections):
             await connection.aclose()
@@ -185,8 +181,8 @@ class Daemon:
         approval_mode: ApprovalMode | None = None,
         session: Session | None = None,
     ) -> SessionRunner:
-        """Build an agent and register it. The guard applies per session, not just per
-        daemon: a `full-auto` session on a `suggest` daemon is the same hole."""
+        """Build an agent and register it. The guard applies per session as well as per
+        daemon — a `full-auto` session on a `suggest` daemon is the same hole."""
         mode = approval_mode or self.config.defaults.approval_mode
         guard_autonomy(mode, self.has_approver)
 
@@ -200,7 +196,7 @@ class Daemon:
         )
         runner = SessionRunner(agent)
         runner.start()
-        # Team mode only: a role container should react to a colleague, not wait to be
+        # Team mode: a role container reacts to a colleague rather than waiting to be
         # poked by a human who may not be attached.
         if agent.mailbox is not None and self.config.team.wake_on_message:
             runner.watch_inbox(agent.mailbox, self.config.team.poll_interval)
@@ -209,10 +205,10 @@ class Daemon:
         return runner
 
     async def resume_session(self, session_id: str) -> SessionRunner:
-        """Attach to a session this daemon is not holding by reading it off disk.
+        """Attach to a session this daemon is not holding, by reading it off disk.
 
-        `Session(path)` adopts the records already in the file, so the resumed agent's
-        `messages()` is the conversation that actually happened rather than an empty one
+        `Session(path)` adopts the records already there, so the resumed agent's
+        `messages()` is the conversation that happened rather than an empty one
         appended to an old transcript.
         """
         existing = self.sessions.get(session_id)
@@ -227,8 +223,8 @@ class Daemon:
     def session_summaries(self, limit: int = 20) -> list[dict[str, Any]]:
         """What this daemon is holding, merged over what is on disk.
 
-        Live sessions are the same rows with `live` and `busy` set, so a client can tell
-        "running right now" from "a transcript you could resume" without a second call.
+        Live sessions are the same rows with `live` and `busy` set, so one call tells a
+        client "running right now" apart from "a transcript you could resume".
         """
         rows = Session.list(limit, directory=self.config.session.dir)
         by_id = {str(row.get("id", "")): row for row in rows}
@@ -259,11 +255,11 @@ class Daemon:
 
 
 class _Connection:
-    """One client. Reads lines, writes frames, and remembers which session it is on.
+    """One client. Reads lines, writes frames, remembers which session it is on.
 
-    Two tasks, deliberately: the read loop dispatches, and a writer task drains one
-    outbound queue. The runner broadcasts *into that queue* rather than to a socket, so
-    a client that has stopped reading slows nothing down but itself.
+    Two tasks: the read loop dispatches, and a writer drains one outbound queue. The
+    runner broadcasts into that queue rather than to a socket, so a client that stopped
+    reading slows nothing down but itself.
     """
 
     def __init__(
@@ -295,8 +291,8 @@ class _Connection:
 
     async def run(self) -> None:
         # StreamReader iterates by line, which is exactly the framing — no buffer of
-        # our own to get wrong. A line longer than the limit raises, and that is right:
-        # a client sending an unterminated megabyte is not a client we can talk to.
+        # our own to get wrong. An over-long line raises, correctly: a client sending an
+        # unterminated megabyte is not one we can talk to.
         async for line in self._reader:
             if not line.strip():
                 continue
@@ -313,7 +309,7 @@ class _Connection:
 
     async def aclose(self) -> None:
         """Detach from everything, then close the socket. **Never touches the agents** —
-        that is the whole promise of the daemon (§8 point 2)."""
+        that is the whole promise of the daemon."""
         for session_id in list(self._attached):
             self._detach(session_id)
         self._drain_task.cancel()
@@ -351,26 +347,25 @@ class _Connection:
                 self._runner(message.session).resolve(message.execution_id, message.text)
             case SetMode():
                 runner = self._runner(message.session)
-                # `create` is not the only door a mode comes through, so the guard
+                # `create` is not the only door a mode arrives through, so the guard
                 # cannot live only there: cycling to `full-auto` mid-session would
-                # otherwise be the override flag rule 5 says does not exist.
+                # otherwise be the override flag that is not supposed to exist.
                 try:
                     guard_autonomy(message.mode, self._daemon.has_approver)
                 except AutonomyRefused as refusal:
                     self.send(ErrorMessage(session=runner.id, message=str(refusal)))
                 else:
                     runner.set_mode(message.mode)
-                # Either way, say what the mode now *is* — the client asked for a change
-                # and must not be left showing one that was refused.
+                # Either way, report what the mode now *is*: a client must never be
+                # left showing a change that was refused.
                 self.send(runner.describe())
 
     def _attach(self, runner: SessionRunner, *, replay: bool) -> None:
         """Subscribe, then replay, then join the live stream.
 
         The order is what makes re-attach lossless: subscribing first means events
-        arriving during the replay queue up behind it rather than falling in the gap
-        between reading the file and joining the stream. A record may therefore appear
-        twice; a duplicate is recoverable, a hole is not.
+        arriving during the replay queue behind it instead of falling in the gap. A
+        record may appear twice — a duplicate is recoverable, a hole is not.
         """
         runner.subscribe(self._outbox)
         self._attached.add(runner.id)
@@ -378,8 +373,8 @@ class _Connection:
         self.send(runner.describe())
         if replay:
             self.send(History(session=runner.id, records=runner.agent.session.records()))
-        # Anything the agent is parked on, so a client attaching mid-turn can answer it
-        # instead of watching a session that looks hung.
+        # Anything the agent is parked on, so a client attaching mid-turn can answer
+        # rather than watch a session that looks hung.
         for frame in runner.open_requests():
             self.send(frame)
         runner.start()
@@ -415,10 +410,9 @@ def socket_path(value: str) -> Path:
 def _clear_stale_socket(path: Path) -> None:
     """Remove a socket file left behind by a daemon that died.
 
-    A crashed daemon leaves the path in place and `bind` then fails with "address
-    already in use", which is indistinguishable from a healthy daemon already running.
-    Connecting is the only way to tell them apart: a refused connection means nobody is
-    home, so the file is debris.
+    A crashed daemon leaves the path in place, so `bind` fails with "address already in
+    use" — indistinguishable from a healthy daemon. Connecting is the only way to tell
+    them apart: a refused connection means nobody is home, so the file is debris.
     """
     if not path.exists():
         return

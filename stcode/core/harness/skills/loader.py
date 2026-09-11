@@ -1,25 +1,18 @@
 """
-Skill loading — `SKILL.md` files as context the agent pulls in when it needs them.
+Skill loading — `SKILL.md` files the agent pulls in when it needs them.
 
-A skill is a folder with a `SKILL.md` at its root: YAML frontmatter naming it and
-saying when it applies, then markdown instructions, then whatever supporting files the
-instructions reference.
+A skill is a folder with a `SKILL.md`: YAML frontmatter naming it and saying when it
+applies, then markdown instructions, then whatever they reference.
 
     ~/.agents/skills/pdf/
       SKILL.md          <- frontmatter + instructions
       reference.md      <- read on demand, from inside the instructions
-      scripts/…
 
-**Progressive disclosure is the whole design.** Discovery reads only the frontmatter —
-two lines per skill — and the system prompt lists those. The body is loaded only when
-the agent calls `skill(name)`, and the body's own references (`reference.md`,
-`scripts/`) are loaded only if it follows them with `read`. Nine skills therefore cost
-roughly 400 tokens of catalogue rather than 90,000 tokens of instructions, and the
-deep material stays free to be long.
+**Progressive disclosure is the whole design.** Discovery reads only the frontmatter;
+the body loads on `skill(name)`, its references only if the agent follows them. Nine
+skills cost ~400 tokens of catalogue instead of ~90,000 of instructions.
 
-The format is deliberately the same one Claude Code and other agents use, and the
-default search path (`~/.agents/skills`) is the cross-agent convention — a skill written
-once should work in whichever agent the user happens to be driving.
+The format and default path (`~/.agents/skills`) are the cross-agent convention.
 """
 
 from __future__ import annotations

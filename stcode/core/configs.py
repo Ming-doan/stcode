@@ -1,17 +1,13 @@
 """
-Config — locate, load, validate, save, and (if missing) scaffold the stcode config.
+Config — locate, load, validate, save, and scaffold the stcode config.
 
-Owns everything about *where* config and credentials live and *how the file on disk*
-is structured — paths, TOML, `.env` loading. `GatewayConfig` here is that on-disk
-shape; it composes `ProviderConfig`/`RouteConfig`/`RetryConfig`, which are the LLM
-Gateway's own domain vocabulary and live in `core/providers/gateway.py` — this module
-doesn't redefine them, only assembles and (de)serializes them.
+Owns *where* config lives and *how the file* is structured: paths, TOML, `.env`.
+`GatewayConfig` is that on-disk shape, composing `ProviderConfig`/`RouteConfig`/
+`RetryConfig` from `core/providers/gateway.py` rather than redefining them.
 
-Credentials can come from either side of `resolve_secret`: an environment variable
-named by `api_key_env` (preferred — nothing secret touches disk), or a literal
-`api_key` written into the config file by the first-run setup screen. The env var wins
-whenever it's actually set. Files this module writes are chmod 0600 precisely because
-that literal may be in them.
+Credentials come from either side of `resolve_secret`: an env var named by `api_key_env`
+(preferred — nothing secret touches disk), or a literal `api_key` from the setup screen.
+The env var wins when set. Files written here are chmod 0600 because of that literal.
 """
 
 from __future__ import annotations
@@ -33,11 +29,11 @@ DEFAULT_SOCKET_PATH = "~/.stcode/daemon.sock"
 
 
 class DefaultsConfig(BaseModel):
-    """Session defaults the TUI shows and edits. The gateway ignores these — they're
-    what the user picked in `/model` and `/mode`, not routing policy.
+    """Session defaults the TUI shows and edits — what the user picked in `/model` and
+    `/mode`, not routing policy, so the gateway ignores them.
 
-    An empty `model` means "not chosen yet", which the chat screen surfaces as a warning
-    rather than silently guessing.
+    An empty `model` means "not chosen yet", which the chat screen warns about rather
+    than silently guessing.
     """
 
     provider: str = "openai"
@@ -48,13 +44,12 @@ class DefaultsConfig(BaseModel):
 class AgentConfig(BaseModel):
     """Limits on one turn of the loop.
 
-    `max_turns` is the tool-call ceiling *within* a single turn, not a conversation
-    length. It is the only thing standing between a model that has decided to keep
-    grepping and an unbounded bill; EXPECTED.md §9.1 ends the loop on it with an
-    `AgentFailed`, deliberately loudly.
+    `max_turns` is the tool-call ceiling *within* one turn, not a conversation length —
+    the only thing between a model that keeps grepping and an unbounded bill. Hitting it
+    ends the turn with a loud `AgentFailed`.
 
-    `max_depth = 1` is CLAUDE.md §4 rule 3 and is not meant to be raised: sub-agents get
-    neither `task` nor `repl`, and recursion with no budget is a fork bomb.
+    `max_depth = 1` is not meant to be raised: sub-agents get neither `task` nor `repl`,
+    and recursion with no budget is a fork bomb.
     """
 
     max_turns: int = 40
@@ -74,10 +69,9 @@ class SessionConfig(BaseModel):
 class DaemonConfig(BaseModel):
     """Where the daemon listens. Transport is configuration, not architecture.
 
-    `unix` for solo — a path has no port to collide with, and filesystem permissions
-    are the access control. `tcp` for a container, where there is no host filesystem to
-    put a socket on. Same JSONL framing either way, which is the whole point: a third
-    transport later is an adapter, not a protocol.
+    `unix` for solo — no port to collide with, and filesystem permissions are the access
+    control. `tcp` for a container, which has no host filesystem to put a socket on. Same
+    JSONL framing either way, so a third transport later is an adapter, not a protocol.
     """
 
     transport: Literal["unix", "tcp"] = "unix"
@@ -89,15 +83,13 @@ class DaemonConfig(BaseModel):
 class TeamConfig(BaseModel):
     """Team mode: one container, one agent, one role, one shared volume.
 
-    Off unless `role` is set, so nothing about a solo session changes by accident.
-    `role` must match a file in `harness/prompts/roles/` — a typo refuses to start
-    rather than running an agent that owns nothing.
+    Off unless `role` is set. `role` must match a file in `harness/prompts/roles/` — a
+    typo refuses to start rather than running an agent that owns nothing.
 
-    `git` is the settled answer to EXPECTED.md 12.5: the origin is a **bare repository
-    on the shared volume**, `/team/repo.git`. It needs no credentials and no network,
-    every role clones and pushes branches, and exactly one role merges. Point `remote`
-    at a real URL instead if you would rather integrate through pull requests; the
-    difference is a line here and a sentence in the role prompts.
+    The origin is a **bare repository on the shared volume**, `/team/repo.git`: no
+    credentials, no network, every role clones and pushes branches, exactly one merges.
+    For pull requests instead, point `remote` at a real URL — one line here and one
+    sentence in the role prompts.
     """
 
     role: str = ""
@@ -114,14 +106,13 @@ class TeamConfig(BaseModel):
 
 
 class SupervisorConfig(BaseModel):
-    """The second pair of eyes on the trajectory (CLAUDE.md 2.2).
+    """The second pair of eyes on the trajectory.
 
-    On by default and almost free: four counting heuristics run at zero token cost, and
-    only a positive spends one `difficulty="low"` call.
+    On by default and almost free: four counting heuristics cost nothing, and only a hit
+    spends one `difficulty="low"` call.
 
-    `every` counts tool-call iterations *within* a turn, not user messages. A task that
-    loops does so inside one turn, so per-message checking would miss the exact failure
-    this exists to catch.
+    `every` counts tool-call iterations *within* a turn, not user messages — a task that
+    loops does so inside one turn.
     """
 
     enabled: bool = True
@@ -134,13 +125,10 @@ class MCPConfig(BaseModel):
     """How MCP servers reach the agent.
 
     `code` writes each tool to `.stcode/mcp_servers/<server>/<tool>.py` and advertises
-    nothing. The agent greps, reads the one file it needs, and calls it from `repl`.
-    Tool definitions in the prompt prefix cost 10-30k tokens *per turn* for three
-    mid-sized servers; as code they cost a grep.
+    nothing; the agent greps, reads the one file it needs, and calls it from `repl`.
+    Three mid-sized servers cost 10-30k tokens *per turn* as definitions, a grep as code.
 
-    `tools` advertises them the old way. Kept because the token argument is real but
-    not universal — one server with two tools is cheaper in the prompt than over three
-    REPL round-trips.
+    `tools` advertises them the old way — the token argument is real but not universal.
     """
 
     expose: Literal["code", "tools"] = "code"
@@ -250,8 +238,8 @@ SAVED_CONFIG_HEADER = """\
 
 
 def default_config_path() -> Path:
-    """~/.stcode/config.toml (or %APPDATA%\\stcode\\config.toml on Windows);
-    override with the STCODE_CONFIG env var."""
+    """`~/.stcode/config.toml`, or `%APPDATA%\\stcode\\config.toml` on Windows.
+    Override with `STCODE_CONFIG`."""
     env_path = os.environ.get("STCODE_CONFIG")
     if env_path:
         return Path(env_path).expanduser()
@@ -262,14 +250,12 @@ def default_config_path() -> Path:
 
 
 def config_exists(path: Path | None = None) -> bool:
-    """Whether a config file is already present — the whole first-run test. Startup asks
-    for a provider and key only when this is False."""
+    """Whether a config file exists — the whole first-run test."""
     return (path or default_config_path()).exists()
 
 
 def ensure_config_exists(path: Path | None = None) -> Path:
-    """Scaffold a default config file at `path` (or the default location) if none exists
-    yet. Returns the path either way. Never overwrites an existing file."""
+    """Scaffold a default config at `path` if none exists. Never overwrites."""
     path = path or default_config_path()
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -279,11 +265,8 @@ def ensure_config_exists(path: Path | None = None) -> Path:
 
 
 def load_dotenv_files() -> None:
-    """Load credentials from .env files, most-specific first: ./.env (project-local —
-    useful when a checkout needs its own keys) then ~/.stcode/.env (a user-global
-    default, mirroring config.toml's location). First value found for a given key wins;
-    real process env vars always take precedence over both.
-    """
+    """Load credentials from .env, most-specific first: `./.env`, then `~/.stcode/.env`.
+    First value found wins, and real process env vars beat both."""
     from dotenv import load_dotenv
 
     load_dotenv(Path.cwd() / ".env", override=False)
@@ -310,9 +293,8 @@ def load_config(path: Path | None = None, *, create_if_missing: bool = False) ->
 def save_config(config: GatewayConfig, path: Path | None = None) -> Path:
     """Write `config` back out as TOML, atomically and mode 0600.
 
-    Unset (None) fields are dropped rather than written as empty strings, so a config
-    that never had a literal `api_key` doesn't grow one. Comments in the previous file
-    are not preserved — the header explains that to whoever opens it next.
+    Unset fields are dropped rather than written as empty strings, so a config that
+    never had a literal `api_key` does not grow one. Comments are not preserved.
     """
     path = path or default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -345,9 +327,8 @@ def apply_cli_overrides(
 ) -> GatewayConfig:
     """Fold command-line overrides into a loaded config, in place, for this run only.
 
-    Deliberately not written back to disk: a flag is a decision about now. `--mode
-    full-auto` on one run must not leave `full-auto` in the file for the next one, which
-    is the shape of accident invariant 5 exists to prevent.
+    Never written back to disk: a flag is a decision about now, and `--mode full-auto`
+    on one run must not leave `full-auto` in the file for the next.
 
     Here rather than in `cli/` because both entry paths need it — the headless daemon
     and the UI — and the second must not have to import the first.
@@ -365,8 +346,8 @@ def apply_cli_overrides(
     if model:
         config.defaults.model = model
     if role is not None:
-        # Setting a role is what turns team mode on, so `--role` is how one image serves
-        # every role (CLAUDE.md 9.4) without a config file per container.
+        # Setting a role turns team mode on, so `--role` is how one image serves every
+        # role without a config file per container.
         config.team.role = role
     return config
 
@@ -383,13 +364,12 @@ def apply_provider_settings(
 ) -> GatewayConfig:
     """Fold one provider's settings into `config` and make it the session default.
 
-    Returns a new config; the input is left alone. Blank strings mean "unset" — that's
-    how the UI clears a base URL or a stored key.
+    Returns a new config; the input is untouched. Blank strings mean "unset" — how the
+    UI clears a base URL or a stored key.
 
-    Difficulty tiers follow the default: a tier already on this provider, or one still
-    tracking the provider this is replacing, is repointed at the newly chosen model.
-    A tier deliberately pinned to some third provider is left alone — that's a hand-edit
-    the UI has no business undoing.
+    Tiers already on this provider, or still tracking the one being replaced, are
+    repointed at the new model. A tier pinned to some third provider is left alone: that
+    is a hand-edit the UI has no business undoing.
     """
     updated = config.model_copy(deep=True)
     previous_provider = updated.defaults.provider
@@ -413,8 +393,8 @@ def apply_provider_settings(
         for difficulty in ("low", "medium", "high"):
             route = updated.routing.get(difficulty)  # type: ignore[arg-type]
             if route is None:
-                # No tier configured yet: point all three at the one model the user has
-                # actually chosen. Splitting cheap/expensive tiers is a deliberate edit.
+                # No tier yet: point all three at the model the user chose. Splitting
+                # cheap and expensive tiers is a deliberate edit.
                 updated.routing[difficulty] = RouteConfig(  # type: ignore[index]
                     provider=provider, model=effective_model
                 )

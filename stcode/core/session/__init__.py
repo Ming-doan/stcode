@@ -9,8 +9,7 @@ Session — the append-only JSONL transcript, and the only place a turn is recor
     s.messages()        # -> list[Message] for the gateway
     s.tail(30)          # -> raw records for the supervisor
 
-One writer, one file, three readers. There is no second logger to keep in sync — see
-CLAUDE.md §4 rule 7 for why the gateway does not get one.
+One writer, one file, three readers. There is no second logger to keep in sync.
 """
 
 from stcode.core.session.session import (

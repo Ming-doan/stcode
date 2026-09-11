@@ -1,16 +1,13 @@
 """
 Human in the loop — `ask_user_question`.
 
-The tool exists to be used rarely. An agent that asks about every fork is slower than
-doing the work and worse company than a colleague who makes reasonable calls; an agent
-that never asks builds the wrong thing confidently. The line between them is whether
-the answer would actually change what gets built — the docstring below is written to
-push toward that test rather than toward asking.
+Meant to be used rarely. An agent that asks at every fork is slower than doing the work
+and worse company than a colleague who makes reasonable calls; one that never asks
+builds the wrong thing confidently. The test is whether the answer would change what
+gets built.
 
-Mechanically it is the one tool that gives control back: `runtime.ask` blocks the turn
-until the UI returns an answer. A session with no user attached (a daemon run, a test)
-has no `on_ask` callback, and the tool says so plainly instead of hanging — see
-`Runtime.ask`.
+It is the one tool that hands control back: `runtime.ask` blocks the turn until the UI
+answers. With no user attached there is no `on_ask`, and it says so instead of hanging.
 """
 
 from __future__ import annotations

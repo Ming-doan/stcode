@@ -1,12 +1,11 @@
 """
-Anthropic LLM Provider.
+Anthropic LLM provider.
 
-**Prompt caching lives here and nowhere else.** CLAUDE.md §10 calls it the single
-biggest cost lever, and it is the one optimisation that has to be applied at the
-provider boundary because only Anthropic asks for it explicitly (OpenAI caches long
-prefixes on its own; Gemini needs a separate cached-content resource, which is a
-different feature). See the `prompt caching` section at the bottom for where the
-markers go and why there are three of them.
+**Prompt caching lives here and nowhere else.** It is the single biggest cost lever, and
+the one optimisation that has to be applied at the provider boundary: only Anthropic
+asks for it explicitly. OpenAI caches long prefixes on its own, and Gemini needs a
+separate cached-content resource, which is a different feature. See the `prompt caching`
+section at the bottom for where the three markers go and why.
 """
 
 from __future__ import annotations

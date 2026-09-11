@@ -1,24 +1,20 @@
 """
 DaemonClient — the other end of the same JSONL.
 
-A thin thing on purpose. It knows how to open the configured transport, how to send the
-eight client messages, and how to hand back everything the daemon says. It renders
-nothing and interprets nothing: the TUI decides what a `tool_started` looks like, and
-putting that here would put display in `core/` (§3.2).
-
     async with await DaemonClient.connect(config) as client:
         info = await client.create(cwd=Path.cwd())
         await client.push("Add rate limiting")
         async for frame in client.events():
             ...
 
-**Requests and events share one socket**, which is the only subtlety in the file.
-`create`, `attach` and `sessions` expect an answer while `text_delta`s are arriving, so
-a single reader task routes each incoming frame: to a waiter if one is parked on that
-frame's type, otherwise to the event queue. Correlating by type is enough because a
-client has at most one of these in flight — they are the three synchronous verbs, and
-everything else in the protocol is fire-and-forget or correlated by `execution_id`
-inside the session.
+Thin on purpose: it opens the transport, sends the eight client messages, and hands back
+what the daemon says. It renders and interprets nothing — that would put display in
+`core/`.
+
+**Requests and events share one socket.** `create`, `attach` and `sessions` expect an
+answer while deltas arrive, so one reader routes each frame to a waiter parked on that
+frame's type, else to the event queue. Type is enough: a client has at most one of those
+three in flight, and everything else is fire-and-forget or keyed by `execution_id`.
 """
 
 from __future__ import annotations

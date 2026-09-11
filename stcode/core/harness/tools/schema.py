@@ -1,22 +1,14 @@
 """
 Signature → JSON Schema. The half of `@tool` that talks to the model.
 
-CLAUDE.md §11: "Every tool is a pydantic model with a docstring — the docstring *is* the
-prompt the model sees." This module makes that literal. A Python signature is already a
-complete description of a call — names, types, optionality, defaults — so re-declaring
-it as a hand-written schema is duplication that drifts. Here the signature *is* the
-schema and the docstring *is* the description; nothing about a tool is written twice.
+A Python signature already describes a call completely, so a hand-written schema is
+duplication that drifts. Here the signature *is* the schema and the docstring *is* the
+description.
 
-Two details worth knowing before editing:
-
-- **Descriptions come from two places, and `Annotated` wins.** `Annotated[str, Field(
-  description=...)]` sits next to the type, which is where a constraint belongs; the
-  docstring's `Args:` block is the ergonomic fallback, because most tools read better
-  with their parameters explained in prose underneath the summary.
-- **`title` is stripped everywhere.** Pydantic titles every field and every nested
-  model, which is pure restatement of the key it is filed under. Those tokens sit in
-  the cached prompt prefix of every single turn (§8), so they are worth removing once
-  here rather than tolerating forever.
+* **`Annotated` wins over the docstring.** `Annotated[str, Field(description=...)]` sits
+  next to the type, where a constraint belongs; the `Args:` block is the fallback.
+* **`title` is stripped everywhere.** Pydantic titles every field, restating the key it
+  is filed under, and those tokens sit in every turn's cached prefix.
 """
 
 from __future__ import annotations
@@ -29,25 +21,22 @@ from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
 
 _SKIPPED_KINDS = frozenset({inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD})
-"""`*args`/`**kwargs` are dropped rather than rejected: a tool may legitimately have
-them for Python-side callers, but they have no JSON Schema spelling a model could fill
-in, so they simply are not part of its advertised interface."""
+"""Dropped rather than rejected: a tool may have them for Python-side callers, but they
+have no JSON Schema spelling, so they are not part of its advertised interface."""
 
-# Keys whose values are themselves schema nodes. Anything not listed here is left
-# untouched — notably the *keys* under `properties`, which are user-chosen parameter
-# names and must never be mistaken for schema keywords.
+# Keys whose values are themselves schema nodes. Anything else is left alone — notably
+# the *keys* under `properties`, which are parameter names, not schema keywords.
 _NODE_VALUES = ("items", "additionalProperties", "not", "contains", "propertyNames")
 _NODE_LISTS = ("anyOf", "oneOf", "allOf", "prefixItems")
 _NODE_MAPS = ("properties", "$defs", "definitions", "patternProperties")
 
 
 def split_docstring(fn: Callable[..., Any]) -> tuple[str, dict[str, str]]:
-    """Return the prose a tool advertises and its per-parameter descriptions.
+    """The prose a tool advertises, and its per-parameter descriptions.
 
-    The `Args:` block is deliberately *excluded* from the prose: those descriptions are
-    about to be attached to the parameters themselves in the schema, and repeating them
-    in the description costs tokens to say the same thing in a place the model is less
-    likely to associate with the argument it is filling in.
+    `Args:` is excluded from the prose: those descriptions are about to be attached to
+    the parameters themselves, and repeating them costs tokens to say the same thing
+    somewhere the model is less likely to connect to the argument it is filling in.
     """
     raw = inspect.getdoc(fn) or ""
     if not raw.strip():
@@ -61,9 +50,8 @@ def split_docstring(fn: Callable[..., Any]) -> tuple[str, dict[str, str]]:
         if param.arg_name and param.description
     }
 
-    # Returns/Raises/Examples survive in the prose only if the parser did not claim
-    # them; when it did, re-attach Returns, since "what comes back" is the one section
-    # a caller genuinely needs and dropping it silently makes tools harder to use.
+    # Returns/Raises/Examples survive only if the parser did not claim them. Re-attach
+    # Returns when it did — "what comes back" is the one section a caller needs.
     if parsed.returns is not None and parsed.returns.description:
         prose = f"{prose}\n\nReturns: {parsed.returns.description.strip()}"
     return prose.strip(), params
@@ -72,8 +60,8 @@ def split_docstring(fn: Callable[..., Any]) -> tuple[str, dict[str, str]]:
 def strip_titles(schema: Any) -> Any:
     """Recursively drop pydantic's auto-generated `title` keys, in place.
 
-    Walks only through keys that hold schema nodes, so a parameter that happens to be
-    called `title` keeps both its name and its own description.
+    Walks only keys that hold schema nodes, so a parameter called `title` keeps both
+    its name and its own description.
     """
     if isinstance(schema, list):
         for item in schema:
@@ -105,20 +93,19 @@ def build_params_model(
 ) -> type[BaseModel]:
     """Build the pydantic model that validates one call's arguments.
 
-    `exclude` is how the runtime parameter disappears: it is a real parameter of the
-    Python function and not a parameter of the *tool*, so it is filtered before the
-    model is built rather than deleted from the schema afterwards — that way validation
-    rejects a model that tries to pass one, instead of quietly accepting it.
+    `exclude` is how the runtime parameter disappears. It is filtered before the model
+    is built rather than deleted from the schema after, so validation *rejects* a model
+    that tries to pass one instead of quietly accepting it.
     """
     signature = inspect.signature(fn)
     # `include_extras` keeps Annotated metadata alive; without it every Field(...)
-    # description attached to a parameter is erased before we can read it.
+    # description is erased before we can read it.
     try:
         hints = get_type_hints(fn, include_extras=True)
     except Exception:
-        # A tool annotated with a name this module cannot resolve (a TYPE_CHECKING-only
-        # import, a forward reference to something local) should degrade to an untyped
-        # parameter, not take the whole harness down at import time.
+        # An unresolvable annotation (a TYPE_CHECKING-only import, a local forward
+        # reference) should degrade to an untyped parameter, not take the harness down
+        # at import time.
         hints = {}
 
     _, doc_params = split_docstring(fn)
@@ -140,13 +127,12 @@ def build_params_model(
 
 
 def _field_for(annotation: Any, default: Any, doc_description: str | None) -> FieldInfo:
-    """Build the extra field metadata pydantic cannot read off the signature itself.
+    """The field metadata pydantic cannot read off the signature itself.
 
-    Deliberately minimal. Pydantic already merges an `Annotated[..., Field(...)]` with
-    the field passed alongside it, so this only supplies what is genuinely missing: the
-    default (which lives on the parameter, not the annotation) and a description when
-    the annotation does not already carry one. Merging the annotated `FieldInfo` here
-    instead loses the default — the annotation's copy has none, and it wins.
+    Minimal: pydantic already merges `Annotated[..., Field(...)]` with the field beside
+    it, so this supplies only the default (which lives on the parameter) and a
+    description when the annotation lacks one. Merging the annotated `FieldInfo` here
+    instead would lose the default — the annotation's copy has none, and it wins.
     """
     kwargs: dict[str, Any] = {}
     if doc_description and not _annotated_field_has_description(annotation):
@@ -177,7 +163,7 @@ def json_schema_for(model: type[BaseModel]) -> dict[str, Any]:
     strip_titles(schema)
     schema.setdefault("type", "object")
     schema.setdefault("properties", {})
-    schema.pop("description", None)  # the model's own docstring; the tool's is separate
+    schema.pop("description", None)  # the params model's docstring, not the tool's
     return schema
 
 

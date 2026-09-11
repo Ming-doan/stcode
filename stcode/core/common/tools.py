@@ -1,18 +1,14 @@
 """
-Tool vocabulary shared by the layers that produce tools and the layers that ship them.
+Tool vocabulary shared by the layers that build tools and the layers that ship them.
 
-`ToolDefinition` lived in `core/providers/types.py` while providers were its only
-consumer. It now has three: `core/harness/` builds them from Python signatures,
-`core/agent/` selects which ones a turn advertises, and `core/providers/` translates
-them onto each SDK's wire format. A type owned by one of its consumers invites the
-dependency arrow to point the wrong way, so it moved down here — `core/common/` is a
-leaf that imports from nothing else in `core/`.
+`core/common/` imports nothing else in `core/`, which is where a type with three
+consumers belongs: `core/harness/` builds `ToolDefinition`s from signatures,
+`core/agent/` selects which a turn advertises, `core/providers/` puts them on the wire.
 
-`ToolResult` is the counterpart travelling the other direction. It is deliberately *not*
-`providers.types.ToolResultBlock`: a block is the wire shape (an id, a string, an error
-flag), while a result is what the tool actually produced — a rendered view for the
-model, the untruncated payload for `tool_out`, and the metadata the trajectory log and
-the TUI read. The agent loop narrows one into the other; nothing else should.
+`ToolResult` travels the other way, and is deliberately *not* `ToolResultBlock`: a block
+is the wire shape, a result is what the tool produced — a rendered view for the model,
+the untruncated payload for `tool_out`, and metadata for the trajectory. The agent loop
+narrows one into the other.
 """
 
 from __future__ import annotations
@@ -26,10 +22,8 @@ class ToolDefinition(BaseModel):
     """A tool as the model sees it: a name, the prompt that teaches it, and a JSON
     Schema for the arguments.
 
-    `input_schema` is a JSON Schema object (`{"type": "object", "properties": {...},
-    "required": [...]}`). Keep it byte-stable across turns — CLAUDE.md §8 lists prompt
-    caching as the single biggest cost lever, and tool definitions sit in the cached
-    prefix alongside the system prompt.
+    Keep `input_schema` byte-stable across turns — tool definitions sit in the cached
+    prefix alongside the system prompt, which is the biggest cost lever there is.
     """
 
     name: str
@@ -40,11 +34,9 @@ class ToolDefinition(BaseModel):
 class ToolResult(BaseModel):
     """What one tool invocation produced.
 
-    `content` is the only field that reaches the model, and it is already rendered and
-    already capped. `payload` is the same information untruncated, destined for
-    `tool_out[output_id]` so the agent can slice it later — that is the half of
-    CLAUDE.md §2.2 that makes truncation non-lossy, and dropping it turns an elision
-    into a deletion.
+    `content` is the only field reaching the model, already rendered and already capped.
+    `payload` is the same information untruncated, bound for `tool_out[output_id]` so
+    the agent can slice it later — dropping it turns an elision into a deletion.
     """
 
     content: str

@@ -2,8 +2,8 @@
 Banner — the ASCII wordmark at the top of the chat screen.
 
 Lines are padded to a common width at import time rather than carrying trailing spaces
-in the source (which linters strip), because `text-align: center` centers each line
-independently — ragged lines would render as a crooked wordmark.
+in the source (linters strip those), because `text-align: center` centers each line
+independently and ragged lines render as a crooked wordmark.
 """
 
 from __future__ import annotations

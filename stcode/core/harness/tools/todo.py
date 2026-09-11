@@ -1,15 +1,13 @@
 """
 Todo — `todo_write`, the tool that is not really a tool.
 
-CLAUDE.md §5 calls it "a device to keep the plan in context. Keep it", and that framing
-is the entire specification. Nothing outside the agent reads these items; writing one
-changes no file and runs no command. What it does is force the plan through the model's
-own output, where it stays visible for the rest of the session — a step written down is
-a step that gets finished, and a multi-step task tracked only in a model's head loses
-its last two items somewhere around the fourth tool call.
+A device to keep the plan in context. Nothing outside the agent reads these items, and
+writing one changes no file. What it does is force the plan through the model's own
+output, where it stays visible — a multi-step task tracked only in a model's head loses
+its last two items around the fourth tool call.
 
-The one rule that matters is *exactly one* item in progress at a time. A list where four
-things are `in_progress` is a list that has stopped describing what is happening.
+The one rule that matters: *exactly one* item in progress. A list with four
+`in_progress` has stopped describing what is happening.
 """
 
 from __future__ import annotations

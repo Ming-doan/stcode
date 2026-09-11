@@ -1,26 +1,25 @@
 """
 SessionRunner — one live agent, zero or more watchers.
 
-This is where §8's three hard points actually live:
+Where the daemon's three hard points actually live:
 
 **Detach does not kill the agent.** The runner, not the connection, is the single
-consumer of `agent.events()`. Clients are sinks it fans out to, and losing the last one
-changes nothing about the turn in flight — events keep landing in the session, which is
-what a re-attaching client replays from.
+consumer of `agent.events()`. Clients are sinks it fans out to; losing the last one
+changes nothing about the turn in flight, and events keep landing in the session for a
+re-attaching client to replay.
 
 **Approval is request–response.** `on_approval` is `async (ApprovalRequest) -> bool`,
-so over a socket it becomes: broadcast `approval_request`, park a `Future` under the
-`execution_id`, resolve it when a client answers. The harness needed no change for this;
-`ApprovalRequest` already carried the id. The same mechanism serves `ask_user_question`,
-with the id minted here because `Question` has no field for one.
+which over a socket becomes: broadcast `approval_request`, park a `Future` under the
+`execution_id`, resolve it when a client answers. The harness needed no change —
+`ApprovalRequest` already carried the id. Same mechanism for `ask_user_question`, with
+the id minted here because `Question` has no field for one.
 
-**A push mid-turn queues.** That is `Agent.push()`'s promise, not this module's work —
-the runner just hands the text over.
+**A push mid-turn queues.** That is `Agent.push()`'s promise; the runner just hands the
+text over.
 
-The failure mode worth naming: a turn blocked on approval whose last client drops. The
-turn would wait forever on a `Future` nobody can resolve, so detaching the last watcher
-fails every pending request with `ToolDenied`. The model reads why and moves on, which
-is the whole reason `Harness.invoke` never raises.
+The failure mode worth naming: a turn blocked on approval whose last client drops would
+wait forever on a `Future` nobody can resolve. So losing the last watcher fails every
+pending request with `ToolDenied`, and the model reads why and moves on.
 """
 
 from __future__ import annotations
@@ -53,8 +52,8 @@ WAKE = (
     "A message arrived while you were idle. It is above this line. Deal with it, or say "
     "why it is not yours to deal with."
 )
-"""What an inbox-woken turn is pushed. Short on purpose: the message itself is already
-in the history as an `inbox` record, and repeating it here would pay for it twice."""
+"""What an inbox-woken turn is pushed. Short on purpose — the message is already in
+the history as an `inbox` record, and repeating it pays for it twice."""
 
 
 class SessionRunner:
@@ -64,15 +63,15 @@ class SessionRunner:
         self.agent = agent
         self.id = agent.session.id
         self._sinks: set["asyncio.Queue[dict[str, Any]]"] = set()
-        # execution_id -> (future the tool is parked on, the frame that asked for it).
-        # The frame is kept so a client attaching mid-question is shown what the agent
-        # is waiting for, rather than a session that looks hung.
+        # execution_id -> (future the tool is parked on, the frame that asked). The
+        # frame is kept so a client attaching mid-question sees what is being waited
+        # for, rather than a session that looks hung.
         self._pending: dict[str, tuple["asyncio.Future[Any]", dict[str, Any]]] = {}
         self._task: asyncio.Task[None] | None = None
         self._watch: asyncio.Task[None] | None = None
 
-        # The harness asks; this runner answers over the wire. Set here rather than at
-        # `Harness.create` because the harness must not know a socket exists (§3.2).
+        # The harness asks; this runner answers over the wire. Set here rather than in
+        # `Harness.create`, because the harness must not know a socket exists.
         agent.harness.on_approval = self.request_approval
         agent.harness.on_ask = self.ask
         agent.harness.on_progress = self.progress
@@ -87,8 +86,8 @@ class SessionRunner:
     async def _pump(self) -> None:
         """The single consumer of the agent's event stream.
 
-        `events()` is explicitly one-consumer (two iterators would race for the same
-        inbox), so the fan-out has to happen on this side of it.
+        `events()` is one-consumer — two iterators would race for the same inbox — so
+        the fan-out happens on this side of it.
         """
         try:
             async with aclosing(self.agent.events()) as stream:
@@ -104,13 +103,12 @@ class SessionRunner:
     def watch_inbox(self, mailbox: Any, interval: float = 1.0) -> None:
         """Start a turn when a message lands and the agent is idle.
 
-        Polling rather than inotify: one `listdir` a second costs nothing measurable,
-        works the same on every filesystem a volume might be, and needs no dependency.
-        This is the whole of "how a colleague gets your attention" (CLAUDE.md 9.2).
+        Polling, not inotify: one `listdir` a second costs nothing measurable, behaves
+        the same on every filesystem a volume might be, and needs no dependency.
 
         Only when **idle**. A message arriving mid-turn is already delivered — the agent
-        drains its inbox at the top of the next turn either way — and interrupting the
-        turn in flight would break the rule that a push never splices (section 8 point 3).
+        drains its inbox at the top of the next turn anyway — and interrupting would
+        break the rule that a push never splices into a turn in flight.
         """
         if self._watch is not None and not self._watch.done():
             return
@@ -198,10 +196,9 @@ class SessionRunner:
     def set_mode(self, mode: ApprovalMode) -> None:
         """Change the approval mode of the live agent.
 
-        The harness is the one holder of the mode, and `tool_definitions()` is read
-        fresh each request, so this takes effect on the next model call. It does not
-        reach a tool already in flight — that call was gated under the mode in force
-        when it started, which is the honest answer.
+        The harness holds the mode and `tool_definitions()` is read fresh each request,
+        so this takes effect on the next model call. It does not reach a tool already in
+        flight — that call was gated under the mode in force when it started.
         """
         self.agent.harness.approval_mode = mode
 
@@ -230,10 +227,9 @@ class SessionRunner:
     async def _await_client(self, execution_id: str, message: Any, *, verb: str) -> Any:
         """Ask the attached clients something and block this tool until one answers.
 
-        Raising `ToolDenied` for "nobody is attached" rather than returning False: both
-        end the tool call, but `Tool.invoke`'s generic denial text says *the user
-        declined*, and a headless run being told a human refused it is a lie it will act
-        on. `ToolDenied` is a `ToolError`, so `invoke` renders this message instead.
+        `ToolDenied` for "nobody is attached" rather than False: both end the call, but
+        `Tool.invoke`'s generic denial text says *the user declined*, and a headless run
+        told a human refused it will act on that lie.
         """
         if not self._sinks:
             raise ToolDenied(NO_CLIENT.format(verb=verb))
@@ -248,8 +244,8 @@ class SessionRunner:
             self._pending.pop(execution_id, None)
 
     def resolve(self, execution_id: str, value: Any) -> bool:
-        """Answer one open request. False when the id matches nothing still waiting —
-        a late answer to a request already abandoned, which is not an error."""
+        """Answer one open request. False when the id matches nothing still waiting: a
+        late answer to an abandoned request is not an error."""
         entry = self._pending.get(execution_id)
         if entry is None or entry[0].done():
             return False

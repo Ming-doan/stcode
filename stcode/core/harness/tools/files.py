@@ -1,16 +1,14 @@
 """
 File tools — `read`, `write`, `edit`.
 
-The three of them are one design, not three: **an agent may only change what it has
-looked at.** `read` records what it saw; `write` and `edit` refuse to touch a file this
-session has not read, and warn when it changed underneath them. The cost of getting
-this wrong is asymmetric — a refused edit costs one turn, an overwritten file the agent
-never read costs work that no longer exists anywhere.
+One design, not three: **an agent may only change what it has looked at.** `read`
+records what it saw; `write` and `edit` refuse a file this session has not read, and
+warn when it changed underneath them. The cost is asymmetric — a refused edit costs one
+turn, an overwritten file the agent never read costs work that no longer exists.
 
-`edit` matches an exact, unique string rather than a line range or a diff. Line numbers
-go stale the moment anything above them moves, and a fuzzy match silently edits the
-wrong place; a unique literal either matches once or fails loudly, which is the whole
-of CLAUDE.md §5's "Fails loudly on 0 or >1 matches".
+`edit` matches an exact, unique string, not a line range or a diff: line numbers go
+stale the moment anything above them moves, and a fuzzy match silently edits the wrong
+place, while a unique literal either matches once or fails loudly.
 """
 
 from __future__ import annotations
@@ -25,24 +23,23 @@ from stcode.core.harness.context import HarnessContext
 from stcode.core.harness.tools.base import Runtime, ToolError, tool
 
 MAX_LINE_LENGTH = 2000
-"""Chars per line before it is cut. Minified bundles and embedded data URIs are one
-line of hundreds of thousands of chars; without this a single `read` can blow a whole
-context window on a file the agent did not want."""
+"""Chars per line before it is cut. A minified bundle is one line of hundreds of
+thousands of chars, and without this a single `read` blows the whole context window."""
 
 DEFAULT_READ_LIMIT = 2000
-"""Lines returned when the caller does not say. Enough for almost any source file,
-small enough that reading a log by accident is survivable."""
+"""Lines returned when the caller does not say. Enough for almost any source file, small
+enough that reading a log by accident is survivable."""
 
 READ_MAX_OUTPUT = 32768
-"""`read` shows more than other tools before eliding: file contents are the ground
+"""`read` shows more than other tools before eliding — file contents are the ground
 truth an agent reasons from, and a half-seen function is worse than a slow turn."""
 
 _BINARY_SNIFF_BYTES = 8192
 
 
 def _is_binary(path: Path) -> bool:
-    """A NUL byte in the first pages. The same heuristic `grep` and `git` use, and it is
-    right about source trees far more often than any extension list."""
+    """A NUL byte in the first pages — what `grep` and `git` use, and right about source
+    trees far more often than any extension list."""
     try:
         with path.open("rb") as handle:
             return b"\x00" in handle.read(_BINARY_SNIFF_BYTES)
@@ -53,9 +50,8 @@ def _is_binary(path: Path) -> bool:
 def number_lines(lines: list[str], start: int = 1) -> str:
     """Render with line numbers, `cat -n` style.
 
-    Numbers are not decoration: they are how the agent cites a location back to the
-    user (`file.py:42`), how `edit` failures are explained, and how a second read of the
-    same file lines up with the first.
+    Not decoration: they are how the agent cites `file.py:42`, how `edit` failures are
+    explained, and how a second read lines up with the first.
     """
     return "\n".join(f"{start + offset:6d}\t{line}" for offset, line in enumerate(lines))
 
@@ -231,11 +227,10 @@ async def edit(
 
 
 def _edit_preview(text: str, needle: str, context_lines: int = 4) -> str:
-    """Show the edited region with line numbers, so the agent can see what it produced.
+    """Show the edited region with line numbers, so the agent sees what it produced.
 
-    Returning a confirmation alone invites the agent to assume the edit landed the way
-    it imagined. Showing the result is how a wrong-but-successful edit gets noticed on
-    the same turn instead of three turns later.
+    A bare confirmation invites the agent to assume the edit landed as imagined. This is
+    how a wrong-but-successful edit gets noticed now instead of three turns later.
     """
     index = text.find(needle.split("\n", 1)[0]) if needle else -1
     if index < 0:

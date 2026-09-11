@@ -1,26 +1,16 @@
 """
-Invariant 5, as code — `full-auto` without an approver runs only inside a container.
+`full-auto` without an approver runs only inside a container.
 
-CLAUDE.md §4 rule 5 and EXPECTED.md §11.3. The point of putting it here rather than in
-a document is that a document cannot refuse. The daemon calls `guard_autonomy` twice:
-once before it binds a socket, and once per session it creates. **There is no override
-flag**, and adding one is not a feature request that can be satisfied.
+Code rather than a document, because a document cannot refuse. `guard_autonomy` runs
+before the daemon binds and again per session. **There is no override flag.**
 
-Two details that decide whether this actually holds:
+**`has_approver` is False for every daemon stcode ships**, TUI included. Under
+`full-auto` nothing ever *asks* — `requires_approval` returns False for every permission
+— so an attached human is a spectator. The parameter exists for a future policy object
+that really would answer `approval_request`.
 
-**`has_approver` is False for every daemon stcode ships**, TUI included. It is a real
-parameter because a future automated approver — a policy object that answers
-`approval_request` without a human — would be one, and the guard should let that
-through. But it must not become the override flag by the back door: under `full-auto`
-nothing ever *asks*, because `requires_approval` returns False for every permission, so
-an attached human is a spectator, not an approver. A TUI that passed `has_approver=True`
-would be claiming a safety property it does not have.
-
-**It raises `AutonomyRefused`, not `SystemExit`.** EXPECTED.md sketches `SystemExit`,
-which is right for the CLI and wrong one layer down: the TUI creates sessions inside a
-worker task, where a `SystemExit` is swallowed by the task and shows the user nothing.
-The CLI turns this into an exit; the TUI renders it. The refusal is identical either
-way, which is the part the invariant cares about.
+It raises `AutonomyRefused`, not `SystemExit`: the TUI creates sessions inside a worker
+task, which swallows `SystemExit` and shows the user nothing.
 """
 
 from __future__ import annotations
