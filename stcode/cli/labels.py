@@ -16,6 +16,7 @@ import os
 
 from stcode.core.harness.approvals import APPROVAL_MODES, ApprovalMode
 from stcode.core.providers import PROVIDERS, ProviderConfig, default_model_for, key_env_for
+from stcode.core.providers.types import REASONING_EFFORTS
 
 Row = tuple[str, str]
 """One line of a card: a label and what it means. Every card is a list of these."""
@@ -85,24 +86,65 @@ THEME_ROWS: list[Row] = [
     ("light", "always light"),
 ]
 
-EFFORT_ROWS: list[Row] = [
-    ("none", "no thinking at all"),
-    ("minimal", "the least the model offers"),
-    ("low", "quick, for mechanical work"),
-    ("medium", "the usual"),
-    ("high", "for work that needs real reasoning"),
-    ("xhigh", "more than high, where a provider has it"),
-    ("max", "as much as the provider allows"),
-]
-"""Every rung any provider has. The narrower scales clamp — Anthropic has no `none`
-rung below "off" and Gemini's tops out at high — which is the provider adapter's job
-to say, not this list's job to hide."""
+EFFORT_HELP: dict[str, str] = {
+    "none": "no thinking at all",
+    "minimal": "the least the model offers",
+    "low": "quick, for mechanical work",
+    "medium": "the usual",
+    "high": "for work that needs real reasoning",
+    "xhigh": "more than high, where a provider has it",
+    "max": "as much as the provider allows",
+}
+
+EFFORT_CLAMPS: dict[str, dict[str, str]] = {
+    "anthropic": {"minimal": "sent as low"},
+    "google": {"xhigh": "sent as high", "max": "sent as high"},
+}
+"""Where a provider's own scale is narrower than the union.
+
+Shown, not hidden: a rung that quietly does what the one below it does is worth one
+parenthesis, and dropping it from the list would make the same card offer different
+things on different days for reasons nobody could see. → `core/providers/types.py`
+"""
+
+
+def effort_rows(provider: str = "") -> list[Row]:
+    """Every rung, with the clamp named for the provider currently in force.
+
+    The rungs come from `core/providers`, not from a list written out here: the scale is
+    a fact about the providers, and a second copy in the UI is a copy that goes stale the
+    next time one is added.
+    """
+    clamps = EFFORT_CLAMPS.get(provider, {})
+    rows: list[Row] = []
+    for rung in REASONING_EFFORTS:
+        detail = EFFORT_HELP.get(rung, "")
+        clamp = clamps.get(rung)
+        rows.append((rung, f"{detail} ({clamp})" if clamp else detail))
+    return rows
+
+
+EFFORT_ROWS: list[Row] = effort_rows()
+"""The unqualified list, for callers with no provider in hand."""
+
+DIFFICULTY_HELP: dict[str, str] = {
+    "low": "the cheap tier",
+    "medium": "the middle tier",
+    "high": "the best model you configured",
+}
+
+
+def difficulty_options() -> list[tuple[str, str]]:
+    """(label, value) pairs for the difficulty Select in the setup screen."""
+    return [(f"{name}  —  {DIFFICULTY_HELP[name]}", name) for name in ("low", "medium", "high")]
+
 
 COMMANDS: list[Row] = [
-    ("/model", "provider, key and model"),
+    ("/model", "provider, key, model and routing"),
     ("/effort", "how hard the model should think"),
     ("/mode", "approval mode"),
     ("/theme", "auto, dark or light"),
+    ("/token", "what this session has spent"),
     ("/sessions", "pick up an earlier session"),
     ("/connect", "point this client at a different daemon"),
     ("/mcp", "the MCP servers this session connected to"),
@@ -134,15 +176,29 @@ CARD_FILES = "files"
 CARD_MODE = "approval mode"
 CARD_THEME = "theme"
 CARD_EFFORT = "reasoning effort"
+CARD_TOKENS = "tokens"
+CARD_MCP = "mcp"
+CARD_SKILLS = "skills"
 CARD_APPROVE = "approve?"
 CARD_QUESTION = "the agent needs a decision"
+
+TOKEN_CARDS = (CARD_COMMANDS, CARD_FILES)
+"""The only two cards the text under the cursor opens and closes.
+
+Everything else — the pickers, the help, an approval — is opened by a command or by the
+agent and keeps the floor until it is answered or dismissed. Without this distinction
+the `Changed` message that `/effort` itself produces (submitting clears the input) finds
+a card open with no token under the cursor, and closes the card that command just
+opened. That is the whole "nothing happens when I press /effort" bug.
+"""
 
 SHORTCUT_ROWS: list[Row] = [
     ("?", "this card — backspace closes it"),
     ("/", "commands — type more to filter"),
     ("@", "files to mention — type more to filter"),
+    ("!", "run a shell command here — never sent to the agent"),
     ("enter", "send"),
-    ("shift+enter", "newline (alt+enter too)"),
+    ("ctrl+j", "newline (shift+enter and alt+enter where the terminal reports them)"),
     ("shift+tab", "change approval mode"),
     ("esc", "interrupt the turn, or close a card"),
     ("↑ ↓", "move through an open card"),
@@ -186,6 +242,60 @@ def mcp_rows(servers: list[dict[str, object]]) -> list[Row]:
 
 def skill_rows(skills: list[dict[str, str]]) -> list[Row]:
     return [(skill.get("name", "?"), skill.get("description", "")) for skill in skills]
+
+
+# ----------------------------------------------------------------------------- tokens
+
+NO_TOKENS_YET = "Nothing spent yet — this session has not called a model."
+
+TOKEN_FOOTER = "Counted from this session's own usage records. esc to close."
+
+
+def token_rows(totals: dict[str, int]) -> list[Row]:
+    """What the session has spent, as a card.
+
+    Input and output are the bill. The two cache lines are shown whenever they are
+    non-zero because they are the *evidence* for prompt caching — "turn 2 is cheaper" is
+    otherwise something you have to take on faith. `calls` is there because the
+    interesting number is often per-call, and dividing is easier than counting boxes.
+    """
+    calls = totals.get("calls", 0)
+    if not calls:
+        return [(NO_TOKENS_YET, "")]
+    written = totals.get("cache_creation_input_tokens", 0)
+    read = totals.get("cache_read_input_tokens", 0)
+    rows: list[Row] = [
+        ("input", f"{totals.get('input_tokens', 0):,}"),
+        ("output", f"{totals.get('output_tokens', 0):,}"),
+    ]
+    if written:
+        rows.append(("cache write", f"{written:,}"))
+    if read:
+        rows.append(("cache read", f"{read:,} — charged at a fraction of input"))
+    rows.append(("total", f"{totals.get('input_tokens', 0) + totals.get('output_tokens', 0):,}"))
+    rows.append(("model calls", f"{calls:,}"))
+    return rows
+
+
+# ------------------------------------------------------------------------------ shell
+
+SHELL_PREFIX = "!"
+
+SHELL_RUNNING = "running…"
+
+
+def shell_timed_out(seconds: float) -> str:
+    return (
+        f"timed out after {seconds:g}s. Raise `shell_timeout` in ui.toml (max 120), or "
+        "ask the agent to run it so it can wait."
+    )
+
+
+def shell_failed(exc: Exception) -> str:
+    return f"could not run it: {type(exc).__name__}: {exc}"
+
+
+SHELL_NO_COMMAND = "! on its own does nothing — type a command after it."
 
 
 # --------------------------------------------------------------------- platform notes
@@ -247,6 +357,21 @@ def inbox_message(sender: str, subject: str, refs: list[str]) -> str:
 
 STREAM_STOPPED = "stopped"
 
+SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+"""The braille spinner in the status line while a turn is in flight.
+
+A spinner rather than a word, because the thing it answers is "did my message land?" —
+and a static "working" cannot tell you whether the screen is alive. It goes in the
+status line, directly under the input, rather than into the transcript: the transcript
+is the record of what happened, and a row that appears and disappears is not that.
+"""
+
+STATUS_WORKING = "working"
+
+
+def working_status(frame: str) -> str:
+    return f"{frame} {STATUS_WORKING}   "
+
 
 # ------------------------------------------------------------------------- warnings
 
@@ -299,7 +424,13 @@ def session_line(row: dict[str, object]) -> str:
 
 
 def subsession_line(row: dict[str, object]) -> str:
-    return f"  └ {row.get('agent_name', 'sub-agent')}"
+    """A sub-agent's row: its name, then its id.
+
+    The id is here because the name is not unique — two turns can both spawn an
+    `api-scout` — and the id is what you need in order to open the transcript or grep
+    the sessions directory for it.
+    """
+    return f"  └ {row.get('agent_name') or 'sub-agent'}  {row.get('id', '')}"
 
 
 def _tilde(path: object) -> str:
@@ -345,6 +476,17 @@ def no_daemon_here(address: object) -> str:
 
 DAEMONLESS_CANCELLED = "Not connected. /connect to try another address."
 
+REMOTE_CONFIG_UNCHANGED = (
+    "provider and model sent — keys, base URL and routing stay as the remote daemon "
+    "has them"
+)
+"""Said once after a `/model` save in `--daemonless`.
+
+The daemon reads its own config file, on its own machine. This terminal can choose which
+model a session uses, but it has no business replacing the credentials a container was
+started with — and a UI that quietly did nothing would be worse than one that says so.
+"""
+
 # ------------------------------------------------------------------------- approvals
 
 
@@ -383,8 +525,37 @@ FIELD_PROVIDER = "Provider"
 FIELD_API_KEY = "API key"
 FIELD_BASE_URL = "Base URL"
 FIELD_MODEL = "Model"
+FIELD_DIFFICULTY = "Difficulty"
+FIELD_MAX_CONCURRENT = "Requests at once"
+FIELD_ROUTING = "Routing"
+
+ROUTING_HEADING_HINT = (
+    "A model per tier. The agent runs at the difficulty above; sub-agents and the "
+    "supervisor pick their own. Blank follows the model field."
+)
+
+DIFFICULTY_HINT = "Which tier the main agent runs at."
+
+MAX_CONCURRENT_PLACEHOLDER = "0 — no cap. Set 1 for Ollama or another local endpoint."
+
+MAX_CONCURRENT_HINT = (
+    "How many completions this endpoint will serve at once. Parallel sub-agents "
+    "overwhelm a local model and it drops them as 503s."
+)
 
 BASE_URL_PLACEHOLDER = "optional — a proxy or compatible gateway"
+
+
+def routing_label(difficulty: str) -> str:
+    return f"  {difficulty}"
+
+
+def routing_placeholder(provider: str, difficulty: str) -> str:
+    return f"optional — follows Model; {DIFFICULTY_HELP.get(difficulty, '')}"
+
+
+def bad_concurrency(value: str) -> str:
+    return f"{value!r} is not a number of requests."
 
 BUTTON_SKIP = "Skip"
 BUTTON_CANCEL = "Cancel"

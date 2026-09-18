@@ -127,6 +127,25 @@ abandoned session for as long as it runs. With it, a client that connects, looks
 and leaves holds nothing open. A session that has written a record is never dropped:
 detach does not kill the agent, and that rule has no exceptions.
 
+## Reconfiguring one that is already running
+
+`Daemon.reconfigure(config)` swaps the config and hands the new providers, routing and
+retry policy to the gateway **in place**, leaving every session alone.
+
+In place matters because of who holds what: a `/model` that pastes a new key or points a
+base URL at a different endpoint has to reach the session that is running *now*, and
+that session's `Agent` holds the gateway object rather than this daemon. Building a
+fresh gateway here would leave the running turn streaming against the old credentials
+until it ended. → [providers.md](providers.md#changing-the-configuration-under-a-running-agent)
+
+What it deliberately does not do is restart anything. `[daemon]` and `[session]`
+describe a socket that is already bound and a directory transcripts are already being
+written to; changing either is a restart, not a reload.
+
+It is also only ever called by a client that **started this daemon** — the TUI in its
+default shape. A `--daemonless` terminal does not get to replace the credentials a
+container was started with; the daemon reads its own config file, on its own machine.
+
 ## `full-auto` and the container rule
 
 `guard_autonomy` runs *before* the bind, and again per session:

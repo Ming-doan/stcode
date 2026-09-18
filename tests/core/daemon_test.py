@@ -32,6 +32,7 @@ from fakes import FakeAgent, RecordingGateway, calls_tool, says
 
 from stcode.core.configs import GatewayConfig
 from stcode.core.daemon import Daemon, DaemonClient, SessionRunner
+from stcode.core.daemon.runner import session_usage
 from stcode.core.daemon.autonomy import AutonomyRefused, guard_autonomy
 from stcode.core.daemon.protocol import (
     Approval,
@@ -764,7 +765,8 @@ async def test_set_meta_before_the_first_message_writes_no_file(
         session = env.daemon.sessions[info["id"]].agent.session
         assert not session.started and not session.path.exists()
         assert session.meta()["model"] == "claude-opus-5"
-        assert session.overrides() == {}
+        # No second record, but still an override — that is what the agent reads.
+        assert session.overrides() == {"model": "claude-opus-5"}
         await client.aclose()
 
 
@@ -876,3 +878,28 @@ async def test_abandoning_the_event_stream_cancels_the_reads_it_was_parked_on(
 
         assert not parked()
         await client.aclose()
+
+
+# ---- what a session spent ---------------------------------------------------------
+
+
+def test_session_usage_counts_every_call_not_every_turn() -> None:
+    """`turn_finished` carries the usage of a turn's *last* model call. A turn with six
+    tool calls made seven requests and reports one of them, so `/token` cannot be built
+    out of the frames a client happened to watch."""
+    records = [
+        {"type": "user", "content": "go"},
+        {"type": "usage", "input_tokens": 20, "output_tokens": 5},
+        {"type": "tool_call", "id": "c1", "name": "read"},
+        {"type": "usage", "input_tokens": 30, "output_tokens": 7, "cache_read_input_tokens": 18},
+        {"type": "assistant", "content": "done"},
+    ]
+    totals = session_usage(records)
+    assert totals["input_tokens"] == 50
+    assert totals["output_tokens"] == 12
+    assert totals["cache_read_input_tokens"] == 18
+    assert totals["calls"] == 2
+
+
+def test_session_usage_of_a_session_that_never_called_anything() -> None:
+    assert session_usage([{"type": "meta", "id": "x"}])["calls"] == 0

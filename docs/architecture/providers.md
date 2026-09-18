@@ -39,6 +39,54 @@ when set**, so a config file in a repository never overrides the shell.
 `stream(provider=..., model=...)` bypasses tier routing entirely, using that provider's
 main credentials. That is for `stcode config` and for tests, not for the loop.
 
+## How many at once
+
+```toml
+[providers.openai]
+base_url       = "http://10.0.0.3:11434/v1"
+max_concurrent = 1
+```
+
+One cap per **endpoint**, applied around the whole completion rather than around the
+request, because what an inference server is rationing is streams it is serving. `0`,
+the default, is no cap.
+
+The cap belongs here and not in `[agent]`, because the thing being protected is the
+server and the thing overwhelming it is not one agent. A daemon shares one gateway
+across every session, every sub-agent and the supervisor — so a model that answers a
+question by dispatching five `task` calls opens five simultaneous completions, and it
+does not matter that each sub-agent thought it was making one request.
+
+**A hosted API absorbs that. A local one does not.** Ollama or llama.cpp serving a 27b
+model on one GPU takes one request at a time, queues the rest, and drops whatever waited
+past its budget:
+
+```
+[the sub-agent did not finish] APIError: [503] Request dropped after exceeding the
+local rate-limit queue budget maxWaitMs (15000ms)
+```
+
+Retry cannot fix that — nothing about it was transient, and three more attempts arrive
+into the same full queue. `max_concurrent = 1` makes the five calls run one after
+another instead, which is slower than the parallelism the model asked for and faster
+than five failures.
+
+The semaphore is held for the life of the stream and released in the generator's
+`finally`, so a caller that abandons a stream frees its slot. Every caller wraps
+iteration in `aclosing` for exactly this reason. → [the agent loop](agent-loop.md)
+
+## Changing the configuration under a running agent
+
+`reconfigure()` replaces the providers, routing and retry policy **in place** and closes
+the cached clients, because a client is built around the key and base URL being
+replaced.
+
+In place rather than by building a new gateway, because of who holds the reference: a
+`/model` that pastes a new key has to reach the session that is already running, and
+that session's `Agent` holds this object, not the daemon that built it. Swapping the
+daemon's gateway would leave the running turn streaming against the old credentials
+until it ended. → [the daemon](daemon.md)
+
 ## Retry
 
 `max_attempts`, exponential backoff from `base_delay` to `max_delay`, optional jitter.

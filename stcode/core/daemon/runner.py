@@ -57,6 +57,40 @@ WAKE = (
 the history as an `inbox` record, and repeating it pays for it twice."""
 
 
+USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def session_usage(records: list[dict[str, Any]]) -> dict[str, int]:
+    """Add up every `usage` record in a transcript, plus how many there were.
+
+    Summed **here**, from the session, rather than accumulated by the client from the
+    frames it happened to see. Two reasons, and both of them are correctness rather than
+    tidiness: `turn_finished` carries the usage of the last model call in the turn, not
+    of the turn — a turn with six tool calls made seven requests and reports one — and a
+    client that attached halfway through never saw the earlier ones at all. The session
+    has one record per call and is the only thing that does.
+
+    A sub-agent's calls are not in here: those are records in the sub-agent's own
+    session file, which is the same reason its tool output never enters the parent's
+    context.
+    """
+    totals = {field: 0 for field in USAGE_FIELDS}
+    calls = 0
+    for record in records:
+        if record.get("type") != "usage":
+            continue
+        calls += 1
+        for field in USAGE_FIELDS:
+            totals[field] += int(record.get(field, 0) or 0)
+    totals["calls"] = calls
+    return totals
+
+
 class SessionRunner:
     """One session the daemon is holding: its agent, its watchers, its open requests."""
 
@@ -217,6 +251,7 @@ class SessionRunner:
                 {"name": server, "tools": tools}
                 for server, tools in sorted(harness.mcp_servers.items())
             ],
+            usage=session_usage(self.agent.session.records()),
             **extra,
         )
 
@@ -321,4 +356,4 @@ class SessionRunner:
         return f"SessionRunner({self.id}, watchers={self.watchers}, busy={self.agent.busy})"
 
 
-__all__ = ["NO_CLIENT", "SessionRunner"]
+__all__ = ["NO_CLIENT", "USAGE_FIELDS", "SessionRunner", "session_usage"]

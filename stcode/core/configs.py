@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from stcode.core.common.paths import config_dir, config_exists, default_config_path
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
 from stcode.core.providers import Difficulty, ProviderConfig, RetryConfig, RouteConfig, default_model_for
+from stcode.core.providers.types import ReasoningEffort
 from stcode.core.session import DEFAULT_SESSION_DIR
 from stcode.core.team.mailbox import DEFAULT_TEAM_DIR
 
@@ -42,11 +43,14 @@ class DefaultsConfig(BaseModel):
     `/mode`, not routing policy, so the gateway ignores them.
 
     An empty `model` means "not chosen yet", which the chat screen warns about rather
-    than silently guessing.
+    than silently guessing. An empty `reasoning_effort` means "whatever the model does
+    on its own" — the rungs are not a scale every provider has, so there is no neutral
+    middle to default to.
     """
 
     provider: str = "openai"
     model: str = ""
+    reasoning_effort: ReasoningEffort | Literal[""] = ""
     approval_mode: ApprovalMode = DEFAULT_APPROVAL_MODE
 
 
@@ -209,6 +213,9 @@ api_key_env = "ANTHROPIC_API_KEY"
 
 [providers.openai]
 api_key_env = "OPENAI_API_KEY"
+# max_concurrent = 1   # completions this endpoint serves at once; 0 = no cap. Set 1 for
+#                      # a local model — parallel sub-agents otherwise queue against one
+#                      # GPU and get dropped as 503s.
 
 [providers.google]
 api_key_env = "GEMINI_API_KEY"
@@ -365,14 +372,18 @@ def apply_cli_overrides(
     model: str | None = None,
     role: str | None = None,
 ) -> GatewayConfig:
-    """Fold command-line overrides into a loaded config, in place, for this run only.
+    """Fold command-line overrides into a loaded config, for this run only.
 
     Never written back to disk: a flag is a decision about now, and `--mode full-auto`
-    on one run must not leave `full-auto` in the file for the next.
+    on one run must not leave `full-auto` in the file for the next. Which is why this
+    returns a **copy** and leaves its argument alone — a UI that overwrites a config it
+    had folded flags into writes those flags to disk, and a `--transport tcp` used once
+    to reach a container becomes the transport the next bare `stcode` binds.
 
     Here rather than in `cli/` because both entry paths need it — the headless daemon
     and the UI — and the second must not have to import the first.
     """
+    config = config.model_copy(deep=True)
     if transport is not None:
         config.daemon.transport = transport  # type: ignore[assignment]
     if socket:
@@ -401,6 +412,10 @@ def apply_provider_settings(
     base_url: str | None = None,
     model: str | None = None,
     approval_mode: ApprovalMode | None = None,
+    reasoning_effort: str | None = None,
+    difficulty: Difficulty | None = None,
+    routing_models: dict[str, str] | None = None,
+    max_concurrent: int | None = None,
 ) -> GatewayConfig:
     """Fold one provider's settings into `config` and make it the session default.
 
@@ -410,6 +425,11 @@ def apply_provider_settings(
     Tiers already on this provider, or still tracking the one being replaced, are
     repointed at the new model. A tier pinned to some third provider is left alone: that
     is a hand-edit the UI has no business undoing.
+
+    `routing_models` names a model per difficulty tier and is applied **last**, on top
+    of that repointing — it is what the setup screen's three routing fields write, and a
+    tier the user typed into is a tier they meant. A blank entry means "follow the
+    default model", which is what the repointing above already did.
     """
     updated = config.model_copy(deep=True)
     previous_provider = updated.defaults.provider
@@ -420,6 +440,7 @@ def apply_provider_settings(
         api_key=(api_key or None) if api_key is not None else existing.api_key,
         base_url=(base_url or None) if base_url is not None else existing.base_url,
         base_url_env=existing.base_url_env,
+        max_concurrent=existing.max_concurrent if max_concurrent is None else max_concurrent,
     )
 
     updated.defaults.provider = provider
@@ -427,6 +448,10 @@ def apply_provider_settings(
         updated.defaults.model = model.strip()
     if approval_mode is not None:
         updated.defaults.approval_mode = approval_mode
+    if reasoning_effort is not None:
+        updated.defaults.reasoning_effort = reasoning_effort.strip()  # type: ignore[assignment]
+    if difficulty is not None:
+        updated.agent.difficulty = difficulty
 
     effective_model = updated.defaults.model or default_model_for(provider)
     if effective_model:
@@ -441,5 +466,20 @@ def apply_provider_settings(
             elif route.provider in (provider, previous_provider):
                 route.provider = provider
                 route.model = effective_model
+
+    # `tier`, not `difficulty`: that name is already this function's "which tier does the
+    # main agent run at" parameter, and shadowing it here would be two unrelated meanings
+    # for one identifier in one function.
+    for tier, tier_model in (routing_models or {}).items():
+        chosen = tier_model.strip()
+        if not chosen:
+            continue
+        route = updated.routing.get(tier)  # type: ignore[call-overload]
+        if route is None:
+            updated.routing[tier] = RouteConfig(  # type: ignore[index]
+                provider=provider, model=chosen
+            )
+        else:
+            route.model = chosen
 
     return updated

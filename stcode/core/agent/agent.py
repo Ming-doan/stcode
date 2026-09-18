@@ -73,6 +73,7 @@ class Agent:
         difficulty: Difficulty = "high",
         max_turns: int = DEFAULT_MAX_TURNS,
         max_concurrent: int = 4,
+        reasoning_effort: str = "",
         owns_gateway: bool = False,
         supervisor: Supervisor | None = None,
         mailbox: Any = None,
@@ -82,6 +83,10 @@ class Agent:
         self.session = session
         self.difficulty = difficulty
         self.max_turns = max_turns
+        self.reasoning_effort = reasoning_effort
+        """What `[defaults] reasoning_effort` asked for, if anything. A floor, not a
+        fixture: a `/effort` chosen mid-conversation lands in the session's own `meta`
+        and wins, because that is a statement about *this* conversation."""
         self.supervisor = supervisor
         """Checked every `supervisor.every` iterations *inside* a turn. None for
         sub-agents: a nudge arrives about when a one-shot worker is finishing anyway."""
@@ -158,6 +163,7 @@ class Agent:
             difficulty=config.agent.difficulty,
             max_turns=config.agent.max_turns,
             max_concurrent=config.agent.max_concurrent,
+            reasoning_effort=config.defaults.reasoning_effort,
             owns_gateway=owns_gateway,
             supervisor=(
                 Supervisor(
@@ -490,13 +496,19 @@ class Agent:
         untouched when nobody has overridden anything. `difficulty` itself is never
         overridden here — a tier is a statement about one piece of work, an override is
         a statement about the conversation, and sub-agents inherit neither.
+
+        `[defaults] reasoning_effort` is folded in underneath, so the config's answer
+        applies from the first call and a `/effort` during the conversation replaces it.
         """
         overrides = self.session.overrides()
-        return {
+        resolved = {
             key: overrides[key]
             for key in ("provider", "model", "reasoning_effort")
             if overrides.get(key)
         }
+        if self.reasoning_effort and "reasoning_effort" not in resolved:
+            resolved["reasoning_effort"] = self.reasoning_effort
+        return resolved
 
     async def _stream(self) -> AsyncIterator[Any]:
         async for event in self.gateway.stream(

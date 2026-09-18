@@ -302,7 +302,11 @@ def test_setting_meta_before_the_first_message_leaves_one_meta_record(
     records = list(read_records(session.path))
     assert [r["type"] for r in records] == ["meta", "user"]
     assert records[0]["model"] == "b" and records[0]["reasoning_effort"] == "low"
-    assert session.overrides() == {}  # it *is* the meta now, not an override
+    # Folded into the first record — and still an override, because that is what it is.
+    # `overrides()` is what the agent reads before each model call, so a setting that
+    # landed here instead of after would otherwise apply to no call at all: `/effort`
+    # chosen one message too early would silently do nothing.
+    assert session.overrides() == {"model": "b", "reasoning_effort": "low"}
     session.close()
 
 

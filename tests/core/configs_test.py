@@ -15,6 +15,7 @@ import pytest
 from stcode.core.configs import (
     DEFAULT_CONFIG_TOML,
     GatewayConfig,
+    apply_cli_overrides,
     apply_provider_settings,
     load_config,
     save_config,
@@ -68,3 +69,71 @@ def test_tracing_is_off_unless_asked(tmp_path: Path) -> None:
 def test_a_missing_config_says_where_it_looked(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="No stcode config"):
         load_config(tmp_path / "nope.toml")
+
+
+# ---- flags are not settings -------------------------------------------------------
+
+
+def test_cli_overrides_leave_the_loaded_config_alone() -> None:
+    """The failure: `stcode --transport tcp` once, and every bare `stcode` afterwards
+    binds TCP.
+
+    The UI writes its config back whenever a mode or an address changes. If the flags
+    were folded into that same object, the flag went to disk with it — and the docstring
+    promising "never written back" was describing something that had stopped being true.
+    """
+    stored = GatewayConfig()
+    assert stored.daemon.transport == "unix"
+
+    live = apply_cli_overrides(stored, transport="tcp", approval_mode="full-auto")
+
+    assert live.daemon.transport == "tcp", "the flag did not take effect for this run"
+    assert stored.daemon.transport == "unix", "the flag reached the config that gets saved"
+    assert stored.defaults.approval_mode != "full-auto"
+
+
+def test_the_shipped_daemon_default_is_a_unix_socket() -> None:
+    """`unix` and `~/.stcode/daemon.sock`, with nothing configured. A `tcp` in somebody's
+    file got there from a flag or from the connect screen, not from us."""
+    daemon = GatewayConfig().daemon
+    assert daemon.transport == "unix"
+    assert daemon.socket == "~/.stcode/daemon.sock"
+
+
+# ---- what the setup screen writes -------------------------------------------------
+
+
+def test_routing_models_are_applied_over_the_default_repointing() -> None:
+    """The three tier fields are the last word: a tier you typed into is a tier you
+    meant, even though choosing a model repoints every tier that was following it."""
+    config = apply_provider_settings(
+        GatewayConfig(),
+        provider="openai",
+        model="gpt-5",
+        routing_models={"low": "gpt-5-mini", "medium": "", "high": "gpt-5"},
+    )
+    assert config.routing["low"].model == "gpt-5-mini"
+    assert config.routing["medium"].model == "gpt-5", "a blank tier follows the model field"
+    assert config.routing["low"].provider == "openai"
+
+
+def test_the_concurrency_cap_survives_a_round_trip(tmp_path: Path) -> None:
+    """The one knob that makes a local model usable behind parallel sub-agents."""
+    path = tmp_path / "config.toml"
+    config = apply_provider_settings(
+        GatewayConfig(), provider="openai", model="local", max_concurrent=1
+    )
+    assert config.providers["openai"].max_concurrent == 1
+    save_config(config, path)
+    assert load_config(path).providers["openai"].max_concurrent == 1
+
+
+def test_a_chosen_effort_is_remembered(tmp_path: Path) -> None:
+    """`/effort` used to reach the running session and nothing else, so the choice
+    quietly reverted at the next `stcode`."""
+    path = tmp_path / "config.toml"
+    config = apply_provider_settings(
+        GatewayConfig(), provider="openai", model="m", reasoning_effort="high"
+    )
+    save_config(config, path)
+    assert load_config(path).defaults.reasoning_effort == "high"

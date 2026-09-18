@@ -276,6 +276,11 @@ class InfoReply(BaseModel):
     tools: list[str] = Field(default_factory=list)
     skills: list[dict[str, str]] = Field(default_factory=list)
     mcp: list[dict[str, Any]] = Field(default_factory=list)
+    usage: dict[str, int] = Field(default_factory=dict)
+    """This session's token totals, summed from its `usage` records — what `/token`
+    shows. Here rather than as its own message because it is the same question `info`
+    already answers: *what does the daemon know about this session that I cannot see?*
+    """
 
 
 class Progress(BaseModel):

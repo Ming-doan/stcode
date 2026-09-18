@@ -24,9 +24,10 @@ from stcode.cli.app import StcodeApp
 from stcode.cli.cards import Card
 from stcode.cli.modals import TrustScreen
 from stcode.cli.prefs import UiPrefs, save_prefs
-from stcode.cli.transcript import AgentRow, Message, ToolCall
+from stcode.cli.transcript import AgentRow, Message, ShellOutput, ToolCall
 from stcode.core.configs import GatewayConfig, save_config
 from stcode.core.daemon import Daemon
+from stcode.core.providers.types import MessageStop, ToolCallEnd, Usage
 
 CONFIG = """\
 [defaults]
@@ -462,3 +463,279 @@ async def test_the_banner_goes_once_there_is_a_conversation(
             await pilot.press("g", "o", "enter")
             assert await until(lambda: bool(env.gateway.calls))
             assert await until(lambda: not banner.display)
+
+
+# ---- cards a command opened ------------------------------------------------------
+
+
+@asynctest
+async def test_a_picker_survives_the_input_being_cleared(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """The bug where `/effort` appeared to do nothing at all.
+
+    Submitting clears the input, and clearing posts a `Changed`. That message arrives
+    *after* the command has opened its card, so a handler that reads "no token under the
+    cursor" as "close whatever is open" closes the card the command just opened — for
+    `/effort`, `/theme`, `/mode`, `/mcp` and `/skills` alike. Driven through the keyboard
+    rather than `_run_command`, because bypassing the submit path is exactly what hid it.
+    """
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            for key in ("slash", "e", "f", "f", "o", "r", "t"):
+                await pilot.press(key)
+            await pilot.press("enter")  # picks /effort out of the commands card
+            await pilot.pause()
+            await pilot.pause()
+
+            card = card_of(app)
+            assert card is not None, "the effort card was closed by its own submit"
+            assert card.kind == labels.CARD_EFFORT
+            assert app.prompt.text == ""
+
+
+@asynctest
+async def test_skills_says_so_when_there_are_none(tmp_path: Path, workspace: Path) -> None:
+    """An empty answer is still an answer. A card that never appears is not."""
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            assert await until(lambda: "skills" in app._info)
+            app._run_command("/skills")
+            await pilot.pause()
+            await pilot.pause()
+
+            card = card_of(app)
+            assert card is not None and card.kind == labels.CARD_SKILLS
+            assert card.rows, "the card must say something, even when nothing was found"
+
+
+# ---- two approvals at once --------------------------------------------------------
+
+
+@asynctest
+async def test_two_parallel_approvals_are_both_answerable(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """The deadlock: one card shown, the second never appearing, the turn parked.
+
+    `CardZone.clear()` removes children on the message pump, so answering the first
+    request and immediately asking "is a card open?" got the answer "yes" about a card
+    already on its way out — and the queued second request was never shown to anyone.
+    """
+    gateway = RecordingGateway(
+        [
+            [
+                ToolCallEnd(id="c1", name="bash", input={"command": "rm -rf one"}),
+                ToolCallEnd(id="c2", name="bash", input={"command": "rm -rf two"}),
+                MessageStop(stop_reason="tool_use", usage=Usage()),
+            ],
+            says("both done"),
+        ]
+    )
+    async with Harnessed(tmp_path, workspace, gateway, approval_mode="suggest") as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            await pilot.press("g", "o", "enter")
+            assert await until(lambda: card_of(app) is not None)
+            assert card_of(app).kind == labels.CARD_APPROVE  # type: ignore[union-attr]
+
+            await pilot.press("n")
+            # The second one has to arrive on its own. Nothing else will prompt it.
+            assert await until(
+                lambda: card_of(app) is not None
+                and card_of(app).kind == labels.CARD_APPROVE  # type: ignore[union-attr]
+            ), "the second approval never reached the screen"
+
+            await pilot.press("n")
+            assert await until(lambda: len(gateway.calls) >= 2), "the turn stayed parked"
+
+
+# ---- ! ----------------------------------------------------------------------------
+
+
+@asynctest
+async def test_a_bang_runs_a_command_here_and_records_nothing(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """`!` is your shell, not a tool call: no approval, no gateway, no session record."""
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            app.prompt.text = "!echo hello-from-bang"
+            await pilot.press("enter")
+
+            entries = [e for e in app.transcript.children if isinstance(e, ShellOutput)]
+            assert len(entries) == 1
+            assert await until(lambda: "hello-from-bang" in entries[0]._output)
+
+            assert not env.gateway.calls, "! must never reach the model"
+            records = env.daemon.sessions[app._session_id].agent.session.records()
+            assert not [r for r in records if r.get("type") == "user"]
+
+
+@asynctest
+async def test_a_bang_that_fails_shows_its_exit_code(tmp_path: Path, workspace: Path) -> None:
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            app.prompt.text = "!exit 3"
+            await pilot.press("enter")
+            entry = [e for e in app.transcript.children if isinstance(e, ShellOutput)][0]
+            assert await until(lambda: entry._exit_code == 3)
+
+
+# ---- /token -----------------------------------------------------------------------
+
+
+@asynctest
+async def test_token_counts_every_model_call_not_just_the_last(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """A turn with a tool call made two requests. `turn_finished` carries one of them,
+    which is why the totals come from the session instead."""
+    gateway = RecordingGateway(
+        [calls_tool("c1", "read", path="src/app.py"), says("that is the app")]
+    )
+    async with Harnessed(tmp_path, workspace, gateway) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            await pilot.press("g", "o", "enter")
+            assert await until(lambda: len(gateway.calls) >= 2)
+            await pilot.pause()
+
+            app._run_command("/token")
+            assert await until(
+                lambda: card_of(app) is not None
+                and card_of(app).kind == labels.CARD_TOKENS  # type: ignore[union-attr]
+            )
+            rows = dict(card_of(app).rows)  # type: ignore[union-attr]
+            assert rows["model calls"] == "2", "only the last call was counted"
+            # 20 from the tool-calling turn, 10 from the one that replied.
+            assert rows["input"] == "30"
+
+
+# ---- the working indicator --------------------------------------------------------
+
+
+@asynctest
+async def test_the_status_line_spins_from_the_moment_enter_is_pressed(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """The gap between enter and the first token is the one moment the screen looks
+    identical to one where nothing happened."""
+    gateway = RecordingGateway([says("eventually")])
+    gateway.gate = asyncio.Event()
+    async with Harnessed(tmp_path, workspace, gateway) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            await pilot.press("g", "o", "enter")
+            await pilot.pause()
+            assert app._working, "nothing told the user the message had landed"
+
+            gateway.gate.set()
+            assert await until(lambda: not app._working), "the spinner outlived the turn"
+
+
+# ---- what you said, and what you ran -----------------------------------------------
+
+
+@asynctest
+async def test_your_own_message_is_tinted_and_the_model_s_is_not(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """Scrolling back to find where you asked something should be looking, not reading."""
+    async with Harnessed(tmp_path, workspace, RecordingGateway([says("hi")])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            await pilot.press("h", "i", "enter")
+            assert await until(lambda: len(list(app.transcript.children)) >= 4)
+            await pilot.pause()
+
+            mine = next(e for e in app.transcript.children if isinstance(e, Message) and e._role == "user")
+            theirs = next(
+                e for e in app.transcript.children if isinstance(e, Message) and e._role != "user"
+            )
+            assert mine.styles.background.a > 0, "the user's message has no tint"
+            assert theirs.styles.background.a == 0, "the model's answer must stay plain"
+
+
+@asynctest
+async def test_a_shell_entry_is_marked_by_a_rule_not_a_box(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """It must be impossible to mistake your own command for something the agent did."""
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            app.prompt.text = "!true"
+            await pilot.press("enter")
+            await pilot.pause()
+            entry = next(e for e in app.transcript.children if isinstance(e, ShellOutput))
+            edge, _colour = entry.styles.border_left
+            assert edge == "thick"
+
+
+# ---- /effort is remembered ---------------------------------------------------------
+
+
+@asynctest
+async def test_choosing_an_effort_reaches_the_session_and_the_file(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """Both halves. The `meta` record is what makes `/effort` mean anything now; the
+    config line is what stops it reverting at the next `stcode`."""
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            app._run_command("/effort")
+            await pilot.pause()
+            card = card_of(app)
+            assert card is not None and card.kind == labels.CARD_EFFORT
+            chosen = card.rows[0][0]
+
+            await pilot.press("enter")
+            assert await until(
+                lambda: env.daemon.sessions[app._session_id]
+                .agent.session.overrides()
+                .get("reasoning_effort")
+                == chosen
+            ), "the live session never heard about it"
+
+        from stcode.core.configs import load_config
+
+        assert load_config(env.config_path).defaults.reasoning_effort == chosen
+
+
+@asynctest
+async def test_a_command_line_flag_is_not_written_to_the_config(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """`stcode --mode plan` once must not leave `plan` in the file — and the UI rewrites
+    that file every time the mode changes, which is how the flag used to get in."""
+    async with Harnessed(tmp_path, workspace, RecordingGateway([]), approval_mode="suggest") as env:
+        app = env.app(overrides={"approval_mode": "plan"})
+        async with app.run_test() as pilot:
+            await connected(app)
+            assert app.config.defaults.approval_mode == "plan", "the flag did not take effect"
+            app._run_command("/theme")  # any change that triggers a save
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+
+        from stcode.core.configs import load_config
+
+        assert load_config(env.config_path).defaults.approval_mode != "plan", (
+            "the flag was written to the config file"
+        )

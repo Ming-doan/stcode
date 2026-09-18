@@ -38,6 +38,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
+from textual.timer import Timer
 from textual.widgets import Static
 
 from stcode.cli import labels
@@ -45,14 +46,22 @@ from stcode.cli.banner import Banner
 from stcode.cli.cards import Card, CardZone, filter_rows, token_trigger
 from stcode.cli.connect import ConnectScreen
 from stcode.cli.modals import SessionsScreen, TrustScreen
-from stcode.cli.prefs import ThemePreference, UiPrefs, load_prefs, save_prefs, ui_path
+from stcode.cli.prefs import (
+    ThemePreference,
+    UiPrefs,
+    clamp_shell_timeout,
+    load_prefs,
+    save_prefs,
+    ui_path,
+)
 from stcode.cli.prompt import Prompt
 from stcode.cli.settings import SettingsScreen
-from stcode.cli.theme import THEMES, TerminalMode, detect_terminal_mode, theme_name_for
+from stcode.cli.theme import PRIMARY, THEMES, TerminalMode, detect_terminal_mode, theme_name_for
 from stcode.cli.transcript import (
     Message,
     Notice,
     PlatformNote,
+    ShellOutput,
     Thinking,
     ToolCall,
     Transcript,
@@ -69,6 +78,10 @@ from stcode.core.daemon import Daemon, DaemonClient
 from stcode.core.harness.approvals import ApprovalMode, next_approval_mode, parse_approval_mode
 from stcode.core.providers import ProviderConfig, resolve_secret
 
+SPINNER_INTERVAL = 0.1
+"""How often the working spinner advances. Ten frames a second reads as motion without
+costing a redraw people can feel."""
+
 FILE_LIMIT = 2000
 """How many paths `@` offers. Past this the list is not a list you read, and the filter
 is doing the work anyway."""
@@ -80,7 +93,7 @@ class StcodeApp(App[None]):
     TITLE = "stcode"
 
     ENABLE_COMMAND_PALETTE = False
-    """The eleven commands in `/` are the whole surface. A second, fuzzy way to reach
+    """The twelve commands in `/` are the whole surface. A second, fuzzy way to reach
     the same things is a second place for them to drift."""
 
     CSS = """
@@ -108,6 +121,23 @@ class StcodeApp(App[None]):
 
     .entry.platform {
         margin-bottom: 1;
+    }
+
+    /* What you said, tinted. Without it a short prompt is three words of plain text in
+       a column of plain text, and scrolling back to find where you asked something
+       means reading rather than looking. */
+    .entry.message.user {
+        width: 1fr;
+        padding: 0 1;
+        background: $primary 12%;
+    }
+
+    /* A `!` command: a rule down the left and nothing else. It is neither the model's
+       nor the platform's, and none of it is in the session. */
+    .entry.shell {
+        width: 1fr;
+        padding: 0 1;
+        border-left: thick $primary;
     }
 
     .entry.thinking {
@@ -212,10 +242,17 @@ class StcodeApp(App[None]):
         super().__init__()
         self._config_path = config_path or default_config_path()
         self._first_run = not config_exists(self._config_path)
-        self.config = GatewayConfig() if self._first_run else load_config(self._config_path)
-        # In-memory only: a flag must never become a stored default.
+        self._stored = GatewayConfig() if self._first_run else load_config(self._config_path)
+        """What is on disk, and the only thing ever written back.
+
+        Kept apart from `self.config` because a flag must never become a stored default:
+        folding `--transport tcp` into the config the UI later saves is how a container
+        address typed once becomes the transport a bare `stcode` binds forever after.
+        User-made changes are applied to **both** — that is what `_amend` is for.
+        """
+
         self._overrides = overrides or {}
-        apply_cli_overrides(self.config, **self._overrides)
+        self.config = apply_cli_overrides(self._stored, **self._overrides)
         # `--daemonless`: never start an agent here. Starting a local one would run the
         # work on this machine instead — the opposite of what was asked for.
         self._daemonless = daemonless
@@ -237,6 +274,9 @@ class StcodeApp(App[None]):
         self._streams: dict[tuple[str, str], Message | Thinking] = {}
         self._tools: dict[tuple[str, str], ToolCall] = {}
         self._requests: deque[dict[str, Any]] = deque()
+        self._working = False
+        self._spinner = 0
+        self._spinner_timer: Timer | None = None
 
     # ------------------------------------------------------------------ layout
 
@@ -411,9 +451,11 @@ class StcodeApp(App[None]):
             except OSError:
                 reason = labels.CONNECT_RETRY
                 continue
-            # The next run should start where this one ended up.
-            if config_exists(self._config_path):
-                save_config(self.config, self._config_path)
+            # The next run should start where this one ended up. An address typed into
+            # this screen is a decision, unlike `--host` — so it goes in the stored
+            # config too, which is the one that gets written.
+            self._stored.daemon = settings.model_copy(deep=True)
+            self._persist()
             return client
 
     def _daemon_address(self) -> str:
@@ -446,9 +488,12 @@ class StcodeApp(App[None]):
             case "turn_finished":
                 self._end_streams(agent)
                 if not agent:
+                    self._stop_working()
                     self._note(labels.turn_usage(dict(frame.get("usage", {}))))
             case "agent_failed":
                 self._end_streams(agent)
+                if not agent:
+                    self._stop_working()
                 self._error(str(frame.get("message", "")), agent=agent)
             case "approval_request" | "question":
                 self._enqueue_request(frame)
@@ -464,6 +509,7 @@ class StcodeApp(App[None]):
                 # status line showing a mode that is not in force, nor reach the config.
                 self._adopt_session(frame)
             case "error":
+                self._stop_working()
                 self._error(str(frame.get("message", "")))
 
     def _replay(self, frame: dict[str, Any]) -> None:
@@ -668,16 +714,23 @@ class StcodeApp(App[None]):
     @on(Prompt.Changed)
     def _prompt_changed(self) -> None:
         """Open, filter or close the `/` and `@` cards as the token under the cursor
-        changes. The one place that decides is `token_trigger`."""
+        changes. The one place that decides is `token_trigger`.
+
+        **Only those two.** A card a command opened is not driven by the text, and must
+        not be closed by it: submitting `/effort` clears the input, and the `Changed`
+        that clearing produces arrives *after* the effort card is up. Treating that as
+        "no token under the cursor, so close whatever is open" is what made `/effort`,
+        `/theme`, `/mode`, `/mcp` and `/skills` all appear to do nothing at all.
+        """
         card = self.cards.current
-        if card is not None and card.kind in (labels.CARD_APPROVE, labels.CARD_QUESTION):
-            return  # A request keeps the floor until it is answered.
         if card is not None and card.kind == labels.CARD_HELP:
             # `?` inserted nothing, so the second one is a literal question mark — and
             # the card it opened gets out of the way as soon as there is text.
             if self.prompt.text:
                 self._close_card()
             return
+        if card is not None and card.kind not in labels.TOKEN_CARDS:
+            return  # A picker, an approval or a question keeps the floor until answered.
         trigger = token_trigger(self.prompt.text, self.prompt.cursor_offset)
         if trigger is None:
             if card is not None:
@@ -800,24 +853,51 @@ class StcodeApp(App[None]):
                 if first_run:
                     self._warn(labels.SETUP_SKIPPED)
                 return
-            save_config(config, self._config_path)
+            self._stored = config
+            save_config(self._stored, self._config_path)
             # Saved first, then flags back on top: what the user typed belongs in the
             # file, what they passed on the command line belongs only to this run.
-            self.config = apply_cli_overrides(config, **self._overrides)
+            self.config = apply_cli_overrides(self._stored, **self._overrides)
             self._first_run = False
             self._refresh_status()
             if not self.config.defaults.model:
                 self._warn(labels.NO_MODEL_ERROR)
             if self._session_id:
-                # Reaches the running agent, which is the difference between `/model`
-                # and editing the config file.
-                self._push_meta(model=self.config.defaults.model)
+                self._apply_settings()
             else:
                 # First run: the daemon built its gateway from the old config, so new
                 # credentials reach it only through a new connection.
                 self._start()
 
         self.push_screen(SettingsScreen(self.config, first_run=first_run), saved)
+
+    @work(group="answers")
+    async def _apply_settings(self) -> None:
+        """Make a saved `/model` true for the session that is already running.
+
+        Two halves, because a model and a *credential* travel differently.
+
+        The provider and model are session settings: they go in as a `meta` record, the
+        agent re-reads its own meta before every call, and the change lands on the next
+        one. Both, not just the model — switching provider and pushing only the model
+        leaves the session routing a new model name at the old vendor.
+
+        A key, a base URL, a routing tier or a concurrency cap is not a session setting;
+        it belongs to the gateway, which the daemon built once at start-up from its own
+        config. Reconfiguring it in place is the only thing that reaches an agent that
+        is already holding it — and it is done **only for a daemon this process
+        started**. A daemon somewhere else reads its own config file, and pushing this
+        terminal's credentials at it would be this client deciding what another machine
+        is configured with.
+        """
+        if self._daemon is not None:
+            await self._daemon.reconfigure(self.config)
+        elif self._daemonless:
+            self._note(labels.REMOTE_CONFIG_UNCHANGED)
+        if self._client is not None and self._session_id:
+            await self._client.set_meta(
+                provider=self.config.defaults.provider, model=self.config.defaults.model
+            )
 
     # -------------------------------------------------------------------- mode
 
@@ -836,10 +916,9 @@ class StcodeApp(App[None]):
         if self._client is not None and self._session_id:
             self._push_mode(mode)
             return
-        self.config.defaults.approval_mode = mode
+        self._amend(approval_mode=mode)
         self._refresh_status()
         self._note(labels.mode_changed(mode))
-        self._persist()
 
     def _adopt_session(self, frame: dict[str, Any]) -> None:
         """Take what the daemon reports as the truth, and only then write it down."""
@@ -848,9 +927,8 @@ class StcodeApp(App[None]):
             self._session_id = session_id
         mode = str(frame.get("approval_mode", ""))
         if mode and mode != self.config.defaults.approval_mode:
-            self.config.defaults.approval_mode = mode  # type: ignore[assignment]
+            self._amend(approval_mode=mode)
             self._note(labels.mode_changed(mode))  # type: ignore[arg-type]
-            self._persist()
         self._effective = {
             "model": str(frame.get("model", "")),
             "provider": str(frame.get("provider", "")),
@@ -859,9 +937,27 @@ class StcodeApp(App[None]):
         self._refresh_status()
 
     def _persist(self) -> None:
-        """Only once a config file exists; skipping setup should not create one."""
+        """Only once a config file exists; skipping setup should not create one.
+
+        Writes `_stored`, never `config`: `config` is `_stored` with this run's flags
+        folded in, and saving that is how `--mode full-auto` used once becomes the mode
+        in the file forever.
+        """
         if config_exists(self._config_path):
-            save_config(self.config, self._config_path)
+            save_config(self._stored, self._config_path)
+
+    def _amend(self, **fields: Any) -> None:
+        """Record a change the *user* made, in both the live config and the stored one.
+
+        The split exists to keep command-line flags out of the file; a choice made in
+        the UI is the opposite case and belongs in both. Flags still win for this run —
+        they are reapplied on top — so `--mode plan` is not undone by a `/mode` that the
+        daemon then refuses.
+        """
+        for name, value in fields.items():
+            setattr(self.config.defaults, name, value)
+            setattr(self._stored.defaults, name, value)
+        self._persist()
 
     def _save_prefs(self) -> None:
         with contextlib.suppress(OSError):
@@ -891,6 +987,17 @@ class StcodeApp(App[None]):
         self._note(labels.theme_changed(preference))
 
     def _set_effort(self, effort: str) -> None:
+        """Change the effort, and remember it.
+
+        Both halves matter and they are different mechanisms. The `meta` record reaches
+        the session that is running — that is what `/effort` is *for*. Writing
+        `[defaults] reasoning_effort` is what makes it survive: without it the config
+        the CLI reads next time still says nothing, and the choice quietly reverts at
+        the next `stcode`, which is exactly what it looked like when this did only the
+        first half.
+        """
+        self._amend(reasoning_effort=effort)
+        self._refresh_status()
         if self._client is None or not self._session_id:
             self._error(labels.not_connected())
             return
@@ -907,21 +1014,39 @@ class StcodeApp(App[None]):
         provider = effective.get("provider") or defaults.provider
 
         text = Text()
+        if self._working:
+            frame = labels.SPINNER_FRAMES[self._spinner % len(labels.SPINNER_FRAMES)]
+            text.append(labels.working_status(frame), style=f"bold {PRIMARY}")
         text.append("model ", style="dim")
         text.append(model or labels.STATUS_NO_MODEL, style="bold" if model else "bold $warning")
         text.append("   provider ", style="dim")
         text.append(provider)
         text.append("   mode ", style="dim")
         text.append(mode, style=f"bold {labels.APPROVAL_MODE_COLOR.get(mode, 'white')}")
-        if effective.get("effort"):
+        effort = effective.get("effort") or defaults.reasoning_effort
+        if effort:
             text.append("   effort ", style="dim")
-            text.append(str(effective["effort"]))
+            text.append(str(effort))
         if self._daemonless:
             # The one shape where "which agent am I talking to" is a live question.
             text.append("   daemon ", style="dim")
             text.append(self._daemon_address())
         with contextlib.suppress(Exception):
             self.query_one("#status", Static).update(text)
+
+    def _effective_provider(self) -> str:
+        """What the session is actually using, falling back to the configured default.
+
+        The daemon is authoritative here as everywhere: after a `/model` the session's
+        provider and the config's can differ for one call, and the card should describe
+        the one the next request will go to.
+        """
+        effective = getattr(self, "_effective", {})
+        return str(effective.get("provider") or self.config.defaults.provider)
+
+    def _effective_effort(self) -> str:
+        effective = getattr(self, "_effective", {})
+        return str(effective.get("effort") or self.config.defaults.reasoning_effort)
 
     def _has_credential(self) -> bool:
         provider = self.config.providers.get(self.config.defaults.provider, ProviderConfig())
@@ -935,10 +1060,69 @@ class StcodeApp(App[None]):
         self.prompt.clear_text()
         if not text:
             return
-        if text.startswith("/"):
+        if text.startswith(labels.SHELL_PREFIX):
+            self._run_shell(text[1:].strip())
+        elif text.startswith("/"):
             self._run_command(text)
         else:
             self._send(text)
+
+    # ------------------------------------------------------------------- `!` shell
+
+    def _run_shell(self, command: str) -> None:
+        """Run one command here, in this terminal, and show what it printed.
+
+        **Nothing about this touches the agent.** It is not a tool call, it is not
+        approved, and it is not written to the session — so `!git status` before you
+        describe a change costs no context and leaves no record the model will later
+        read back as something it did. The transcript entry is a rule down the left for
+        exactly that reason: it has to be impossible to mistake for the agent's work.
+
+        It runs in *this* process's workspace, not the daemon's. In `--daemonless` those
+        are different machines, and `!` is always the near one — which is the honest
+        answer, because this is your shell and not the agent's.
+        """
+        if not command:
+            self._warn(labels.SHELL_NO_COMMAND)
+            return
+        entry = ShellOutput(command)
+        self.transcript.add(entry)
+        self._settle()
+        self._shell_worker(entry, command)
+
+    @work(thread=True, group="shell")
+    def _shell_worker(self, entry: ShellOutput, command: str) -> None:
+        """In a thread, because `subprocess.run` blocks and the turn behind it must not.
+
+        Bounded by `shell_timeout` from `ui.toml` — a `!` that hangs would otherwise
+        hold a worker open for as long as the command felt like running, and killing it
+        is a message rather than a mystery.
+        """
+        timeout = clamp_shell_timeout(self.prefs.shell_timeout)
+        # `self._cwd`, deliberately, and not the daemon's: in `--daemonless` the agent's
+        # workspace is on another machine and there is nothing here to run a command in.
+        try:
+            finished = subprocess.run(
+                command,
+                shell=True,  # noqa: S602 — the whole feature is "run this in my shell"
+                cwd=self._cwd if self._cwd.is_dir() else None,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            output, code = labels.shell_timed_out(timeout), 124
+        except (OSError, ValueError) as exc:
+            output, code = labels.shell_failed(exc), 1
+        else:
+            # stderr under stdout rather than interleaved: the ordering between two
+            # pipes is not something we can recover, and pretending otherwise would
+            # invent a sequence the command never produced.
+            parts = [part for part in (finished.stdout, finished.stderr) if part.strip()]
+            output, code = "\n".join(part.rstrip() for part in parts), finished.returncode
+        self.call_from_thread(entry.finish, output, code)
+        self.call_from_thread(self._settle)
 
     def _run_command(self, raw: str) -> None:
         name, _, argument = raw[1:].partition(" ")
@@ -951,8 +1135,19 @@ class StcodeApp(App[None]):
             case "model":
                 self._open_settings(first_run=False)
             case "effort":
+                # Rows for the provider actually in force, so a rung this one clamps
+                # says so rather than silently doing what the rung below it does.
+                rows = labels.effort_rows(self._effective_provider())
+                current = self._effective_effort()
                 self._show_card(
-                    Card(labels.CARD_EFFORT, labels.EFFORT_ROWS, footer=labels.CARD_FOOTER_CHOOSE)
+                    Card(
+                        labels.CARD_EFFORT,
+                        rows,
+                        footer=labels.CARD_FOOTER_CHOOSE,
+                        highlighted=next(
+                            (index for index, row in enumerate(rows) if row[0] == current), 0
+                        ),
+                    )
                 )
             case "mode" if argument:
                 mode = parse_approval_mode(argument)
@@ -980,7 +1175,7 @@ class StcodeApp(App[None]):
                 servers = list(self._info.get("mcp", []))
                 self._show_card(
                     Card(
-                        "mcp",
+                        labels.CARD_MCP,
                         labels.mcp_rows(servers) or [(labels.NO_MCP_SERVERS, "")],
                         footer=labels.CARD_FOOTER_CLOSE,
                         selectable=False,
@@ -990,16 +1185,43 @@ class StcodeApp(App[None]):
                 skills = list(self._info.get("skills", []))
                 self._show_card(
                     Card(
-                        "skills",
+                        labels.CARD_SKILLS,
                         labels.skill_rows(skills) or [(labels.NO_SKILLS, "")],
                         footer=labels.CARD_FOOTER_CLOSE,
                         selectable=False,
                     )
                 )
+            case "token" | "tokens":
+                self._show_tokens()
             case "help":
                 self._help_card()
             case _:
                 self._error(labels.unknown_command(name))
+
+    @work(group="info")
+    async def _show_tokens(self) -> None:
+        """What this session has spent, asked for fresh.
+
+        Fetched rather than remembered: the totals live in the session's `usage`
+        records, one per model call, and the daemon is the only thing that has all of
+        them — a client that attached halfway through watched half a conversation.
+        """
+        if self._client is None or not self._session_id:
+            self._error(labels.not_connected())
+            return
+        try:
+            self._info = await self._client.info()
+        except Exception as exc:  # noqa: BLE001 — a card that cannot be filled says why
+            self._error(labels.daemon_failed(exc))
+            return
+        self._show_card(
+            Card(
+                labels.CARD_TOKENS,
+                labels.token_rows(dict(self._info.get("usage", {}))),
+                footer=labels.TOKEN_FOOTER,
+                selectable=False,
+            )
+        )
 
     @work(group="sessions")
     async def _pick_session(self) -> None:
@@ -1067,7 +1289,39 @@ class StcodeApp(App[None]):
         if self._client is None or not self._session_id:
             self._error(labels.not_connected())
             return
+        self._start_working()
         self._push(text)
+
+    # ------------------------------------------------------------------ working
+
+    def _start_working(self) -> None:
+        """Spin, from the moment the message is queued.
+
+        The first token can be seconds away — a cold local model, a long system prompt,
+        a retry — and until it arrives the screen is identical to one where nothing
+        happened. A spinner in the status line is the difference between "it is
+        thinking" and "did that send?", which is the only question anybody has in that
+        gap.
+        """
+        if self._working:
+            return
+        self._working = True
+        self._spinner = 0
+        self._spinner_timer = self.set_interval(SPINNER_INTERVAL, self._tick_spinner)
+        self._refresh_status()
+
+    def _tick_spinner(self) -> None:
+        self._spinner += 1
+        self._refresh_status()
+
+    def _stop_working(self) -> None:
+        if not self._working:
+            return
+        self._working = False
+        if self._spinner_timer is not None:
+            self._spinner_timer.stop()
+            self._spinner_timer = None
+        self._refresh_status()
 
     @work(group="push")
     async def _push(self, text: str) -> None:
@@ -1149,4 +1403,4 @@ def run(
     ).run()
 
 
-__all__ = ["FILE_LIMIT", "StcodeApp", "run"]
+__all__ = ["FILE_LIMIT", "SPINNER_INTERVAL", "StcodeApp", "run"]

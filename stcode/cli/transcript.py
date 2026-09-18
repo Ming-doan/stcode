@@ -1,12 +1,14 @@
 """
-The transcript — five shapes, each one because it has to be told apart at a glance.
+The transcript — seven shapes, each one because it has to be told apart at a glance.
 
 | | |
 | --- | --- |
 | `───── attached to … ─────` | the platform acted. Not the model talking |
+| a tinted block | what **you** said |
 | `│ quoted, dim` | thinking. Capped at the last six lines while it streams |
 | plain text | the model's answer |
-| a box | a tool call and its result |
+| a green or red box | a tool call and its result — the colour *is* the outcome |
+| a rule down the left | a `!` command you ran. Never in the session |
 | a tinted full-width box | a warning or an error |
 
 A sub-agent renders in exactly the same shapes, with its name in a left gutter and its
@@ -24,23 +26,34 @@ import zlib
 from typing import Any, Mapping
 
 from rich.console import RenderableType
+from rich.panel import Panel
 from rich.rule import Rule
-from rich.table import Table
 from rich.text import Text
 from rich import box
 from textual.containers import Horizontal, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Static
 
-from stcode.cli.theme import brand_text
+from stcode.cli.theme import brand_text, error_text
 
 THINKING_LINES = 6
 """How much reasoning stays on screen while it streams. Six is what fits without the
 answer sliding off the bottom; the rest is scrollable, and all of it is in the session."""
 
-TOOL_RESULT_LINES = 6
-"""Lines of a tool result kept in the box. The full value is in the session, and
-`ToolFinished` only carries 240 characters of it anyway."""
+TOOL_RESULT_LINES = 2
+"""Lines of a tool result kept in the box.
+
+Two, because the box is a *receipt* and not a viewer: the interesting thing about a
+finished tool call is that it ran and whether it worked, and a turn with six calls each
+showing six lines is a screen of output with the conversation pushed off the top. The
+full value is in the session, and `ToolFinished` only carries 240 characters of it
+anyway.
+"""
+
+SHELL_OUTPUT_LINES = 200
+"""Lines of a `!` command's output kept on screen. Generous, because you asked for this
+one by hand — but bounded, because `!cat` on the wrong file should not be how a session
+scrolls away."""
 
 ARGUMENT_CHARS = 160
 
@@ -105,36 +118,71 @@ def platform_rule(text: str) -> RenderableType:
 
 
 def tool_render(
-    name: str, arguments: Mapping[str, Any], *, result: str = "", ok: bool = True
+    name: str,
+    arguments: Mapping[str, Any],
+    *,
+    result: str = "",
+    ok: bool = True,
+    finished: bool = True,
+    colour: str = "",
 ) -> RenderableType:
-    """One tool call as a box: the name, a gutter, the arguments, then the result.
+    """One tool call as a small box: its name in the heading, arguments and result under.
 
-    A table with a border and two columns, so the gutter is the column divider rather
-    than characters counted by hand at every terminal width.
+    **The colour carries the outcome, so nothing else has to.** Green when it worked,
+    red when it did not, dim while it is still running — which means no `✗` to read, no
+    second word for the same fact, and a turn you can skim by colour alone. The name is
+    the box's heading rather than a first column, so a long `bash` command no longer
+    decides how wide the name column is.
+
+    `colour` is the theme's, resolved by the caller: a Rich style string cannot say
+    `$success`. Left empty it falls back to the plain ANSI names, which is what tests
+    and any non-Textual caller get.
     """
-    table = Table(
-        box=box.ROUNDED,
-        show_header=False,
-        expand=True,
-        padding=(0, 1),
-        border_style="red" if not ok else "dim",
-    )
-    table.add_column(no_wrap=True, justify="left", style="bold" if ok else "bold red")
-    table.add_column(overflow="fold", ratio=1)
-    table.add_row(Text(name if ok else f"✗ {name}"), Text(format_arguments(arguments)))
+    if not colour:
+        colour = "dim" if not finished else ("green" if ok else "red")
+
+    body = Text(format_arguments(arguments), style="dim")
     for line in _result_lines(result):
-        table.add_row(Text(""), Text(line, style="" if ok else "red"))
-    return table
+        body.append("\n")
+        body.append(line, style="dim")
+    return Panel(
+        body,
+        title=Text(name, style=f"bold {colour}"),
+        title_align="left",
+        border_style=colour,
+        box=box.ROUNDED,
+        padding=(0, 1),
+        expand=True,
+    )
 
 
-def _result_lines(result: str) -> list[str]:
+def _result_lines(result: str, limit: int = TOOL_RESULT_LINES) -> list[str]:
     if not result.strip():
         return []
     lines = [line.rstrip() for line in result.strip().splitlines()]
-    if len(lines) <= TOOL_RESULT_LINES:
+    if len(lines) <= limit:
         return lines
-    hidden = len(lines) - TOOL_RESULT_LINES
-    return [*lines[:TOOL_RESULT_LINES], f"… {hidden} more line{'s' if hidden > 1 else ''}"]
+    return [*lines[:limit], "…"]
+
+
+def shell_render(command: str, output: str, *, exit_code: int = 0) -> RenderableType:
+    """A `!` command and what it printed. The command bold, the output plain.
+
+    No border of its own — the widget draws the left rule in CSS, where it can be the
+    theme's colour. This is only the contents.
+    """
+    text = Text()
+    text.append(f"! {command}", style="bold")
+    if exit_code:
+        text.append(f"  (exit {exit_code})", style="bold")
+    lines = output.rstrip().splitlines()
+    if len(lines) > SHELL_OUTPUT_LINES:
+        hidden = len(lines) - SHELL_OUTPUT_LINES
+        lines = [*lines[:SHELL_OUTPUT_LINES], f"… {hidden} more lines, not shown"]
+    for line in lines:
+        text.append("\n")
+        text.append(line.rstrip())
+    return text
 
 
 # ---- widgets --------------------------------------------------------------------
@@ -213,16 +261,59 @@ class ToolCall(Static):
         self._arguments = dict(arguments)
         self._result = ""
         self._ok = True
+        self._finished = False
 
     def on_mount(self) -> None:
         self._refresh()
 
     def finish(self, *, ok: bool, preview: str) -> None:
-        self._ok, self._result = ok, preview
+        self._ok, self._result, self._finished = ok, preview, True
         self._refresh()
 
     def _refresh(self) -> None:
-        self.update(tool_render(self._name, self._arguments, result=self._result, ok=self._ok))
+        self.update(
+            tool_render(
+                self._name,
+                self._arguments,
+                result=self._result,
+                ok=self._ok,
+                finished=self._finished,
+                colour=self._colour(),
+            )
+        )
+
+    def _colour(self) -> str:
+        """The theme's green or red — resolved here because only a mounted widget can
+        see which theme is in force."""
+        if not self._finished:
+            return "dim"
+        dark = self.app.current_theme.dark
+        return brand_text(dark) if self._ok else error_text(dark)
+
+
+class ShellOutput(Static):
+    """A `!` command and its output, marked by a rule down the left.
+
+    A rule rather than a box, because this is the one thing on the screen that is
+    neither the model's nor the platform's: **you** ran it, and none of it is in the
+    session. It should not look like anything the agent did.
+    """
+
+    def __init__(self, command: str) -> None:
+        super().__init__(classes="entry shell", markup=False)
+        self._command = command
+        self._output = ""
+        self._exit_code = 0
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def finish(self, output: str, exit_code: int) -> None:
+        self._output, self._exit_code = output, exit_code
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self.update(shell_render(self._command, self._output, exit_code=self._exit_code))
 
 
 class PlatformNote(Static):
@@ -292,18 +383,21 @@ class Transcript(VerticalScroll):
 __all__ = [
     "AGENT_COLOURS",
     "ARGUMENT_CHARS",
+    "SHELL_OUTPUT_LINES",
     "THINKING_LINES",
     "TOOL_RESULT_LINES",
     "AgentRow",
     "Message",
     "Notice",
     "PlatformNote",
+    "ShellOutput",
     "Thinking",
     "ToolCall",
     "Transcript",
     "agent_colour",
     "format_arguments",
     "platform_rule",
+    "shell_render",
     "thinking_tail",
     "tool_render",
 ]

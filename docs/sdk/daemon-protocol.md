@@ -38,7 +38,7 @@ async with await DaemonClient.connect(config) as client:
 | `answer` | `execution_id`, `text` | answers a `question` |
 | `set_mode` | `mode` | reaches the **live** session, not just later ones |
 | `set_meta` | `model`, `provider`, `reasoning_effort` | appends a `meta` record; the agent reads it before the next model call |
-| `info` | — | skills, MCP servers, tool names and paths, as the **daemon's** machine sees them |
+| `info` | — | skills, MCP servers, tool names, paths and this session's token totals, as the **daemon's** machine sees them |
 
 `session` is optional on everything. A connection remembers the last session it created
 or attached to. The field exists because one connection may attach to several at once
@@ -53,7 +53,7 @@ and then has to say which it means.
 | `history` | the transcript so far, sent on attach before the live stream is joined |
 | `approval_request` | a tool is waiting on a human |
 | `question` | `ask_user_question` is waiting |
-| `info` | answer to `info` |
+| `info` | answer to `info`. `usage` on it is the session's totals, summed from its `usage` records — one per model call, which is what `turn_finished` cannot give you |
 | `progress` | a line from a long-running tool. Advisory; nothing is recorded |
 | `error` | a protocol- or daemon-level failure |
 

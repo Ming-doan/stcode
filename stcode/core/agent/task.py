@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field
 
+from stcode.core.agent.events import AgentFailed, TurnFinished
 from stcode.core.harness.approvals import ToolPermission
 from stcode.core.harness.context import HarnessContext
 from stcode.core.harness.tools.base import Runtime, Tool, ToolError, tool
@@ -99,7 +100,19 @@ def make_task_tool(parent: "Agent") -> Tool[Any]:
             # with this sub-agent's name. Out the side rather than into the parent's
             # stream: the parent's events are its turn, each with a record behind it,
             # and the child's belong to the child's transcript.
-            return await child.result(prompt, on_event=lambda event: runtime.emit(name, event))
+            answer = ""
+            async for event in child.run(prompt):
+                runtime.emit(name, event)
+                if isinstance(event, TurnFinished):
+                    answer = event.text
+                elif isinstance(event, AgentFailed):
+                    # As an error, not as text. A sub-agent that never reached the model
+                    # returns a sentence beginning "the sub-agent did not finish", and a
+                    # parent handed that as a *successful* result reads it as findings
+                    # and writes them up — which is how five failed scouts become a
+                    # confident report about five repositories nobody looked at.
+                    raise ToolError(f"{name} did not finish: {event.message}")
+            return answer
 
     return task
 

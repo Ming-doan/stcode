@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from stcode.core.common.tools import ToolDefinition
 
 __all__ = [
+    "REASONING_EFFORTS",
     "ContentBlock",
     "Message",
     "MessageStop",
@@ -40,6 +41,21 @@ ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "
 narrower scale (Anthropic has no `none`/`minimal`; Gemini's `thinking_level`
 tops out at `high`) clamp or remap at their boundary — see each provider's
 `stream()` docstring."""
+
+REASONING_EFFORTS: tuple[ReasoningEffort, ...] = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+)
+"""The same rungs as a value, in order, for anything that has to *offer* them.
+
+Here rather than in the UI because the scale is a provider fact: a list written out a
+second time in `cli/labels.py` is a list that drifts the next time a rung is added.
+"""
 
 StopReason = Literal[
     "end_turn",

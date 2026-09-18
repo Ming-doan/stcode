@@ -14,7 +14,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from stcode.cli.prefs import UiPrefs, load_prefs, save_prefs, ui_path
+from stcode.cli.prefs import (
+    DEFAULT_SHELL_TIMEOUT,
+    MAX_SHELL_TIMEOUT,
+    UiPrefs,
+    clamp_shell_timeout,
+    load_prefs,
+    save_prefs,
+    ui_path,
+)
 
 
 def test_preferences_round_trip(tmp_path: Path) -> None:
@@ -89,3 +97,29 @@ def test_the_file_sits_next_to_whichever_config_is_in_force(
         assert ui_path() == tmp_path / "ui.toml"
     finally:
         del os.environ["STCODE_CONFIG"]
+
+
+# ---- the ! timeout ----------------------------------------------------------------
+
+
+def test_the_shell_timeout_is_clamped_to_something_the_ui_can_honour() -> None:
+    """`!` runs on the UI's event loop budget. A hand-edited hour is a frozen terminal,
+    and a hand-edited zero is a command that can never finish."""
+    assert clamp_shell_timeout(45) == 45
+    assert clamp_shell_timeout(3600) == MAX_SHELL_TIMEOUT
+    assert clamp_shell_timeout(0) == 1.0
+
+
+def test_a_nonsense_shell_timeout_reads_as_the_default(tmp_path: Path) -> None:
+    """Same rule as the theme: one bad key is no reason to forget the rest of the file."""
+    path = tmp_path / "ui.toml"
+    path.write_text('theme = "light"\nshell_timeout = "soon"\n')
+    prefs = load_prefs(path)
+    assert prefs.shell_timeout == DEFAULT_SHELL_TIMEOUT
+    assert prefs.theme == "light"
+
+
+def test_the_shell_timeout_survives_a_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "ui.toml"
+    save_prefs(UiPrefs(shell_timeout=30.0), path)
+    assert load_prefs(path).shell_timeout == 30.0

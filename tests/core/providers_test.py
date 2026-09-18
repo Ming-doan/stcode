@@ -2,13 +2,16 @@
 Test does LLM Provider works
 """
 
+import asyncio
+import contextlib
 import os
+from contextlib import aclosing
 
 import anthropic
 import httpx2
 import openai
 import pytest
-from fakes import fake_provider
+from fakes import fake_provider, says
 from dotenv import load_dotenv
 from google.genai import errors as genai_errors
 
@@ -17,6 +20,7 @@ from stcode.core.providers import (
     PROVIDER_INFO,
     PROVIDERS,
     AnthropicProvider,
+    BaseModelProvider,
     GoogleGenAIProvider,
     LLMGateway,
     OpenAIProvider,
@@ -529,3 +533,121 @@ async def test_the_openai_stream_is_closed_even_though_sse_never_reaches_eof(mon
 
     assert closed == [True]
     assert isinstance(events[-1], MessageStop)
+
+
+# ---- in-flight cap ---------------------------------------------------------------
+#
+# The failure this prevents: five parallel `task` calls become five simultaneous
+# completions against one endpoint. A hosted API absorbs that; a local one serving a
+# 27b model queues them and then drops the ones that waited too long, which arrives as
+# a 503 that retrying cannot fix.
+
+
+class _CountingProvider(BaseModelProvider):
+    """Records how many streams are open at the same moment."""
+
+    def __init__(self, api_key=None, base_url=None) -> None:
+        super().__init__(api_key, base_url)
+        self.live = 0
+        self.peak = 0
+
+    async def list_models(self):
+        return ["m"]
+
+    async def aclose(self) -> None:
+        return None
+
+    async def stream(self, messages, *, model, **_kwargs):
+        self.live += 1
+        self.peak = max(self.peak, self.live)
+        try:
+            # A real request suspends here. Without a suspension point the whole stream
+            # runs between two scheduler ticks and nothing ever overlaps, which would
+            # make this double report "capped" no matter what the gateway did.
+            await asyncio.sleep(0.02)
+            for event in says("ok"):
+                yield event
+        finally:
+            self.live -= 1
+
+
+@contextlib.contextmanager
+def _counting_provider():
+    instance = _CountingProvider()
+    previous = PROVIDERS.get("counting")
+    PROVIDERS["counting"] = lambda api_key=None, base_url=None: instance  # type: ignore[assignment]
+    try:
+        yield instance
+    finally:
+        if previous is None:
+            PROVIDERS.pop("counting", None)
+        else:
+            PROVIDERS["counting"] = previous
+
+
+async def _five(gateway) -> None:
+    """Five completions at once — one `task` fan-out, which is where this bites."""
+    await asyncio.gather(
+        *(
+            _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low"))
+            for _ in range(5)
+        )
+    )
+
+
+async def test_max_concurrent_serialises_requests_to_one_endpoint():
+    with _counting_provider() as provider:
+        gateway = _gateway(
+            providers={"counting": ProviderConfig(api_key="k", max_concurrent=1)},
+            routing={"low": RouteConfig(provider="counting", model="m")},
+        )
+        await _five(gateway)
+    assert provider.peak == 1, f"{provider.peak} completions were open at once, not 1"
+
+
+async def test_no_cap_means_no_cap():
+    """0 is the default and has to stay free: a hosted API wants the parallelism."""
+    with _counting_provider() as provider:
+        gateway = _gateway(
+            providers={"counting": ProviderConfig(api_key="k")},
+            routing={"low": RouteConfig(provider="counting", model="m")},
+        )
+        await _five(gateway)
+    assert provider.peak > 1
+
+
+async def test_an_abandoned_stream_releases_its_slot():
+    """Every caller wraps iteration in `aclosing`, and a slot held by a stream nobody
+    is reading is a deadlock rather than a slow turn."""
+    with _counting_provider() as provider:
+        gateway = _gateway(
+            providers={"counting": ProviderConfig(api_key="k", max_concurrent=1)},
+            routing={"low": RouteConfig(provider="counting", model="m")},
+        )
+        async with aclosing(
+            gateway.stream([Message(role="user", content="hi")], difficulty="low")
+        ) as stream:
+            await stream.__anext__()
+        # If the first one kept the slot this never returns.
+        await asyncio.wait_for(
+            _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low")), 2.0
+        )
+
+
+async def test_reconfigure_reaches_a_gateway_someone_else_is_holding():
+    """`/model` has to change the key an already-running agent uses, and that agent
+    holds this object rather than the daemon that built it."""
+    with fake_provider() as fake:
+        gateway = _gateway(providers={"fake": ProviderConfig(api_key="old")})
+        await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low"))
+        assert fake.last.api_key == "old"
+
+        await gateway.reconfigure(
+            providers={"fake": ProviderConfig(api_key="new")},
+            routing={"low": RouteConfig(provider="fake", model="m2")},
+        )
+        await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low"))
+
+    assert fake.last.api_key == "new", "the cached client outlived the credentials"
+    assert fake.last.model == "m2"
+    assert fake.closed, "the client built around the old key was not closed"

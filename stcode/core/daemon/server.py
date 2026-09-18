@@ -182,6 +182,24 @@ class Daemon:
             )
         return self._gateway
 
+    async def reconfigure(self, config: GatewayConfig) -> None:
+        """Adopt a changed configuration without dropping the sessions it is holding.
+
+        What `/model` needs in the shape where the UI started this daemon: a key or a
+        base URL typed into the setup screen has to reach the agent already running, and
+        that agent holds a reference to the gateway object rather than to this daemon.
+        So the gateway is reconfigured in place and the sessions are untouched.
+
+        What it deliberately does not do is restart anything. `[daemon]` and `[session]`
+        describe a socket that is already bound and a directory transcripts are already
+        being written to; changing either is a restart, not a reload.
+        """
+        self.config = config
+        if self._gateway is not None:
+            await self._gateway.reconfigure(
+                providers=config.providers, routing=config.routing, retry=config.retry
+            )
+
     async def create_session(
         self,
         *,

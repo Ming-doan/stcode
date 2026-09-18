@@ -704,3 +704,42 @@ def test_an_unwatched_agent_forwards_nothing_and_does_not_care(
     events = run(drain(parent, "look"))
     assert isinstance(events[-1], TurnFinished)
     run(parent.aclose())
+
+
+# ---- a sub-agent that never finished ---------------------------------------------
+
+
+def test_a_failed_sub_agent_is_an_error_not_a_paragraph(tmp_path: Path, run: Any) -> None:
+    """The failure: five scouts never reach the model, each returns a sentence that
+    begins "the sub-agent did not finish", and the parent — handed five *successful*
+    tool results — reads them as findings and writes a confident report about five
+    repositories nobody looked at.
+
+    The child's turn is scripted to raise, which is what an overloaded endpoint
+    dropping a queued request looks like from in here.
+    """
+    parent = build(
+        tmp_path,
+        [calls_tool("c1", "task", prompt="Investigate.", name="scout"), says("noted")],
+    )
+    parent.enable_task()
+
+    gateway = parent.gateway
+    original = gateway.stream
+
+    def stream(messages: Any, **options: Any) -> Any:
+        # The second call is the child's — the parent has already asked for the tool.
+        if len(gateway.calls) >= 1:  # type: ignore[attr-defined]
+            async def fails() -> Any:
+                raise RuntimeError("503 Service Unavailable")
+                yield  # pragma: no cover
+            return fails()
+        return original(messages, **options)
+
+    gateway.stream = stream  # type: ignore[assignment,method-assign]
+
+    events = run(drain(parent, "investigate the repos"))
+    finished = next(e for e in events if isinstance(e, ToolFinished) and e.name == "task")
+    assert not finished.ok, "a sub-agent that never reached the model reported success"
+    assert "did not finish" in finished.preview
+    run(parent.aclose())

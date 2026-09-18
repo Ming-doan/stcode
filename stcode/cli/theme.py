@@ -93,6 +93,12 @@ def brand_text(dark: bool) -> str:
     return PRIMARY if dark else BRAND_TEXT_ON_LIGHT
 
 
+def error_text(dark: bool) -> str:
+    """The theme's red, for the same reason `brand_text` exists: a Rich style string is
+    not CSS and cannot say `$error`."""
+    return str(STCODE_DARK.error if dark else STCODE_LIGHT.error)
+
+
 def theme_name_for(preference: ThemePreference, *, detected: TerminalMode) -> str:
     """Which registered theme to use. An explicit choice always beats detection."""
     if preference == "dark":
@@ -209,6 +215,7 @@ __all__ = [
     "background_is_light",
     "brand_text",
     "detect_terminal_mode",
+    "error_text",
     "mode_from_colorfgbg",
     "theme_name_for",
 ]

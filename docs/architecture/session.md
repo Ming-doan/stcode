@@ -103,6 +103,17 @@ Three fields are honoured: `model`, `provider`, `reasoning_effort`. An override 
 `model` but no `provider` keeps the difficulty tier's provider and credentials and swaps
 only the model name — that is the gateway's existing rule, not a special case here.
 
+An override chosen **before the first message** has no second record to live in: the
+session has no file yet, so `set_meta` folds it into the pending first one rather than
+writing a file whose first two lines are both `meta`. It is still an override, and
+`overrides()` still returns it. Reading it out of the records alone would lose it, and
+what that looks like from outside is `/effort` chosen one message too early applying to
+no model call at all.
+
+`[defaults] reasoning_effort` is the layer under all of this: the agent folds it in
+beneath whatever the session has overridden, so the config's answer applies from the
+first call and a `/effort` during the conversation replaces it.
+
 **Sub-agents do not inherit overrides.** `child()` copies from `meta()` alone, so
 `task(difficulty="low")` still routes to the cheap tier. An override that silently
 upgraded every scout to the expensive model would make difficulty tiers decorative.

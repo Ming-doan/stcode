@@ -147,10 +147,18 @@ be forwarded as they happen; the return value is still the final message and not
 else. A watching client therefore sees the sub-agent work, and the model still only gets
 the paragraph.
 
-Three rules, each with a failure behind it:
+Four rules, each with a failure behind it:
 
 * **`max_depth = 1`.** Sub-agents get neither `task` nor `repl`. Recursion plus no budget
   is a fork bomb.
+* **A child that did not finish is a tool *error*.** `AgentFailed` from the child raises
+  `ToolError` in the parent, so the result arrives with `is_error` set. Returning the
+  failure as ordinary text is worse than it sounds: five scouts that never reached the
+  model each hand back a sentence beginning "the sub-agent did not finish", the parent
+  is given five *successful* tool results, and it reads them as findings and writes a
+  confident report about five repositories nobody looked at. That is a real trajectory,
+  and what caused it was an endpoint dropping five simultaneous requests
+  ([providers.md](providers.md#how-many-at-once)).
 * **Its tool output never enters the parent's context** — only its final message does.
   That is the entire economic argument for delegating: the sub-agent reads the twenty
   files, you get the paragraph.

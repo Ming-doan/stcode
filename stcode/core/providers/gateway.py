@@ -17,6 +17,7 @@ that knows how the on-disk config maps onto these shapes and loads them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import random
@@ -57,6 +58,18 @@ class ProviderConfig(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     base_url_env: str | None = None
+    max_concurrent: int = 0
+    """How many requests this endpoint will take at once. 0 means no cap.
+
+    The cap belongs to the *endpoint*, not to an agent: one daemon shares one gateway
+    across every session, every sub-agent and the supervisor, so five parallel `task`
+    calls are five simultaneous completions against the same server. A hosted API
+    absorbs that. A local one serving a 27b model on one GPU does not — it queues them
+    and then drops the ones that waited too long, which reaches the agent as a 503 the
+    retry policy cannot fix because nothing was transient about it.
+
+    Set it to 1 for Ollama or llama.cpp and the same five calls run one after another.
+    """
 
 
 class RouteConfig(BaseModel):
@@ -106,6 +119,10 @@ _RETRYABLE_OPENAI: tuple[type[Exception], ...] = (
     openai.InternalServerError,
 )
 
+
+_NO_LIMIT = ProviderConfig()
+"""Stand-in for a provider with no entry in `[providers]` — routing may still name it
+through a tier's own credentials, and an absent section is not a cap of zero."""
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
@@ -158,10 +175,44 @@ class LLMGateway:
         }
         self._retry = _coerce(RetryConfig, retry) if retry is not None else RetryConfig()
         self._provider_instances: dict[tuple[str, str | None, str | None], BaseModelProvider] = {}
+        self._limits: dict[tuple[str, int], asyncio.Semaphore] = {}
+        """One semaphore per `(provider, cap)`, shared by everything holding this
+        gateway — which is the point. Keyed by the cap as well as the name so lowering
+        it in `reconfigure` makes a new, smaller one rather than a stale wide one."""
+
+    async def reconfigure(
+        self,
+        *,
+        providers: Mapping[str, ProviderConfig | dict[str, Any]],
+        routing: Mapping[Difficulty, RouteConfig | dict[str, Any]],
+        retry: RetryConfig | dict[str, Any] | None = None,
+    ) -> None:
+        """Replace this gateway's configuration **in place**, keeping its identity.
+
+        In place because every agent in the daemon holds a reference to this object: a
+        new key or base URL typed into `/model` has to reach the session already
+        running, and swapping the daemon's gateway for a fresh one would leave that
+        session streaming against the old credentials until it ended.
+
+        The cached clients are closed and dropped, since a client is built around the
+        key and base URL that are being replaced.
+        """
+        await self._close_clients()
+        self._providers_cfg = {
+            name: _coerce(ProviderConfig, cfg) for name, cfg in providers.items()
+        }
+        self._routing = {
+            difficulty: _coerce(RouteConfig, route) for difficulty, route in routing.items()
+        }
+        if retry is not None:
+            self._retry = _coerce(RetryConfig, retry)
 
     async def aclose(self) -> None:
         """Close every cached provider client. They are reused across `stream()` calls
         and retries, so call this only when tearing the gateway down."""
+        await self._close_clients()
+
+    async def _close_clients(self) -> None:
         for instance in self._provider_instances.values():
             await instance.aclose()
         self._provider_instances.clear()
@@ -222,6 +273,23 @@ class LLMGateway:
             "[routing.medium] section to your config."
         )
 
+    def _limiter(self, provider: str) -> "asyncio.Semaphore | contextlib.AbstractAsyncContextManager[Any]":
+        """The in-flight cap for one provider, or a no-op when it has none.
+
+        Built lazily rather than in `__init__`: a gateway is routinely constructed
+        outside a running loop (the daemon builds one before it binds), and a semaphore
+        is only ever awaited from inside one.
+        """
+        cap = self._providers_cfg.get(provider, _NO_LIMIT).max_concurrent
+        if cap <= 0:
+            return contextlib.nullcontext()
+        key = (provider, cap)
+        limiter = self._limits.get(key)
+        if limiter is None:
+            limiter = asyncio.Semaphore(cap)
+            self._limits[key] = limiter
+        return limiter
+
     async def list_models(self, provider: str) -> list[str]:
         return await self._get_provider(provider, None, None, None).list_models()
 
@@ -270,22 +338,26 @@ class LLMGateway:
             "gen_ai.request.max_tokens": max_tokens,
             "stcode.difficulty": difficulty,
         }
-        with trace.span(f"chat {model_name}", kind="client", attributes=attributes) as recorder:
-            async for event in self._stream_with_retry(
-                provider_instance,
-                messages,
-                recorder,
-                model=model_name,
-                system=system,
-                tools=tools,
-                max_tokens=max_tokens,
-                reasoning_effort=reasoning_effort,
-                temperature=temperature,
-                top_p=top_p,
-                stop=stop,
-                parallel_tool_calls=parallel_tool_calls,
-            ):
-                yield event
+        # Held for the whole completion, not just the request: the point is how many
+        # streams the endpoint is serving at once. Every caller wraps its iteration in
+        # `aclosing`, so abandoning a stream still releases this.
+        async with self._limiter(provider_name):
+            with trace.span(f"chat {model_name}", kind="client", attributes=attributes) as recorder:
+                async for event in self._stream_with_retry(
+                    provider_instance,
+                    messages,
+                    recorder,
+                    model=model_name,
+                    system=system,
+                    tools=tools,
+                    max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stop=stop,
+                    parallel_tool_calls=parallel_tool_calls,
+                ):
+                    yield event
 
     async def _stream_with_retry(
         self,

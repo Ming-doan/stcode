@@ -68,8 +68,8 @@ def test_filtering_ignores_case() -> None:
 
 
 def test_every_documented_command_exists_exactly_once() -> None:
-    """The guide lists eleven and says they are the whole surface. A twelfth that only
-    exists in code is a command nobody can find."""
+    """The guide lists twelve and says they are the whole surface. A thirteenth that
+    only exists in code is a command nobody can find."""
     names = [name for name, _ in COMMANDS]
     assert names == sorted(set(names), key=names.index), "a command is listed twice"
     assert set(names) == {
@@ -77,6 +77,7 @@ def test_every_documented_command_exists_exactly_once() -> None:
         "/effort",
         "/mode",
         "/theme",
+        "/token",
         "/sessions",
         "/connect",
         "/mcp",

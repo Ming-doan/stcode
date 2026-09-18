@@ -65,11 +65,11 @@ def filter_rows(rows: Sequence[Row], query: str) -> list[Row]:
     The label only, and that is the interesting part. Searching the descriptions too
     looks generous and reads as noise: typing `/mod` would offer `/effort`, whose
     description happens to say "how hard the model should think". What you are typing
-    is a name, so a name is what it matches — and `?` already lists all eleven with
+    is a name, so a name is what it matches — and `?` already lists all twelve with
     their descriptions for the times you do not know the name.
 
     Substring, not fuzzy. The fuzzy command palette was removed on purpose: two ways to
-    reach the same eleven commands is one way for them to disagree.
+    reach the same twelve commands is one way for them to disagree.
     """
     if not query:
         return list(rows)
@@ -187,22 +187,35 @@ class Card(Vertical):
 
 
 class CardZone(Vertical):
-    """The strip between the transcript and the input. Holds one card, or nothing."""
+    """The strip between the transcript and the input. Holds one card, or nothing.
+
+    **`current` is a field, not a query.** Textual removes children on the message pump,
+    so the DOM still holds the old card for a tick after `clear()` — and the caller that
+    clears one card in order to show the next runs inside that tick. Asking the DOM
+    there answers "yes, a card is open" about a card that is already on its way out, and
+    the next one never gets shown: the second of two parallel approval requests sits in
+    the queue forever while the turn waits on an answer nobody can give.
+    """
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 — textual's name
+        super().__init__(id=id)
+        self._current: Card | None = None
 
     def show(self, card: Card) -> Card:
         self.remove_children()
         self.mount(card)
+        self._current = card
         self.display = True
         return card
 
     def clear(self) -> None:
         self.remove_children()
+        self._current = None
         self.display = False
 
     @property
     def current(self) -> Card | None:
-        cards = self.query(Card)
-        return cards.first(Card) if cards else None
+        return self._current
 
 
 __all__ = ["LABEL_WIDTH", "TRIGGERS", "VISIBLE_ROWS", "Card", "CardZone", "filter_rows", "token_trigger"]

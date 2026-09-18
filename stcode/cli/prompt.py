@@ -3,11 +3,19 @@ The prompt — a text area that keeps focus while a card is open.
 
 Two jobs beyond editing text:
 
-**Send on enter, newline on shift+enter.** A `TextArea` does the opposite by default,
-and the default is wrong here: sending is the common act. ++alt+enter++ is wired to the
-same thing as ++shift+enter++ because plenty of terminals do not report the latter at
-all — without the fallback, whether you can type a second line depends on your
-terminal emulator, which is not a thing to make people discover.
+**Send on enter, newline on ctrl+j.** A `TextArea` does the opposite by default, and the
+default is wrong here: sending is the common act.
+
+The newline key is the part worth being careful about. ++shift+enter++ and
+++alt+enter++ only exist on the wire when the terminal speaks the **kitty keyboard
+protocol** — Textual asks for it on start-up, and a terminal that does not answer sends
+plain `CR` for shift+enter and `ESC CR` for alt+enter, both of which arrive here as a
+bare `enter`. So on those terminals the two documented newline keys *send the message*,
+which is the worst possible failure for a key whose job is to not send it.
+
+++ctrl+j++ is the one that always works: it is `LF`, a different byte from `CR`, on
+every terminal there is. It is the documented answer; the other two are kept for the
+terminals that do report them, along with the `modifyOtherKeys` spellings xterm uses.
 
 **Driving the open card without giving up focus.** ↑↓, enter, escape and — on an empty
 input — backspace are handed to the app while a card is open; everything else is
@@ -32,11 +40,26 @@ MAX_ROWS = 8
 """How tall the input grows before it scrolls. Past this, you are writing a document,
 and the transcript is worth more screen than the draft."""
 
+NEWLINE_KEYS = frozenset(
+    {
+        "ctrl+j",
+        "shift+enter",
+        "alt+enter",
+        # `modifyOtherKeys`, which xterm and a few others speak instead of the kitty
+        # protocol. Textual names these after the character rather than the key.
+        "shift+\r",
+        "alt+\r",
+    }
+)
+"""Every spelling of "newline, do not send". ++ctrl+j++ is the one that works
+everywhere; the rest depend on what the terminal reports. → this module's docstring."""
+
 
 class Prompt(TextArea):
     """The input line. Grows to `MAX_ROWS`, then scrolls."""
 
     BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("ctrl+j", "newline", "New line", show=False),
         Binding("alt+enter", "newline", "New line", show=False),
     ]
 
@@ -158,7 +181,7 @@ class Prompt(TextArea):
             self.post_message(self.ModeCycle())
             return
 
-        if key in ("shift+enter", "alt+enter"):
+        if key in NEWLINE_KEYS:
             event.prevent_default()
             event.stop()
             self.insert("\n")
@@ -179,4 +202,4 @@ class Prompt(TextArea):
         await super()._on_key(event)
 
 
-__all__ = ["MAX_ROWS", "Prompt"]
+__all__ = ["MAX_ROWS", "NEWLINE_KEYS", "Prompt"]

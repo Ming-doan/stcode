@@ -5,6 +5,15 @@ One screen for both, so they cannot drift apart: on first run it is the "pick a 
 and paste a key" prompt that can be skipped, and afterwards it is where `/model` sends
 you.
 
+**Routing is here too**, under the credentials. `[routing]` is three lines of TOML that
+decide which model answers a cheap question and which answers a hard one, and leaving it
+file-only meant the one screen called *model settings* could not set the models. The
+three tier fields default to blank, which means "follow the Model field above" — the
+behaviour the screen already had — so nobody has to fill them in to keep what they had.
+
+`Requests at once` is the other thing that belongs next to a base URL rather than in a
+file: it is a fact about the endpoint you just typed. → `ProviderConfig.max_concurrent`
+
 It never writes to disk. It dismisses with a new `GatewayConfig` (or `None` if the user
 backed out) and lets the app own persistence.
 """
@@ -23,6 +32,10 @@ from textual.widgets import Button, Input, Label, Select, Static
 from stcode.cli import labels
 from stcode.core.configs import GatewayConfig, apply_provider_settings
 from stcode.core.providers import PROVIDERS, ProviderConfig, key_env_for
+
+DIFFICULTIES = ("low", "medium", "high")
+"""The three routing tiers, in the order they appear on the screen — cheapest first,
+which is the order `[routing]` is written in and the order they cost in."""
 
 
 class SettingsScreen(ModalScreen[GatewayConfig | None]):
@@ -91,6 +104,12 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
         color: $text-muted;
     }
 
+    .section-label {
+        text-style: bold;
+        color: $accent;
+        margin-top: 1;
+    }
+
     #settings-buttons {
         height: auto;
         margin-top: 1;
@@ -144,12 +163,39 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
                     id="base-url",
                 )
 
+                yield Label(labels.FIELD_MAX_CONCURRENT, classes="field-label")
+                yield Input(
+                    value=str(stored.max_concurrent or ""),
+                    placeholder=labels.MAX_CONCURRENT_PLACEHOLDER,
+                    id="max-concurrent",
+                )
+                yield Static(labels.MAX_CONCURRENT_HINT, classes="field-hint")
+
                 yield Label(labels.FIELD_MODEL, classes="field-label")
                 yield Input(
                     value=self._config.defaults.model,
                     placeholder=labels.model_placeholder(provider),
                     id="model",
                 )
+
+                yield Label(labels.FIELD_DIFFICULTY, classes="field-label")
+                yield Select(
+                    labels.difficulty_options(),
+                    value=self._config.agent.difficulty,
+                    allow_blank=False,
+                    id="difficulty",
+                )
+
+                yield Label(labels.FIELD_ROUTING, classes="section-label")
+                yield Static(labels.ROUTING_HEADING_HINT, classes="field-hint")
+                for difficulty in DIFFICULTIES:
+                    route = self._config.routing.get(difficulty)  # type: ignore[arg-type]
+                    yield Label(labels.routing_label(difficulty), classes="field-label")
+                    yield Input(
+                        value=route.model if route else "",
+                        placeholder=labels.routing_placeholder(provider, difficulty),
+                        id=f"routing-{difficulty}",
+                    )
 
             with Horizontal(id="settings-buttons"):
                 yield Button(
@@ -175,11 +221,16 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
         self.query_one("#key-hint", Static).update(labels.key_hint(provider, stored))
 
         self.query_one("#base-url", Input).value = stored.base_url or ""
+        self.query_one("#max-concurrent", Input).value = str(stored.max_concurrent or "")
         # The chosen model belongs to the old provider — clear it rather than send
-        # e.g. a gpt-* name to Anthropic.
+        # e.g. a gpt-* name to Anthropic. Same for the three tiers, for the same reason.
         model_input = self.query_one("#model", Input)
         model_input.value = ""
         model_input.placeholder = labels.model_placeholder(provider)
+        for difficulty in DIFFICULTIES:
+            tier = self.query_one(f"#routing-{difficulty}", Input)
+            tier.value = ""
+            tier.placeholder = labels.routing_placeholder(provider, difficulty)
 
     @on(Input.Submitted)
     def _submit_on_enter(self) -> None:
@@ -203,6 +254,16 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
         model = self.query_one("#model", Input).value.strip()
         stored = self._config.providers.get(provider, ProviderConfig())
 
+        concurrency_text = self.query_one("#max-concurrent", Input).value.strip()
+        try:
+            max_concurrent = max(0, int(concurrency_text)) if concurrency_text else 0
+        except ValueError:
+            # One sentence, not a dismissed dialog that silently kept the old cap.
+            self.query_one("#settings-intro", Static).update(
+                labels.bad_concurrency(concurrency_text)
+            )
+            return
+
         if key:
             # A literal key the user just typed should win outright — clear any env-var
             # pointer so a stale exported variable can't silently shadow it.
@@ -222,5 +283,11 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
                 api_key_env=api_key_env,
                 base_url=base_url,
                 model=model,
+                max_concurrent=max_concurrent,
+                difficulty=str(self.query_one("#difficulty", Select).value),  # type: ignore[arg-type]
+                routing_models={
+                    difficulty: self.query_one(f"#routing-{difficulty}", Input).value.strip()
+                    for difficulty in DIFFICULTIES
+                },
             )
         )

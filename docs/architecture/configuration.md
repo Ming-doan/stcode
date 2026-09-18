@@ -20,10 +20,18 @@ values do.
 
 ## What is *not* in this file
 
-The TUI's own state — the theme, and the folders you have trusted — is in
-`~/.stcode/ui.toml`, read by the terminal client and by nothing else. `config.toml` is
-what a `--headless` daemon reads, and a container has no theme and trusts nothing.
+The TUI's own state — the theme, the folders you have trusted, and how long a `!`
+command may run — is in `~/.stcode/ui.toml`, read by the terminal client and by nothing
+else. `config.toml` is what a `--headless` daemon reads, and a container has no theme,
+trusts nothing, and never runs a `!`.
 → [decision 0003](../decisions/0003-what-the-tui-owns.md)
+
+```toml
+# ~/.stcode/ui.toml
+theme         = "auto"        # auto | dark | light
+trusted       = ["/home/you/work/stcode"]
+shell_timeout = 10            # seconds a `!` command may run. Clamped to 1–120
+```
 
 ## Credentials
 
@@ -34,7 +42,16 @@ Two ways, and **the environment wins when set**:
 api_key_env = "ANTHROPIC_API_KEY"      # preferred: nothing secret touches disk
 api_key     = "sk-…"                   # what the setup screen writes, if you paste one
 base_url    = "https://…"              # any endpoint speaking the provider's protocol
+
+max_concurrent = 0                     # completions this endpoint will serve at once
 ```
+
+`max_concurrent` is the one key here that is not a credential. It caps how many
+completions are in flight against **this endpoint**, across every session, every
+sub-agent and the supervisor, because one daemon shares one gateway. `0` is no cap,
+which is right for a hosted API. Set it to `1` for Ollama or llama.cpp: five parallel
+`task` calls are otherwise five simultaneous requests to a server holding one model on
+one GPU, and it drops the ones that waited too long. → [providers.md](providers.md)
 
 `.env` files are loaded most-specific first — `./.env`, then `~/.stcode/.env` — and real
 process environment variables beat both.
@@ -47,6 +64,7 @@ process environment variables beat both.
 | --- | --- | --- |
 | `provider` | `"anthropic"` | what `/model` last selected |
 | `model` | `""` | empty means "not chosen yet", which the chat screen warns about rather than guessing |
+| `reasoning_effort` | `""` | `none` … `max`; empty leaves it to the model. What `/effort` writes |
 | `approval_mode` | `"suggest"` | `plan` / `suggest` / `auto-edit` / `full-auto` |
 
 Session defaults, not routing policy: the gateway ignores them.
@@ -117,9 +135,11 @@ number of session files `prune` leaves behind.
 stcode --mode auto-edit --model claude-sonnet-5 --role backend-dev --port 7717
 ```
 
-`apply_cli_overrides` folds these into the loaded config **for this run only**. They are
-never written back: a flag is a decision about now, and `--mode full-auto` on one run must
-not leave `full-auto` in the file for the next.
+`apply_cli_overrides` returns a **copy** with these folded in, and leaves the loaded
+config alone. That is what makes "for this run only" true rather than aspirational: the
+UI rewrites its config whenever a mode or an address changes, so a flag folded into that
+same object would go to disk with it — and `--transport tcp`, used once to reach a
+container, would become the transport every later bare `stcode` binds.
 
 `--role` is also how one image serves every role without a config file per container.
 

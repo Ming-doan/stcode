@@ -100,6 +100,16 @@ class Session:
         self._held: builtins.list[dict[str, Any]] = []
         """Records appended before the file was opened. Written, in order, by `_start`."""
 
+        self._chosen: dict[str, Any] = {}
+        """Settings changed through `set_meta` **before** the session had a file.
+
+        Those merge into the pending first `meta` record rather than appending a second
+        one, which keeps the file clean — but `overrides()` reads the records *after*
+        the first, so without this the change would be invisible to it. A `/effort`
+        chosen before the first message would then apply to no model call at all, which
+        is indistinguishable from `/effort` doing nothing.
+        """
+
         self._file: TextIO | None = None
         if not defer:
             self._start()
@@ -246,6 +256,7 @@ class Session:
             pending = next((r for r in self._records if r.get("type") == "meta"), None)
             if pending is not None:
                 pending.update(fields)
+                self._chosen.update(fields)
                 return pending
         return self.append(type="meta", **fields)
 
@@ -272,8 +283,13 @@ class Session:
 
         Bookkeeping keys are dropped (`META_BOOKKEEPING`) so the result is settings
         only and can go straight to the gateway.
+
+        Settings chosen before the session had a file count too, even though they were
+        folded into the first record rather than appended after it — they are still
+        something the user changed, and the alternative is a `/effort` that silently
+        applies to nothing because it was chosen one message too early.
         """
-        merged: dict[str, Any] = {}
+        merged: dict[str, Any] = dict(self._chosen)
         for record in self._meta_records()[1:]:
             merged.update(
                 {key: value for key, value in record.items() if key not in META_BOOKKEEPING}

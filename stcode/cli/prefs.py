@@ -32,6 +32,21 @@ ThemePreference = Literal["auto", "dark", "light"]
 THEME_PREFERENCES: tuple[ThemePreference, ...] = ("auto", "dark", "light")
 DEFAULT_THEME: ThemePreference = "auto"
 
+DEFAULT_SHELL_TIMEOUT = 10.0
+MAX_SHELL_TIMEOUT = 120.0
+"""How long a `!` command may run, and the ceiling on raising it.
+
+Ten seconds covers `git status`, `ls`, `docker ps` — the things `!` is for. The ceiling
+is there because this runs on the **UI's** event loop budget, not the agent's: a command
+that needs two minutes is a command that belongs in a second terminal, or in a `bash`
+tool call where the agent can watch it.
+"""
+
+
+def clamp_shell_timeout(value: float) -> float:
+    """Keep a hand-edited `shell_timeout` inside the range the UI can honour."""
+    return max(1.0, min(float(value), MAX_SHELL_TIMEOUT))
+
 
 def ui_path() -> Path:
     return config_dir() / UI_FILENAME
@@ -45,6 +60,11 @@ class UiPrefs(BaseModel):
     """Absolute paths the user has approved the agent working in. A folder's children
     are covered by it — a project has subdirectories, and asking again for each one
     trains people to click through the question."""
+
+    shell_timeout: float = DEFAULT_SHELL_TIMEOUT
+    """Seconds a `!` command may run before it is killed. Capped at
+    `MAX_SHELL_TIMEOUT`. Here rather than in `config.toml` because `!` runs on *this*
+    terminal's machine and the agent never sees it — same split as the theme."""
 
     def is_trusted(self, path: str | Path) -> bool:
         """Whether `path`, or a parent of it, has been trusted.
@@ -85,6 +105,7 @@ def load_prefs(path: Path | None = None) -> UiPrefs:
 
     theme = data.get("theme")
     trusted = data.get("trusted")
+    timeout = data.get("shell_timeout")
     return UiPrefs(
         # Per key, not whole-file: an unknown theme name is no reason to forget the
         # trusted list sitting two lines below it.
@@ -92,6 +113,9 @@ def load_prefs(path: Path | None = None) -> UiPrefs:
         trusted=[str(entry) for entry in trusted if isinstance(entry, str)]
         if isinstance(trusted, list)
         else [],
+        shell_timeout=clamp_shell_timeout(timeout)
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+        else DEFAULT_SHELL_TIMEOUT,
     )
 
 
@@ -107,11 +131,14 @@ def save_prefs(prefs: UiPrefs, path: Path | None = None) -> Path:
 
 
 __all__ = [
+    "DEFAULT_SHELL_TIMEOUT",
     "DEFAULT_THEME",
+    "MAX_SHELL_TIMEOUT",
     "THEME_PREFERENCES",
     "UI_FILENAME",
     "ThemePreference",
     "UiPrefs",
+    "clamp_shell_timeout",
     "load_prefs",
     "save_prefs",
     "ui_path",
