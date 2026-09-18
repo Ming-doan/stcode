@@ -81,9 +81,9 @@ async def repl(
 def _stream_to(runtime: Runtime[HarnessContext]):  # type: ignore[no-untyped-def]
     """Forward the cell's output to the UI as it arrives.
 
-    CLAUDE.md §11 calls a session that looks hung a real UX problem, and a REPL cell is
-    the longest thing a turn can contain. Progress here is the difference between
-    "working" and "frozen".
+    A session that looks hung is a real UX problem, and a REPL cell is the longest
+    thing a turn can contain. Progress here is the difference between "working" and
+    "frozen".
     """
 
     async def on_stream(name: str, text: str) -> None:

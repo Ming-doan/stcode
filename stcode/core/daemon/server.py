@@ -31,6 +31,7 @@ from types import TracebackType
 from typing import Any
 
 from stcode.core.agent import Agent
+from stcode.core.common import trace
 from stcode.core.configs import GatewayConfig
 from stcode.core.daemon.autonomy import AutonomyRefused, guard_autonomy
 from stcode.core.daemon.protocol import (
@@ -149,6 +150,10 @@ class Daemon:
         if self.config.daemon.transport == "unix":
             with contextlib.suppress(OSError):
                 socket_path(self.config.daemon.socket).unlink()
+        # Last, and only here: spans are batched, so without a flush the final turn of
+        # a short run — the one you were watching — dies in a buffer. A no-op when
+        # tracing was never switched on.
+        trace.shutdown()
 
     async def __aenter__(self) -> "Daemon":
         await self.start()

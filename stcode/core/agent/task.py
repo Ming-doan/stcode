@@ -24,7 +24,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from stcode.core.agent.agent import Agent
 
 MAX_DEPTH = 1
-"""CLAUDE.md §4 rule 3. A sub-agent gets neither `task` nor `repl`, so this is belt and
+"""Rule 3. A sub-agent gets neither `task` nor `repl`, so this is belt and
 braces — but recursion plus no budget is a fork bomb, and the cheap check is worth it."""
 
 

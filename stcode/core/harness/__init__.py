@@ -10,7 +10,7 @@ Harness — the tools, prompts, and skills an agent works with.
 * `tools/schema.py` — signature + docstring → JSON Schema.
 * `approvals.py` — the permission vocabulary and the mode policy.
 * `context.py` — `HarnessContext`, the workspace state tools share.
-* `registry.py` — which tools exist and which an agent may see.
+* `tools/registry.py` — which tools exist and which an agent may see.
 * `skills/` — `SKILL.md` discovery, loaded on demand.
 * `prompts/` — the plan and execute prompts, and the sub-agent briefing.
 * `mcp.py` — external tool servers, adapted to the same `Tool` interface.
@@ -31,7 +31,6 @@ from stcode.core.harness.context import HarnessContext, TodoItem
 from stcode.core.harness.harness import Harness, read_project_instructions
 from stcode.core.harness.mcp import MCPManager, MCPServerConfig, load_mcp_config
 from stcode.core.harness.prompts import PromptMode, build_system_prompt, mode_for
-from stcode.core.harness.registry import ToolRegistry
 from stcode.core.harness.skills import Skill, SkillRegistry
 from stcode.core.harness.tools import (
     BUILTIN_TOOLS,
@@ -43,6 +42,7 @@ from stcode.core.harness.tools import (
     Runtime,
     Tool,
     ToolError,
+    ToolRegistry,
     ToolResult,
     to_tool_definition,
     tool,

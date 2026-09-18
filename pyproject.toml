@@ -20,13 +20,30 @@ dependencies = [
     "typer>=0.27.1",
 ]
 
+[project.optional-dependencies]
+# Tracing. Off by default and imported only when [trace] enabled = true, so a session
+# that is not being watched pays nothing for it.
+otel = [
+    "opentelemetry-sdk>=1.30.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.30.0",
+]
+
 [project.scripts]
 stcode = "stcode.cli.main:cli"
 
 [dependency-groups]
 dev = [
+    "ipykernel>=7.3.0",
+    "mypy>=2.3.1",
     "pytest>=9.1.1",
     "textual-dev>=1.7.0",
+]
+docs = [
+    # Pinned below 2.0 deliberately: MkDocs 2.0 removes the plugin system and the
+    # theming system with no migration path, so `mkdocs-material` does not run on it.
+    # Raise this only together with a Material release that supports it.
+    "mkdocs>=1.6.1,<2",
+    "mkdocs-material>=9.7.7,<10",
 ]
 
 [build-system]

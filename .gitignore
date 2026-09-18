@@ -223,3 +223,16 @@ temp/
 # Agents config
 .agents/
 .claude/
+
+# ...except the test fixture workspace, which is a *checked-in* project the
+# integration tests mount as the agent's cwd. Its dot-directories are the point.
+!tests/fixtures/workspace/.agents/
+!tests/fixtures/workspace/.agents/**
+
+# Temporatory ignore the notebooks folder, only contains
+# testing notebook for the agent, ignore to vanish from Claude Code
+# and avoid accidentially pushed
+notebooks/
+
+# The built documentation site. `mkdocs build` output; never committed.
+/site/

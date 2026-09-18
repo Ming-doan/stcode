@@ -33,7 +33,32 @@ from typing import Any
 _PROTO = sys.stdout
 _REAL_STDERR = sys.stderr
 
+MAX_FRAME_CHARS = 32768
+"""Cap on any single string this worker puts on the wire.
+
+The parent reads one JSON object per line through an `asyncio` stream, which refuses a
+line past its buffer limit — and once that happens the pipe is wedged, not merely
+noisy. A cell printing a megabyte is a cell whose author wanted a variable, so the cap
+belongs here, at the producer, rather than in a bigger buffer over there."""
+
+HEAD_SHARE = 0.75
+"""A traceback's last line and a test summary both live at the end."""
+
 ns: dict[str, Any] = {"tool_out": {}}
+
+
+def cap(text: str, limit: int = MAX_FRAME_CHARS) -> str:
+    """Keep the head and tail of `text`, and say what went missing.
+
+    Deliberately a copy of `core/common/truncate.elide` rather than an import: this
+    file is spawned, never imported, and must stay dependency-free.
+    """
+    if len(text) <= limit:
+        return text
+    marker = f"\n… [{len(text) - limit:,} chars dropped by the REPL — print less, or slice the variable] …\n"
+    body = max(limit - len(marker), 0)
+    head = int(body * HEAD_SHARE)
+    return text[:head] + marker + (text[-(body - head):] if body - head else "")
 
 _loop = asyncio.new_event_loop()
 asyncio.set_event_loop(_loop)
@@ -63,7 +88,7 @@ class _Tee(io.TextIOBase):
         self._pending += text
         while "\n" in self._pending:
             line, self._pending = self._pending.split("\n", 1)
-            emit({"type": "chunk", "text": line})
+            emit({"type": "chunk", "text": cap(line)})
         return len(text)
 
     def flush(self) -> None:
@@ -86,7 +111,7 @@ class _Tee(io.TextIOBase):
     def drain(self) -> None:
         """Emit the last line when it had no trailing newline."""
         if self._pending:
-            emit({"type": "chunk", "text": self._pending})
+            emit({"type": "chunk", "text": cap(self._pending)})
             self._pending = ""
 
 
@@ -141,7 +166,13 @@ def main() -> None:
             continue
 
         ok, stdout, error = run_cell(str(request.get("code", "")))
-        emit({"type": "result", "id": request_id, "ok": ok, "stdout": stdout, "error": error})
+        emit({
+            "type": "result",
+            "id": request_id,
+            "ok": ok,
+            "stdout": cap(stdout),
+            "error": cap(error) if error else error,
+        })
 
 
 if __name__ == "__main__":

@@ -27,9 +27,16 @@ import openai
 from google.genai import errors as genai_errors
 from pydantic import BaseModel
 
+from stcode.core.common import trace
 from stcode.core.providers.base import BaseModelProvider
 from stcode.core.providers.registry import get_provider
-from stcode.core.providers.types import Message, ReasoningEffort, StreamEvent, ToolDefinition
+from stcode.core.providers.types import (
+    Message,
+    MessageStop,
+    ReasoningEffort,
+    StreamEvent,
+    ToolDefinition,
+)
 
 logger = logging.getLogger("stcode.providers.gateway")
 
@@ -253,23 +260,58 @@ class LLMGateway:
                 provider_name, route.api_key_env, route.api_key, resolved_base_url
             )
 
+        # `chat <model>`, the GenAI convention's name for an inference span. Platforms
+        # read the `gen_ai.*` attributes off it and show a generation with its tokens;
+        # anything named our own way shows as an anonymous box.
+        attributes = {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": provider_name,
+            "gen_ai.request.model": model_name,
+            "gen_ai.request.max_tokens": max_tokens,
+            "stcode.difficulty": difficulty,
+        }
+        with trace.span(f"chat {model_name}", kind="client", attributes=attributes) as recorder:
+            async for event in self._stream_with_retry(
+                provider_instance,
+                messages,
+                recorder,
+                model=model_name,
+                system=system,
+                tools=tools,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop,
+                parallel_tool_calls=parallel_tool_calls,
+            ):
+                yield event
+
+    async def _stream_with_retry(
+        self,
+        provider_instance: BaseModelProvider,
+        messages: list[Message],
+        recorder: "trace.Recorder",
+        **kwargs: Any,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """The retry loop. Split out only so the span above can wrap it whole."""
         retry = self._retry
         for attempt in range(1, retry.max_attempts + 1):
             started = False
             try:
-                async for event in provider_instance.stream(
-                    messages,
-                    model=model_name,
-                    system=system,
-                    tools=tools,
-                    max_tokens=max_tokens,
-                    reasoning_effort=reasoning_effort,
-                    temperature=temperature,
-                    top_p=top_p,
-                    stop=stop,
-                    parallel_tool_calls=parallel_tool_calls,
-                ):
+                async for event in provider_instance.stream(messages, **kwargs):
                     started = True
+                    if isinstance(event, MessageStop):
+                        recorder.set(
+                            **{
+                                "gen_ai.response.finish_reasons": [event.stop_reason],
+                                "gen_ai.usage.input_tokens": event.usage.input_tokens,
+                                "gen_ai.usage.output_tokens": event.usage.output_tokens,
+                                "gen_ai.usage.cache_read_input_tokens": (
+                                    event.usage.cache_read_input_tokens
+                                ),
+                            }
+                        )
                     yield event
                 return
             except Exception as exc:

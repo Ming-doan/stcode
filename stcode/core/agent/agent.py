@@ -7,9 +7,10 @@ Agent — the turn loop. Message in, events out.
     async for ev in agent.run("Add rate limiting"): ...   # one turn, to completion
 
 `run()` is `push()` then `events()` until the first terminal event. The split is not
-ergonomics: a `push` arriving mid-turn queues for the *next* turn instead of splicing
-into the one in flight, which is what lets you attach to a working agent and redirect
-it without destroying what it is doing. To stop it, `interrupt()`.
+ergonomics: a `push` arriving mid-turn is delivered at the next **tool-call boundary**,
+after this round of results and before the next request — never spliced into the model
+call in flight. That is what lets you attach to a working agent and steer it without
+destroying what it is doing. To stop it instead, `interrupt()`.
 
 **The stop condition is that the model stopped calling tools.** No `answer` dict, no
 `ready` flag — models already end a turn by talking, and a protocol on top of that is
@@ -26,7 +27,7 @@ import asyncio
 from contextlib import aclosing
 from pathlib import Path
 from types import TracebackType
-from typing import Any, AsyncGenerator, AsyncIterator, Sequence
+from typing import TYPE_CHECKING, Any, AsyncGenerator, AsyncIterator, Callable, Iterable, Sequence
 
 from stcode.core.agent.events import (
     PREVIEW_CHARS,
@@ -38,8 +39,10 @@ from stcode.core.agent.events import (
     TurnFinished,
 )
 from stcode.core.agent.supervisor import Supervisor
+from stcode.core.common import trace
 from stcode.core.harness import Harness
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
+from stcode.core.harness.tools.base import ApprovalFn, AskFn, ProgressFn, Tool
 from stcode.core.providers.gateway import Difficulty, LLMGateway
 from stcode.core.providers.types import (
     MessageStop,
@@ -49,6 +52,9 @@ from stcode.core.providers.types import (
     Usage,
 )
 from stcode.core.session import Session
+
+if TYPE_CHECKING:  # pragma: no cover — the arrow points this way for types only
+    from stcode.core.configs import AgentConfig, GatewayConfig
 
 DEFAULT_MAX_TURNS = 40
 """Tool-call ceiling within one turn — the only thing between a model that keeps
@@ -94,7 +100,7 @@ class Agent:
     @classmethod
     async def create(
         cls,
-        config: Any,
+        config: "GatewayConfig",
         *,
         cwd: str | Path | None = None,
         role: str = "",
@@ -105,9 +111,14 @@ class Agent:
     ) -> "Agent":
         """Build an agent from a loaded `GatewayConfig`.
 
-        `config` is typed loosely so the agent depends on the values it reads, not on
-        the on-disk file format.
+        `GatewayConfig` is the *in-memory* model, not the TOML — typing it is free
+        coupling to the values this reads anyway, and `core/configs` imports nothing
+        from `core/agent`, so the arrow still points one way.
         """
+        # Idempotent, and off unless [trace] says otherwise: the first agent built in
+        # this process starts the exporter, every later one finds it running.
+        trace.configure(config.trace)
+
         owns_gateway = gateway is None
         gateway = gateway or LLMGateway(
             providers=config.providers, routing=config.routing, retry=config.retry
@@ -160,7 +171,42 @@ class Agent:
             agent.enable_task()
         if joins_team and team is not None:
             agent.enable_team(team.shared_dir, role)
+        # Last, so it can also withhold `task` and `send_message`: the config is the
+        # operator's word, and a tool added by a feature switch does not outrank it.
+        apply_tool_policy(harness, config.agent)
         return agent
+
+    def attach(
+        self,
+        *,
+        on_ask: AskFn | None = None,
+        on_approval: ApprovalFn | None = None,
+        on_progress: ProgressFn | None = None,
+        tools: Iterable["Tool[Any] | Callable[[Agent], Tool[Any]]"] = (),
+    ) -> "Agent":
+        """Wire this agent to a caller: its callbacks, and any tools it brings.
+
+        The one method a host needs. A daemon supplies three callbacks, a notebook
+        supplies none, an application supplies its own tools — all of it is the same
+        three assignments and the same `register` + `allow` that `enable_task` does, so
+        it is written once here instead of at every call site.
+
+        A tool may be a `Tool`, or a factory taking this agent — the shape a tool needs
+        when it closes over the agent it was built for, as `task` does.
+
+        Returns `self`, so it chains onto `Agent.create(...)`.
+        """
+        if on_ask is not None:
+            self.harness.on_ask = on_ask
+        if on_approval is not None:
+            self.harness.on_approval = on_approval
+        if on_progress is not None:
+            self.harness.on_progress = on_progress
+        for entry in tools:
+            built = entry if isinstance(entry, Tool) else entry(self)
+            self.harness.registry.register(built, replace=True)
+            self.harness.allow(built.name)
+        return self
 
     def enable_task(self) -> None:
         """Register the sub-agent tool on this agent's harness.
@@ -179,8 +225,12 @@ class Agent:
         Registered from here for the same reason as `task` — the tool closes over this
         agent's mailbox, and `core/harness` must not import `core/team`.
 
-        `task` is *removed*: in team mode the parallelism is containers, so a sub-agent
-        inside a role container re-answers a question the architecture already answered.
+        `task` survives. The two split different things: a team splits a *product* into
+        roles with their own checkouts and one merge boundary each, a sub-agent splits
+        one role's *task* inside its own checkout, creating no boundary at all. A
+        sub-agent still gets no `send_message` (it is not in `WORKER_TOOLS`), so the
+        messaging discipline between roles is untouched. `[agent] enable_task = false`
+        is the off switch if you want one.
         """
         from stcode.core.team import Mailbox, make_send_message_tool
 
@@ -197,13 +247,15 @@ class Agent:
         self.harness.registry.register(make_send_message_tool(self.mailbox), replace=True)
         self.harness.allow("send_message")
         self.harness.teammates = [name for name in self.mailbox.roles() if name != role]
-        if self.harness.allowed and "task" in self.harness.allowed:
-            self.harness.allowed.remove("task")
 
     # ---- driving ----
 
     async def push(self, text: str) -> None:
-        """Queue a message. Never interrupts the turn in flight."""
+        """Queue a message.
+
+        Delivered at the next tool-call boundary if a turn is running, and started as a
+        turn of its own if none is. Never spliced into the model call in flight.
+        """
         await self._inbox.put(text)
 
     @property
@@ -266,8 +318,27 @@ class Agent:
         self._interrupted.clear()
         self.harness.cancel.clear()
         self._busy = True
+        # The root span of a turn. Everything under it — each model call, each tool —
+        # nests inside, so one trace is one thing the agent was asked to do.
+        with trace.span(
+            f"agent.turn {self.harness.agent_name}",
+            attributes={
+                "gen_ai.agent.name": self.harness.agent_name,
+                "gen_ai.conversation.id": self.session.id,
+                "stcode.role": self.session.meta().get("role", ""),
+                "stcode.approval_mode": self.harness.approval_mode,
+            },
+        ):
+            # `aclosing`, like every other level: returning early from `run()` has to
+            # reach the `finally` below, or the agent stays `busy` forever.
+            async with aclosing(self._turn_body(text)) as body:
+                async for event in body:
+                    yield event
+
+    async def _turn_body(self, text: str) -> AsyncGenerator[AgentEvent, None]:
+        """The loop itself. Split from `_run_turn` only to keep the span around it."""
         try:
-            self._drain_inbox()
+            self._drain_mailbox()
             self.session.append(type="user", content=text)
 
             for iteration in range(self.max_turns):
@@ -318,6 +389,12 @@ class Agent:
                     yield AgentFailed(message="Interrupted.")
                     return
 
+                # The steering point. After this round of results, before the next
+                # request: the model has not been asked anything yet, so a message
+                # landing here changes what it is about to do rather than orphaning a
+                # `tool_use` block that has no `tool_result`.
+                self._deliver()
+
                 async for event in self._supervise(iteration + 1):
                     yield event
 
@@ -330,18 +407,35 @@ class Agent:
         finally:
             self._busy = False
 
-    def _drain_inbox(self) -> None:
-        """Take delivery of anything waiting, at the top of the turn.
+    def _deliver(self) -> int:
+        """Hand over everything waiting: pushed messages, then team mail.
+
+        Called at a tool-call boundary, where the transcript is whole — every
+        `tool_use` has its `tool_result` — so a `user` message can be appended without
+        producing a request the provider will reject.
+
+        Returns how many messages landed, for a caller that wants to say so.
+        """
+        delivered = 0
+        while True:
+            try:
+                text = self._inbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self.session.append(type="user", content=text)
+            delivered += 1
+        return delivered + self._drain_mailbox()
+
+    def _drain_mailbox(self) -> int:
+        """Take delivery of the team's messages.
 
         Written as `inbox` records, which `Session.messages()` renders as prefixed user
         messages — the route supervisor nudges take too, for the same reason: the
         cached system prefix must not move.
-
-        Top of the turn, never mid-turn. A message arriving while the agent works waits,
-        exactly as a `push` does. Splicing into a turn destroys work in progress.
         """
         if self.mailbox is None:
-            return
+            return 0
+        count = 0
         for message in self.mailbox.drain():
             self.session.append(
                 type="inbox",
@@ -350,6 +444,8 @@ class Agent:
                 body=message.body,
                 refs=message.refs,
             )
+            count += 1
+        return count
 
     async def _supervise(self, iteration: int) -> AsyncGenerator[AgentEvent, None]:
         """Let the supervisor look, on its own schedule.
@@ -376,10 +472,14 @@ class Agent:
             if isinstance(event, MessageStop):
                 # The gateway emits usage, the agent records it. A gateway importing
                 # Session would depend on its own caller.
+                trace_id, _ = trace.current_ids()
                 self.session.append(
                     type="usage",
                     difficulty=self.difficulty,
                     stop_reason=event.stop_reason,
+                    # The join between the trajectory and the trace, when one is being
+                    # exported. Empty otherwise, and the session stands alone as before.
+                    **({"trace_id": trace_id} if trace_id else {}),
                     **event.usage.model_dump(),
                 )
             yield event
@@ -442,4 +542,31 @@ class Agent:
         return f"Agent({self.harness.agent_name}, session={self.session.id})"
 
 
-__all__ = ["DEFAULT_APPROVAL_MODE", "DEFAULT_MAX_TURNS", "Agent"]
+def apply_tool_policy(harness: Harness, settings: "AgentConfig") -> None:
+    """Narrow this agent's tool set to what `[agent]` asked for.
+
+    `tools` is an allow-list replacing the default set; `exclude_tools` subtracts from
+    whatever is left. Both are checked against the registry, which by now holds the
+    built-ins *and* anything registered since — `task`, `send_message`, MCP tools in
+    `expose = "tools"` mode — so a name that exists can be named here.
+
+    An unknown name raises. A config that quietly produced a smaller tool set would be
+    diagnosed as "the model is ignoring its tools", weeks later.
+    """
+    include, exclude = list(settings.tools), list(settings.exclude_tools)
+    if not include and not exclude:
+        return
+
+    known = set(harness.registry.names())
+    unknown = sorted({name for name in (*include, *exclude) if name not in known})
+    if unknown:
+        raise ValueError(
+            f"[agent] names tool(s) that do not exist: {', '.join(unknown)}. "
+            f"Available: {', '.join(sorted(known))}."
+        )
+
+    allowed = include or (harness.allowed if harness.allowed is not None else harness.registry.names())
+    harness.allowed = [name for name in allowed if name not in exclude]
+
+
+__all__ = ["DEFAULT_APPROVAL_MODE", "DEFAULT_MAX_TURNS", "Agent", "apply_tool_policy"]

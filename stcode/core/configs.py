@@ -1,9 +1,14 @@
 """
 Config — locate, load, validate, save, and scaffold the stcode config.
 
-Owns *where* config lives and *how the file* is structured: paths, TOML, `.env`.
-`GatewayConfig` is that on-disk shape, composing `ProviderConfig`/`RouteConfig`/
+Owns *how the file* is structured and what reads it: TOML, `.env`, the `[section]`
+models. `GatewayConfig` is that on-disk shape, composing `ProviderConfig`/`RouteConfig`/
 `RetryConfig` from `core/providers/gateway.py` rather than redefining them.
+
+*Where* it lives is `core/common/paths.py`, because `core/harness/prompts/` looks for
+role profiles in the same directory and cannot import this module without a cycle. Both
+names are re-exported here, so every existing `from stcode.core.configs import
+default_config_path` still works.
 
 Credentials come from either side of `resolve_secret`: an env var named by `api_key_env`
 (preferred — nothing secret touches disk), or a literal `api_key` from the setup screen.
@@ -12,7 +17,6 @@ The env var wins when set. Files written here are chmod 0600 because of that lit
 
 from __future__ import annotations
 
-import os
 import tomllib
 from pathlib import Path
 from typing import Literal
@@ -20,6 +24,11 @@ from typing import Literal
 import tomli_w
 from pydantic import BaseModel, Field
 
+# `default_config_path` is re-exported: `cli/` has always imported it from here, and
+# it is still true that this module owns the config *file*. It no longer owns the
+# *location* — `core/harness/prompts/` needs that too, and importing this module for it
+# would be a cycle.
+from stcode.core.common.paths import config_dir, config_exists, default_config_path
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
 from stcode.core.providers import Difficulty, ProviderConfig, RetryConfig, RouteConfig, default_model_for
 from stcode.core.session import DEFAULT_SESSION_DIR
@@ -50,6 +59,11 @@ class AgentConfig(BaseModel):
 
     `max_depth = 1` is not meant to be raised: sub-agents get neither `task` nor `repl`,
     and recursion with no budget is a fork bomb.
+
+    `tools` / `exclude_tools` are the tool set this deployment wants — an allow-list
+    replacing the default, and a subtraction from whatever is left. Applied after the
+    agent is fully assembled, so `task`, `send_message` and MCP tools can be named too;
+    a name that matches no tool refuses to start.
     """
 
     max_turns: int = 40
@@ -57,12 +71,14 @@ class AgentConfig(BaseModel):
     max_concurrent: int = 4
     enable_task: bool = True
     difficulty: Difficulty = "high"
+    tools: list[str] = Field(default_factory=list)
+    exclude_tools: list[str] = Field(default_factory=list)
 
 
 class SessionConfig(BaseModel):
     """Where transcripts live. `dir` takes `./.stcode/sessions` for per-project history."""
 
-    dir: str = DEFAULT_SESSION_DIR
+    dir: Path = Path(DEFAULT_SESSION_DIR)
     keep: int = 100
 
 
@@ -83,8 +99,9 @@ class DaemonConfig(BaseModel):
 class TeamConfig(BaseModel):
     """Team mode: one container, one agent, one role, one shared volume.
 
-    Off unless `role` is set. `role` must match a file in `harness/prompts/roles/` — a
-    typo refuses to start rather than running an agent that owns nothing.
+    Off unless `role` is set. `role` must match a markdown file in `.stcode/agents/`
+    or `~/.stcode/agents/` (or `STCODE_AGENTS_DIR`) — a typo, or an unmounted volume,
+    refuses to start rather than running an agent that owns nothing.
 
     The origin is a **bare repository on the shared volume**, `/team/repo.git`: no
     credentials, no network, every role clones and pushes branches, exactly one merges.
@@ -135,6 +152,30 @@ class MCPConfig(BaseModel):
     enabled: bool = True
 
 
+class TraceConfig(BaseModel):
+    """Export the trajectory as OpenTelemetry spans, for an observability platform.
+
+    Off by default, and the dependency is an extra (`uv sync --extra otel`): a coding
+    session that is not being watched should not pay for a tracer, and enabling it
+    without the extra installed warns rather than refusing to start.
+
+    OTLP over HTTP, with `gen_ai.*` semantic conventions, so Langfuse, LangSmith,
+    Phoenix or a plain Collector all read it — including the token counts, which those
+    platforms turn into cost. Leave `endpoint` and `headers` empty to configure it the
+    way every platform's own docs do, through `OTEL_EXPORTER_OTLP_ENDPOINT` and
+    `OTEL_EXPORTER_OTLP_HEADERS`.
+
+    `content` is the separate, louder switch: span *shapes* are not sensitive, prompts
+    and file contents usually are.
+    """
+
+    enabled: bool = False
+    endpoint: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    service_name: str = "stcode"
+    content: bool = False
+
+
 class GatewayConfig(BaseModel):
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     routing: dict[Difficulty, RouteConfig] = Field(default_factory=dict)
@@ -146,6 +187,7 @@ class GatewayConfig(BaseModel):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     team: TeamConfig = Field(default_factory=TeamConfig)
+    trace: TraceConfig = Field(default_factory=TraceConfig)
 
 
 DEFAULT_CONFIG_TOML = """\
@@ -192,16 +234,20 @@ max_delay = 20.0
 jitter = true
 
 # Limits on one turn. max_turns caps tool calls within a turn, not conversation length.
+# tools = [...] replaces the default tool set; exclude_tools = [...] subtracts from it.
+# A name that matches no tool refuses to start.
 [agent]
 max_turns = 40
 difficulty = "high"
+# exclude_tools = ["web_search"]
 
 # dir = "./.stcode/sessions" keeps transcripts with the project instead of in ~.
 [session]
 dir = "~/.stcode/sessions"
 keep = 100
 
-# Team mode. Empty role = solo; anything else must match harness/prompts/roles/<role>.md.
+# Team mode. Empty role = solo; anything else must match ~/.stcode/agents/<role>.md
+# (copy a starting point from examples/agents/).
 # The origin is a bare repo on the shared volume — no credentials, no network.
 # [team]
 # role       = "backend-dev"
@@ -218,6 +264,15 @@ every = 8
 # agent import what it needs; "tools" advertises them in the prompt every turn.
 [mcp]
 expose = "code"
+
+# OpenTelemetry export, for Langfuse / LangSmith / Phoenix / a Collector. Needs the
+# `otel` extra: uv sync --extra otel. Leave endpoint and headers empty to use the
+# standard OTEL_EXPORTER_OTLP_* environment variables instead.
+# [trace]
+# enabled  = true
+# endpoint = "https://cloud.langfuse.com/api/public/otel/v1/traces"
+# headers  = { Authorization = "Basic <base64 of public:secret>" }
+# content  = false   # prompts and file contents stay out of spans unless this is true
 
 # Where the daemon listens. `unix` on your own machine, `tcp` inside a container.
 [daemon]
@@ -237,23 +292,6 @@ SAVED_CONFIG_HEADER = """\
 """
 
 
-def default_config_path() -> Path:
-    """`~/.stcode/config.toml`, or `%APPDATA%\\stcode\\config.toml` on Windows.
-    Override with `STCODE_CONFIG`."""
-    env_path = os.environ.get("STCODE_CONFIG")
-    if env_path:
-        return Path(env_path).expanduser()
-    if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-        return base / "stcode" / "config.toml"
-    return Path.home() / ".stcode" / "config.toml"
-
-
-def config_exists(path: Path | None = None) -> bool:
-    """Whether a config file exists — the whole first-run test."""
-    return (path or default_config_path()).exists()
-
-
 def ensure_config_exists(path: Path | None = None) -> Path:
     """Scaffold a default config at `path` if none exists. Never overwrites."""
     path = path or default_config_path()
@@ -270,7 +308,7 @@ def load_dotenv_files() -> None:
     from dotenv import load_dotenv
 
     load_dotenv(Path.cwd() / ".env", override=False)
-    load_dotenv(default_config_path().parent / ".env", override=False)
+    load_dotenv(config_dir() / ".env", override=False)
 
 
 def load_config(path: Path | None = None, *, create_if_missing: bool = False) -> GatewayConfig:
@@ -303,7 +341,9 @@ def save_config(config: GatewayConfig, path: Path | None = None) -> Path:
     except OSError:
         pass  # A shared/managed config dir we don't own is the user's business, not ours.
 
-    body = config.model_dump(mode="python", exclude_none=True)
+    # `mode="json"` because TOML has no Path and no enum: `dir` is a `Path` in memory
+    # and has to reach `tomli_w` as the string it was read from.
+    body = config.model_dump(mode="json", exclude_none=True)
     text = SAVED_CONFIG_HEADER + "\n" + tomli_w.dumps(body)
 
     # Write-then-rename so an interrupted save can't leave a truncated config behind.

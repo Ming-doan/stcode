@@ -1,0 +1,34 @@
+# The config an integration test loads. Every route points at the `fake` provider,
+# which `tests/fakes.py` registers for the duration of a test — so `load_config` and
+# `Agent.create` run exactly as they do in production, and nothing leaves the machine.
+
+[defaults]
+provider = "fake"
+model = "fake-large"
+approval_mode = "auto-edit"
+
+[providers.fake]
+api_key = "not-a-real-key"
+
+[routing.low]
+provider = "fake"
+model = "fake-small"
+
+[routing.medium]
+provider = "fake"
+model = "fake-medium"
+
+[routing.high]
+provider = "fake"
+model = "fake-large"
+
+[agent]
+max_turns = 12
+difficulty = "high"
+
+[supervisor]
+enabled = true
+every = 4
+
+[mcp]
+expose = "code"

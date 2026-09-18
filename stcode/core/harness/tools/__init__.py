@@ -32,6 +32,7 @@ from stcode.core.harness.tools.base import (
 )
 from stcode.core.harness.tools.files import edit, read, write
 from stcode.core.harness.tools.interact import ask_user_question
+from stcode.core.harness.tools.registry import ToolRegistry
 from stcode.core.harness.tools.repl import repl
 from stcode.core.harness.tools.schema import schema_from_signature
 from stcode.core.harness.tools.search import glob, grep, ls
@@ -87,6 +88,7 @@ __all__ = [
     "ToolError",
     "ToolForbidden",
     "ToolPermission",
+    "ToolRegistry",
     "ToolResult",
     "ToolTimeout",
     "ask_user_question",

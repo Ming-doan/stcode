@@ -8,7 +8,7 @@ Two files, and the split is the dependency arrow:
 * `tools.py` — `send_message`, a factory closing over one role's mailbox. Registered by
   `Agent.enable_team()`, the same shape `task` uses.
 
-Roles are not here: they are markdown in `harness/prompts/roles/`, because a new role
+Roles are not here: they are markdown in `.stcode/agents/`, because a new role
 must be a new file rather than a code change.
 """
 

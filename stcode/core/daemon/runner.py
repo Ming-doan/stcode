@@ -70,11 +70,11 @@ class SessionRunner:
         self._task: asyncio.Task[None] | None = None
         self._watch: asyncio.Task[None] | None = None
 
-        # The harness asks; this runner answers over the wire. Set here rather than in
+        # The agent asks; this runner answers over the wire. Wired here rather than in
         # `Harness.create`, because the harness must not know a socket exists.
-        agent.harness.on_approval = self.request_approval
-        agent.harness.on_ask = self.ask
-        agent.harness.on_progress = self.progress
+        agent.attach(
+            on_approval=self.request_approval, on_ask=self.ask, on_progress=self.progress
+        )
 
     # ---- lifecycle ----
 

@@ -23,6 +23,7 @@ import contextlib
 from pathlib import Path
 from typing import Any, Iterator, MutableMapping, Sequence
 
+from stcode.core.common import trace
 from stcode.core.common.tools import ToolDefinition, ToolResult
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
 from stcode.core.harness.context import HarnessContext, git_context
@@ -32,10 +33,10 @@ from stcode.core.harness.mcp import (
     generate_server_code,
     load_mcp_config,
 )
+from stcode.core.harness.outputs import OutputStore
 from stcode.core.harness.prompts import PromptMode, build_system_prompt, load_role, mode_for
-from stcode.core.harness.registry import ToolRegistry
 from stcode.core.harness.skills import SkillRegistry
-from stcode.core.harness.tools import BUILTIN_TOOLS, MAIN_TOOLS, WORKER_TOOLS
+from stcode.core.harness.tools import BUILTIN_TOOLS, MAIN_TOOLS, WORKER_TOOLS, ToolRegistry
 from stcode.core.harness.tools.base import (
     ApprovalFn,
     AskFn,
@@ -102,8 +103,9 @@ class Harness:
         """Server and tool *names*, for the prompt. Empty in `tools` mode, where the
         definitions are advertised instead."""
         # Whatever `elide` cuts is parked here; `_share_output` copies it into the
-        # REPL's `tool_out` so the model can reach it.
-        self.outputs: MutableMapping[str, Any] = outputs if outputs is not None else {}
+        # REPL's `tool_out` so the model can reach it. Bounded: nothing else would ever
+        # remove an entry, and a long session would hold every large result it made.
+        self.outputs: MutableMapping[str, Any] = outputs if outputs is not None else OutputStore()
         self.on_progress = on_progress
         self.on_approval = on_approval
         self.on_ask = on_ask
@@ -147,9 +149,10 @@ class Harness:
             # sessions never run one.
             context.repl = PyREPL(cwd=root, env=context.env)
 
-        # Raises on an unknown name: a container started with a typo'd role should
-        # refuse rather than run an agent that owns nothing.
-        kwargs.setdefault("role", load_role(role))
+        # Raises on an unknown name: a container started with a typo'd role, or with
+        # its agents directory unmounted, should refuse rather than run an agent that
+        # owns nothing.
+        kwargs.setdefault("role", load_role(role, root))
         kwargs.setdefault("project_instructions", read_project_instructions(root))
         harness = cls(context, approval_mode=approval_mode, **kwargs)
 
@@ -302,9 +305,23 @@ class Harness:
             return ToolResult.error(
                 f"`{name}` is not available to this agent. You have: {available}.", tool=name
             )
-        result = await self.registry[name].invoke(arguments, self.runtime(), tool_call_id=tool_call_id)
-        await self._share_output(result)
-        return result
+        # `execute_tool <name>` — the GenAI convention's name for this span, so a
+        # platform files it next to the model call that asked for it.
+        with trace.span(
+            f"execute_tool {name}",
+            attributes={
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": name,
+                "gen_ai.tool.call.id": tool_call_id,
+                "stcode.agent": self.agent_name,
+            },
+        ) as recorder:
+            result = await self.registry[name].invoke(
+                arguments, self.runtime(), tool_call_id=tool_call_id
+            )
+            recorder.set(**{"stcode.tool.ok": not result.is_error})
+            await self._share_output(result)
+            return result
 
     async def _share_output(self, result: ToolResult) -> None:
         """Push an elided result's full payload into the REPL's `tool_out`.

@@ -40,6 +40,12 @@ STDERR_TAIL_LINES = 50
 """Worker stderr kept for a crash report. Bounded — the alternative is holding every
 warning a long session produced."""
 
+STREAM_LIMIT = 4 * 1024 * 1024
+"""Bytes one protocol line may take. Belt to the worker's braces: it caps what it emits
+at 32k chars, but a char is up to four bytes, and `asyncio`'s 64 KiB default does not
+merely truncate an over-long line — the read raises and the paused transport then never
+delivers EOF, so even `aclose()` hangs."""
+
 INTERRUPT_GRACE = 5.0
 """How long the worker gets to report back after SIGINT before it is killed. A cell
 stuck in a C call cannot be interrupted at all, and waiting forever for one is how a
@@ -124,6 +130,7 @@ class PyREPL:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.cwd),
                 env=environment,
+                limit=STREAM_LIMIT,
             )
         except OSError as exc:
             raise ReplError(f"Could not start the REPL worker: {exc}") from exc
@@ -166,11 +173,14 @@ class PyREPL:
                 process.stdin.close()
         try:
             await asyncio.wait_for(process.wait(), 2.0)
-        except (asyncio.TimeoutError, Exception):
+        except Exception:
             with contextlib.suppress(ProcessLookupError, OSError):
                 process.kill()
+            # Bounded, because `wait()` is not: it completes only once every pipe has
+            # reported EOF, and a stdout transport paused by an over-long line never
+            # will. An unbounded wait here is how closing a session hangs forever.
             with contextlib.suppress(Exception):
-                await process.wait()
+                await asyncio.wait_for(process.wait(), 2.0)
 
     async def __aenter__(self) -> "PyREPL":
         await self.start()
@@ -276,7 +286,18 @@ class PyREPL:
         if process is None or process.stdout is None:
             raise ReplError("the REPL worker is not running")
         while True:
-            line = await process.stdout.readline()
+            try:
+                line = await process.stdout.readline()
+            except (ValueError, asyncio.LimitOverrunError) as exc:
+                # A line past `STREAM_LIMIT`. The buffer is dropped and the pipe is no
+                # longer in sync with the protocol, so the worker is gone either way —
+                # say so as a `ReplError`, which `execute` already knows how to turn
+                # into a crashed result, rather than as a bare ValueError from a caller
+                # that only ever asked to run a cell.
+                raise ReplError(
+                    f"the REPL worker sent more than {STREAM_LIMIT:,} bytes on one line "
+                    f"({exc}). Assign the value to a variable and print a slice of it."
+                ) from exc
             if not line:
                 raise ReplError(await self._death_note(process))
             try:

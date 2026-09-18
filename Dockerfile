@@ -1,5 +1,6 @@
-# One image, every role. The role is chosen at run time by `[team] role`, because a
-# role is a markdown file in the image rather than anything baked into the build.
+# One image, every role. The role is chosen at run time by `[team] role` and the
+# markdown is *mounted*, not built in: a role is a deployment fact, and an image that
+# carried them would make adding a fifth role a release.
 #
 # No docker-compose.yml, no k8s manifests. This repo ships an image and the environment
 # contract below; how you bring up N containers is yours, and orchestration opinions do
@@ -8,6 +9,7 @@
 #   docker build -t stcode .
 #   docker run -d --name backend-dev \
 #     -v team:/team -v /var/lib/stcode/backend:/workspace \
+#     -v ./examples/agents:/agents:ro \
 #     -e STCODE_SANDBOX=1 -e OPENAI_API_KEY -e STCODE_ROLE=backend-dev \
 #     -p 7717:7717 stcode
 #
@@ -35,6 +37,7 @@ RUN uv sync --frozen --no-dev
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     STCODE_CONFIG=/config/config.toml \
+    STCODE_AGENTS_DIR=/agents \
     STCODE_SANDBOX=1
 # STCODE_SANDBOX is what makes `full-auto` legal (rule 5). It is set here because this
 # image *is* the container the rule is about — the daemon refuses to start in full-auto
@@ -44,6 +47,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
 #   /team       shared volume — inbox/, knowledge/, artifacts/, repo.git
 #   /workspace  where this agent clones; one checkout per container
 #   /config     config.toml, read-only
+#   /agents     one markdown file per role, read-only. A missing one refuses to start,
+#               which is what you want when a mount silently did not happen.
 VOLUME ["/team", "/workspace"]
 WORKDIR /workspace
 

@@ -1,0 +1,120 @@
+# The documentation site. Build it with `uv run --group docs mkdocs serve`.
+#
+# Two rules keep this file honest:
+#
+#   1. `nav` is explicit. A page not listed here is a page nobody navigates to, and
+#      mkdocs says so at build time — which is the only way a doc written and then
+#      forgotten gets noticed.
+#   2. `strict: true`. A broken internal link fails the build. Docs drift silently;
+#      this is the one kind of drift a machine can catch.
+
+site_name: stcode
+site_description: A coding agent that lives in a daemon, and a UI that is a client of it.
+site_url: https://example.invalid/stcode
+repo_url: https://github.com/minhdoan/stcode
+edit_uri: edit/main/docs/
+
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - content.code.copy
+    - content.action.edit
+    - toc.follow
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  # Required for the `markdown` attribute on a <div>, which is how Material's
+  # grid cards on the home page get their content processed.
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  # The architecture pages already draw with mermaid. Without this fence they render
+  # as an unreadable code block.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - Configuration: getting-started/configuration.md
+  - Guide:
+      - The three shapes: guide/shapes.md
+      - The TUI: guide/tui.md
+      - Approval modes: guide/approval-modes.md
+      - Sessions: guide/sessions.md
+      - Tools: guide/tools.md
+      - Skills: guide/skills.md
+      - MCP servers: guide/mcp.md
+      - The REPL and tool_out: guide/repl.md
+      - Tracing: guide/tracing.md
+  - Teams:
+      - Setting one up: teams/setup.md
+      - Roles: teams/roles.md
+      - How a team works: teams/workflow.md
+  - In code:
+      - Embedding an agent: sdk/embedding.md
+      - Writing a tool: sdk/custom-tools.md
+      - The daemon protocol: sdk/daemon-protocol.md
+  - Architecture:
+      - Overview: architecture/index.md
+      - The agent loop: architecture/agent-loop.md
+      - The harness: architecture/harness.md
+      - Providers: architecture/providers.md
+      - Sessions: architecture/session.md
+      - The daemon: architecture/daemon.md
+      - MCP as code: architecture/mcp.md
+      - The supervisor: architecture/supervisor.md
+      - Team mode: architecture/team.md
+      - Tracing: architecture/tracing.md
+      - Configuration reference: architecture/configuration.md
+  - Decisions:
+      - Index: decisions/index.md
+      - 0001 Tool search: decisions/0001-tool-search.md
+      - 0002 File and image input: decisions/0002-file-and-image-input.md
+  - Contributing:
+      - How a change is made: contributing/workflow.md
+      - Testing: contributing/testing.md

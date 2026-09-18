@@ -18,6 +18,9 @@ uv sync                      # Python 3.12+
 uv run stcode                # first run opens a one-time setup screen
 ```
 
+Full documentation: `uv run --group docs mkdocs serve`, or read
+[`docs/`](docs/index.md).
+
 Pick a provider, paste an API key (or leave it blank and export `ANTHROPIC_API_KEY` /
 `OPENAI_API_KEY` / `GEMINI_API_KEY`), choose a model, and type.
 
@@ -144,10 +147,11 @@ uv run python smoke_team.py         # two containers, one volume (needs Docker)
 They need a reachable model and are meant to be read as much as run — each is the
 shortest correct example of driving its layer.
 
-**What is not done:** the ~20 team-mode evaluation tasks in [`docs/evals.md`](docs/evals.md)
-are written and have not been run. Until they are, whether team mode helps or merely
-spends 15× the tokens is an open question. [`CLAUDE.md`](CLAUDE.md) §10 explains why that
-is the honest thing to say about it.
+**What is not done:** the ~20 team-mode evaluation tasks in
+[`docs/architecture/team.md`](docs/architecture/team.md#the-evaluation-set) are written
+and have not been run. Until they are, whether team mode helps or merely spends 15× the
+tokens is an open question. [`CLAUDE.md`](CLAUDE.md) §7 explains why that is the honest
+thing to say about it.
 
 ---
 
@@ -157,13 +161,24 @@ is the honest thing to say about it.
 uv run pytest
 ```
 
-Conventions: Python 3.12+, `uv` for everything, type hints mandatory in `core/`, tests
-beside the code as `<package>/_test.py`, commit messages `area: what changed`. Every tool
-has a docstring because **the docstring is the prompt the model reads**.
+```bash
+uv run pytest -m live                     # the two tests that call a real provider
+uv run --group docs mkdocs serve          # the documentation site
+```
 
-Start with [`CLAUDE.md`](CLAUDE.md), the working spec.
-[`docs/EXPECTED.md`](docs/EXPECTED.md) (Vietnamese) is the architecture decision it
-derives from, and wins where the two disagree.
+Conventions: Python 3.12+, `uv` for everything, type hints mandatory in `core/`, tests
+in `tests/`, commit messages `area: what changed`. Every tool has a docstring because
+**the docstring is the prompt the model reads**.
+
+**Before writing code**, read
+[how a change is made](docs/contributing/workflow.md) — spec → question → document →
+test → implement → run → commit. The document comes before the test on purpose: a
+feature whose page is hard to write is a feature whose shape is wrong.
+
+Start with [`CLAUDE.md`](CLAUDE.md) — what the project is, what it bets on, and the
+seven rules — then [`docs/architecture/`](docs/architecture/index.md) for the component
+you are about to change, and [`docs/decisions/`](docs/decisions/index.md) for the
+questions already settled.
 
 ## Licence
 

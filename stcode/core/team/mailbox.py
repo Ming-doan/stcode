@@ -24,8 +24,11 @@ from typing import Any, Iterator
 
 from pydantic import BaseModel, Field
 
+# ULID: sorts by time, so an inbox drains oldest-first with no index.
+from stcode.core.common.ids import new_id
+
 DEFAULT_TEAM_DIR = "/team"
-"""Mounted into every container (CLAUDE.md 9.4)."""
+"""Mounted into every container — see docs/architecture/team.md."""
 
 INBOX = "inbox"
 KNOWLEDGE = "knowledge"
@@ -106,8 +109,6 @@ class Mailbox:
         Write-then-rename, so a reader draining at the same moment sees either nothing
         or a complete message.
         """
-        from stcode.core.session import new_id  # ULID: sorts by time, so inboxes do too
-
         target = self.inbox_of(to)
         target.mkdir(parents=True, exist_ok=True)
 

@@ -9,15 +9,20 @@ that spends its turn discovering it may not work.
 `subagent=True` appends the briefing a `task` child needs; `Harness` derives it from
 `depth`, so a spawned agent cannot be handed the wrong one.
 
+A **role** is the third input, and it is not shipped here: `load_role` reads markdown
+from `.stcode/agents/` or `~/.stcode/agents/`. Only the mode prompts are code.
+
 Fixed sections first, then the session's variable state — see `sections.py` on caching.
 `extra` comes from the *caller*; nothing here is writable from inside a turn.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal, Sequence
 
+from stcode.core.common.paths import config_dir
 from stcode.core.harness.approvals import ApprovalMode
 from stcode.core.harness.prompts.execute import EXECUTE_MODE, SUBAGENT
 from stcode.core.harness.prompts.plan import PLAN_MODE
@@ -38,31 +43,60 @@ from stcode.core.harness.prompts.sections import (
 
 PromptMode = Literal["plan", "execute"]
 
-ROLES_DIR = Path(__file__).parent / "roles"
-"""One markdown file per role. A new role is a new file, never a code change — true only
-for as long as nothing here reads a role by name."""
+AGENTS_DIRNAME = "agents"
+"""Where an agent profile lives, under the project's `.stcode/` or the user's config
+directory. One markdown file per role, named by the role."""
+
+AGENTS_DIR_ENV = "STCODE_AGENTS_DIR"
+"""Points the search at one directory and nothing else. What a container mounts."""
 
 
-def available_roles() -> list[str]:
-    """Every role this build knows about. Any file in `roles/` is a valid one."""
-    if not ROLES_DIR.is_dir():
-        return []
-    return sorted(path.stem for path in ROLES_DIR.glob("*.md"))
+def agents_dirs(cwd: str | Path | None = None) -> list[Path]:
+    """Where a role is looked for, most specific first.
+
+    Roles are **not** shipped in the package. A role is a deployment fact — this
+    container is the backend dev — and a build that carried four of them made adding a
+    fifth a release. `examples/agents/` in the repository is a starting point to copy,
+    not a fallback: a silent fallback would mean a container whose mount failed still
+    starts, as somebody else's backend dev.
+    """
+    override = os.environ.get(AGENTS_DIR_ENV)
+    if override:
+        return [Path(override).expanduser()]
+
+    root = Path(cwd).expanduser() if cwd else Path.cwd()
+    return [root / ".stcode" / AGENTS_DIRNAME, config_dir() / AGENTS_DIRNAME]
 
 
-def load_role(name: str) -> str:
-    """A role's markdown, or "" when it has none.
+def available_roles(cwd: str | Path | None = None) -> list[str]:
+    """Every role installed on this machine, nearest directory first."""
+    names: list[str] = []
+    for directory in agents_dirs(cwd):
+        if not directory.is_dir():
+            continue
+        names += [path.stem for path in directory.glob("*.md") if path.stem not in names]
+    return sorted(names)
 
-    An unknown name raises: a container started with a typo'd role should refuse loudly
-    rather than run a nameless agent that owns nothing.
+
+def load_role(name: str, cwd: str | Path | None = None) -> str:
+    """A role's markdown, or "" when the session has no role.
+
+    An unknown name raises: a container started with a typo'd role, or with the agents
+    volume unmounted, should refuse loudly rather than run an agent that owns nothing.
     """
     if not name:
         return ""
-    path = ROLES_DIR / f"{name}.md"
-    if not path.is_file():
-        known = ", ".join(available_roles()) or "(none installed)"
-        raise FileNotFoundError(f"No role named {name!r}. Available: {known}.")
-    return path.read_text(encoding="utf-8").strip()
+    searched = agents_dirs(cwd)
+    for directory in searched:
+        path = directory / f"{name}.md"
+        if path.is_file():
+            return path.read_text(encoding="utf-8").strip()
+    known = ", ".join(available_roles(cwd)) or "(none installed)"
+    raise FileNotFoundError(
+        f"No role named {name!r} in {' or '.join(str(path) for path in searched)}. "
+        f"Available: {known}. Copy one from examples/agents/, or set "
+        f"{AGENTS_DIR_ENV} to where yours live."
+    )
 
 _APPROVAL_NOTES: dict[ApprovalMode, str] = {
     "plan": "Writes and commands are switched off. Research and propose only.",
@@ -160,9 +194,11 @@ def build_system_prompt(
 __all__ = [
     "EXECUTE_MODE",
     "PLAN_MODE",
-    "ROLES_DIR",
+    "AGENTS_DIRNAME",
+    "AGENTS_DIR_ENV",
     "SUBAGENT",
     "PromptMode",
+    "agents_dirs",
     "available_roles",
     "build_system_prompt",
     "load_role",

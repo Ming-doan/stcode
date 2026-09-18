@@ -24,12 +24,11 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+from stcode.core.common.ids import new_id
 from stcode.core.providers.types import (
     ContentBlock,
     Message,
@@ -44,33 +43,6 @@ MODEL_VISIBLE = frozenset({"user", "assistant", "tool_call", "tool_result", "sup
 """Record types `messages()` folds into history. `meta`, `usage` and `error` are for
 the human reading the trajectory and for the supervisor — sending the model its own
 token counts is paying to tell it something it cannot act on."""
-
-_CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
-
-_last_id: tuple[int, int] = (0, 0)
-
-
-def new_id() -> str:
-    """A monotonic ULID: 48 bits of ms timestamp, 80 bits of randomness, base32.
-
-    Sortable by creation time as a plain string — the whole reason not to use `uuid4`.
-    `Session.list()` is then a directory listing needing no index and no metadata read.
-
-    Monotonic because "same millisecond" is not hypothetical: spawning three sub-agents
-    in one turn does it, and random suffixes would order them arbitrarily. Within a
-    millisecond the randomness increments, which also covers NTP stepping the clock back.
-    """
-    global _last_id
-    stamp = int(time.time() * 1000)
-    last_stamp, last_random = _last_id
-    if stamp > last_stamp:
-        _last_id = (stamp, secrets.randbits(80))
-    else:
-        _last_id = (last_stamp, last_random + 1)
-    stamp, randomness = _last_id
-    value = (stamp << 80) | (randomness & ((1 << 80) - 1))
-    return "".join(_CROCKFORD[(value >> shift) & 0x1F] for shift in range(125, -1, -5))
 
 
 def sessions_dir(directory: str | Path | None = None) -> Path:
