@@ -20,6 +20,10 @@ It is created on first run with a commented default. Saving from the UI rewrites
 from the in-memory model, so **hand-written comments are not preserved** — keep
 anything you want to remember in version control, not in the file.
 
+The theme and the folders you have trusted are **not** in here — they live in
+`~/.stcode/ui.toml`, because they are facts about your terminal rather than about the
+agent. `?` in the TUI shows both paths.
+
 ## The four keys that matter
 
 ```toml

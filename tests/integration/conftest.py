@@ -4,6 +4,9 @@ Integration scaffolding — a real workspace, a real config, no network.
 `tests/core/` tests one class through its own surface. These tests drive the thing the
 documentation describes: build an agent from a config file in a project directory and
 watch what it loads, what it sends, and what it leaves behind.
+
+`asynctest` is re-exported so a test in here can say `from conftest import asynctest`
+like every other module does — this file shadows the root one by that name.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from driving import asynctest
 
 from stcode.core.harness.prompts import AGENTS_DIR_ENV
 from stcode.core.harness.skills import loader as skills_loader
@@ -60,3 +64,6 @@ def mcp_workspace(workspace: Path) -> Path:
     }
     (workspace / ".mcp.json").write_text(json.dumps(config, indent=2))
     return workspace
+
+
+__all__ = ["asynctest", "isolated_home"]

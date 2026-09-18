@@ -146,25 +146,42 @@ class DaemonClient:
         return await asyncio.wait_for(self._events.get(), timeout)
 
     def events(self) -> AsyncIterator[dict[str, Any]]:
-        """Everything the daemon sends that was not an answer to a request."""
+        """Everything the daemon sends that was not an answer to a request.
+
+        Two futures at once — the next frame, and the socket closing — so the `finally`
+        is not optional. A caller that stops iterating (a cancelled UI worker, a `break`
+        after `turn_finished`) unwinds this generator wherever it was parked, and a task
+        left behind is finalised by the garbage collector: possibly after the loop has
+        closed, which surfaces as `RuntimeError: Event loop is closed` attributed to
+        nothing, during shutdown. Cancel both, always.
+        """
 
         async def stream() -> AsyncIterator[dict[str, Any]]:
-            while True:
-                getter = asyncio.ensure_future(self._events.get())
-                closed = asyncio.ensure_future(self._closed.wait())
-                done, _pending = await asyncio.wait(
-                    {getter, closed}, return_when=asyncio.FIRST_COMPLETED
-                )
-                if getter in done:
-                    closed.cancel()
-                    yield getter.result()
-                    continue
-                # Closed: drain whatever already arrived before stopping, so the last
-                # `turn_finished` before a shutdown is not lost.
-                getter.cancel()
-                while not self._events.empty():
-                    yield self._events.get_nowait()
-                return
+            pending: set["asyncio.Future[Any]"] = set()
+            try:
+                while True:
+                    getter = asyncio.ensure_future(self._events.get())
+                    closed = asyncio.ensure_future(self._closed.wait())
+                    pending = {getter, closed}
+                    done, _ = await asyncio.wait(
+                        pending, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if getter in done:
+                        closed.cancel()
+                        pending = set()
+                        yield getter.result()
+                        continue
+                    # Closed: drain whatever already arrived before stopping, so the
+                    # last `turn_finished` before a shutdown is not lost.
+                    getter.cancel()
+                    pending = set()
+                    while not self._events.empty():
+                        yield self._events.get_nowait()
+                    return
+            finally:
+                for future in pending:
+                    if not future.done():
+                        future.cancel()
 
         return stream()
 

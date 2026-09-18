@@ -3,7 +3,8 @@ Labels — every string the user reads, in one place.
 
 Screens compose widgets; this module decides what they say. Keeping the copy together
 makes it reviewable in one pass, and keeps presentation-only tables (mode colours,
-provider display names) out of `core/`, which should not know a UI exists.
+provider display names, the command list) out of `core/`, which should not know a UI
+exists.
 
 Anything conditional is a function rather than a constant, so the *choice* of wording
 lives here too instead of leaking back into the screens as an `if`.
@@ -16,9 +17,8 @@ import os
 from stcode.core.harness.approvals import APPROVAL_MODES, ApprovalMode
 from stcode.core.providers import PROVIDERS, ProviderConfig, default_model_for, key_env_for
 
-# --------------------------------------------------------------------------- wordmark
-
-TAGLINE = "recursive language model coding agent"
+Row = tuple[str, str]
+"""One line of a card: a label and what it means. Every card is a list of these."""
 
 # --------------------------------------------------------------------------- providers
 
@@ -54,7 +54,7 @@ APPROVAL_MODE_HELP: dict[ApprovalMode, str] = {
     "full-auto": "approve everything — containerize before using",
 }
 
-# Rendered next to the mode name in the status bar; escalating warmth = escalating risk.
+# Rendered next to the mode name in the status line; escalating warmth = escalating risk.
 APPROVAL_MODE_COLOR: dict[ApprovalMode, str] = {
     "plan": "cyan",
     "suggest": "green",
@@ -63,77 +63,163 @@ APPROVAL_MODE_COLOR: dict[ApprovalMode, str] = {
 }
 
 
+def mode_rows() -> list[Row]:
+    return [(mode, APPROVAL_MODE_HELP[mode]) for mode in APPROVAL_MODES]
+
+
 def mode_changed(mode: ApprovalMode) -> str:
-    return f"Approval mode: {mode} — {APPROVAL_MODE_HELP[mode]}"
+    return f"mode → {mode} — {APPROVAL_MODE_HELP[mode]}"
 
 
 def unknown_mode(argument: str) -> str:
     return f"Unknown mode {argument!r}. One of: {', '.join(APPROVAL_MODES)}"
 
 
-# ------------------------------------------------------------------------ chat screen
+# ------------------------------------------------------------------------ the screen
 
-PROMPT_PLACEHOLDER = "Ask stcode…   /help for commands"
+PROMPT_PLACEHOLDER = "Ask stcode…    ? for help    / for commands    @ for files"
 
-# role -> (gutter marker, rich style)
-ROLE_PREFIX: dict[str, tuple[str, str]] = {
-    "user": ("you", "bold cyan"),
-    "assistant": ("stcode", "bold magenta"),
-    # Reasoning is the model thinking out loud, not its answer, and must not read as
-    # one — dimmed and labelled rather than shown in the assistant's voice.
-    "thinking": ("···", "dim italic"),
-    "notice": ("··", "dim"),
-    "error": ("!!", "bold red"),
-}
+THEME_ROWS: list[Row] = [
+    ("auto", "follow the terminal's own background"),
+    ("dark", "always dark"),
+    ("light", "always light"),
+]
 
-COMMAND_HELP = """\
-/model          provider, API key, and model
-/mode [name]    approval mode — no argument cycles
-/connect        point this client at a different daemon
-/clear          clear the transcript
-/help           this list
-/quit           exit
-Anything else is sent to the model."""
+EFFORT_ROWS: list[Row] = [
+    ("none", "no thinking at all"),
+    ("minimal", "the least the model offers"),
+    ("low", "quick, for mechanical work"),
+    ("medium", "the usual"),
+    ("high", "for work that needs real reasoning"),
+    ("xhigh", "more than high, where a provider has it"),
+    ("max", "as much as the provider allows"),
+]
+"""Every rung any provider has. The narrower scales clamp — Anthropic has no `none`
+rung below "off" and Gemini's tops out at high — which is the provider adapter's job
+to say, not this list's job to hide."""
 
-STATUS_NO_MODEL = "⚠ not set — /model"
-STATUS_NO_KEY = "⚠ no API key"
+COMMANDS: list[Row] = [
+    ("/model", "provider, key and model"),
+    ("/effort", "how hard the model should think"),
+    ("/mode", "approval mode"),
+    ("/theme", "auto, dark or light"),
+    ("/sessions", "pick up an earlier session"),
+    ("/connect", "point this client at a different daemon"),
+    ("/mcp", "the MCP servers this session connected to"),
+    ("/skills", "the skills this session found"),
+    ("/clear", "end this session and start a fresh one"),
+    ("/help", "the help card"),
+    ("/quit", "leave — the agent keeps working"),
+]
 
-NO_MODEL_NOTICE = "No model selected — run /model to pick one."
-NO_MODEL_ERROR = "No model selected. Run /model first."
+DAEMONLESS_ONLY = {"/connect"}
+"""Commands that only mean something when the agent is somewhere else. `stcode` on its
+own started the daemon it is talking to, and offering to move the terminal off it would
+leave that daemon running with nothing attached — which is a thing to do deliberately,
+with `--daemonless`, not a thing to find in a list."""
 
-SETUP_SKIPPED = (
-    "Setup skipped — nothing written, so you'll be asked again next run. "
-    "/model sets it up any time."
-)
 
-STREAM_STOPPED_SUFFIX = "  ⏹ stopped"
-STREAM_STOPPED = "Stopped."
-STREAM_EMPTY = "No response received."
+def commands_for(*, daemonless: bool) -> list[Row]:
+    if daemonless:
+        return list(COMMANDS)
+    return [row for row in COMMANDS if row[0] not in DAEMONLESS_ONLY]
 
-# --------------------------------------------------------------------------- daemon
 
-# The chat screen is a client now. These say so without making the user care: a daemon
-# they did not start is worth one line, and one they did is worth none.
+def daemonless_only(name: str) -> str:
+    return f"/{name} needs --daemonless — this stcode is attached to the daemon it started."
 
-DAEMON_STARTING = "Starting a local agent daemon…"
-CONNECTING = "Connecting…"
+CARD_HELP = "help"
+CARD_COMMANDS = "commands"
+CARD_FILES = "files"
+CARD_MODE = "approval mode"
+CARD_THEME = "theme"
+CARD_EFFORT = "reasoning effort"
+CARD_APPROVE = "approve?"
+CARD_QUESTION = "the agent needs a decision"
 
-TOOL_OK = "✓"
-TOOL_FAILED = "✗"
+SHORTCUT_ROWS: list[Row] = [
+    ("?", "this card — backspace closes it"),
+    ("/", "commands — type more to filter"),
+    ("@", "files to mention — type more to filter"),
+    ("enter", "send"),
+    ("shift+enter", "newline (alt+enter too)"),
+    ("shift+tab", "change approval mode"),
+    ("esc", "interrupt the turn, or close a card"),
+    ("↑ ↓", "move through an open card"),
+]
+
+
+def help_rows(**paths: str) -> list[Row]:
+    """The shortcuts, then where things are on disk.
+
+    The paths are here rather than printed at startup because that is the trade: a
+    config path nobody asked for is noise on every run, and a config path you cannot
+    find when you need it is worse. `?` is where you ask.
+    """
+    rows = list(SHORTCUT_ROWS)
+    rows += [(name, value) for name, value in paths.items() if value]
+    return rows
+
+
+CARD_FOOTER_CHOOSE = "↑↓ then enter · esc to close"
+CARD_FOOTER_CLOSE = "backspace or esc to close"
+CARD_FOOTER_APPROVE = "y approve · n deny · esc denies"
+CARD_FOOTER_QUESTION = "↑↓ then enter, or just type your own answer"
+
+NO_FILES_HERE = "Nothing to mention — this workspace is on the daemon's machine."
+NO_MCP_SERVERS = "No MCP servers. Add a .mcp.json to the workspace."
+NO_SKILLS = "No skills found. See docs/guide/skills.md."
+
+
+def file_rows(paths: list[str]) -> list[Row]:
+    return [(path, "") for path in paths]
+
+
+def mcp_rows(servers: list[dict[str, object]]) -> list[Row]:
+    rows: list[Row] = []
+    for server in servers:
+        tools = server.get("tools") or []
+        names = ", ".join(str(tool) for tool in tools) if isinstance(tools, list) else ""
+        rows.append((str(server.get("name", "?")), names or "connected, no tools advertised"))
+    return rows
+
+
+def skill_rows(skills: list[dict[str, str]]) -> list[Row]:
+    return [(skill.get("name", "?"), skill.get("description", "")) for skill in skills]
+
+
+# --------------------------------------------------------------------- platform notes
+#
+# Everything the platform did, as one dim rule across the screen. Short, because a rule
+# that wraps is two rules.
+
+
+def session_started(cwd: object) -> str:
+    return f"session in {_tilde(cwd)}"
+
+
+def session_resumed(session_id: str) -> str:
+    return f"resumed {session_id}"
+
+
+def session_cleared() -> str:
+    return "new session — the last one is in /sessions"
 
 
 def daemon_connected(address: object, embedded: bool) -> str:
-    if embedded:
-        return f"Agent daemon started on {address}"
-    return f"Attached to the agent daemon on {address}"
+    return f"daemon started on {address}" if embedded else f"attached to {address}"
 
 
-def session_started(session_id: str, cwd: object) -> str:
-    return f"Session {session_id} in {cwd}"
+def model_changed(model: str) -> str:
+    return f"model → {model}"
 
 
-def daemon_failed(exc: Exception) -> str:
-    return f"Could not reach the agent daemon: {type(exc).__name__}: {exc}"
+def effort_changed(effort: str) -> str:
+    return f"effort → {effort}"
+
+
+def theme_changed(theme: str) -> str:
+    return f"theme → {theme}"
 
 
 def turn_usage(usage: dict[str, object]) -> str:
@@ -143,22 +229,12 @@ def turn_usage(usage: dict[str, object]) -> str:
     return f"{usage.get('input_tokens', 0)} in / {usage.get('output_tokens', 0)} out{tail}"
 
 
-def tool_started(name: str, arguments: dict[str, object]) -> str:
-    rendered = " ".join(f"{key}={_short(str(value))}" for key, value in arguments.items())
-    return f"● {name} {_short(rendered, 110)}".rstrip()
-
-
-def tool_finished(name: str, ok: bool, preview: str) -> str:
-    mark = TOOL_OK if ok else TOOL_FAILED
-    return f"  {mark} {name} — {_short(preview, 100) or '(no output)'}"
-
-
 def supervisor_nudge(text: str) -> str:
     """A redirection, shown in full.
 
     Not shortened, unlike a tool preview: the agent is about to change direction and
     this is the only place the reason appears. A session that silently changes course
-    is the debuggability problem §11 warns about.
+    is the debuggability problem the docs warn about.
     """
     return f"◆ supervisor — {' '.join(text.split())}"
 
@@ -169,9 +245,69 @@ def inbox_message(sender: str, subject: str, refs: list[str]) -> str:
     return f"✉ from {sender or 'unknown'}: {subject}{tail}"
 
 
-def _short(text: str, limit: int = 60) -> str:
-    flat = " ".join(text.split())
-    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+STREAM_STOPPED = "stopped"
+
+
+# ------------------------------------------------------------------------- warnings
+
+STATUS_NO_MODEL = "not set"
+NO_MODEL_ERROR = "No model chosen. /model picks one."
+SETUP_SKIPPED = "Setup skipped — nothing written. /model sets it up any time."
+
+
+def no_key_error(provider: str) -> str:
+    return f"No API key for {provider}. /model adds one."
+
+
+def daemon_failed(exc: Exception) -> str:
+    return f"Could not reach the agent daemon: {type(exc).__name__}: {exc}"
+
+
+def unknown_command(name: str) -> str:
+    return f"Unknown command /{name} — ? for the list."
+
+
+def not_connected() -> str:
+    return "Not connected to a daemon yet."
+
+
+APPROVAL_DENIED = "denied"
+
+# --------------------------------------------------------------------------- trust
+
+TRUST_TITLE = "trust this folder?"
+TRUST_BODY = (
+    "The agent will read, write and run commands here with your privileges.\n"
+    "Cancel leaves — there is nothing it can usefully do in a folder you have not "
+    "approved."
+)
+TRUST_YES = "Trust"
+TRUST_NO = "Cancel"
+
+# ------------------------------------------------------------------------- sessions
+
+SESSIONS_TITLE = "sessions"
+SESSIONS_EMPTY = "No sessions yet. A session file appears when you say something."
+SESSIONS_INTRO = "Only a parent session can be resumed — a sub-agent's is a transcript to read."
+SESSIONS_RESUME = "Resume"
+
+
+def session_line(row: dict[str, object]) -> str:
+    """One session as a line: id, where, and the first thing that was said."""
+    started = str(row.get("ts", ""))[:16].replace("T", " ")
+    return f"{row.get('id', '?')}  {started}  {_tilde(row.get('cwd', ''))}"
+
+
+def subsession_line(row: dict[str, object]) -> str:
+    return f"  └ {row.get('agent_name', 'sub-agent')}"
+
+
+def _tilde(path: object) -> str:
+    """`~/w/stcode` rather than `/home/you/w/stcode`. The prefix is never the
+    interesting part and it is always the longest."""
+    text = str(path or "")
+    home = os.path.expanduser("~")
+    return f"~{text[len(home):]}" if home and text.startswith(home) else text
 
 
 # --------------------------------------------------------------------------- connect
@@ -211,14 +347,6 @@ DAEMONLESS_CANCELLED = "Not connected. /connect to try another address."
 
 # ------------------------------------------------------------------------- approvals
 
-APPROVAL_TITLE = "Approve this?"
-APPROVAL_YES = "Approve"
-APPROVAL_NO = "Deny"
-APPROVAL_DENIED = "Denied."
-QUESTION_TITLE = "The agent needs a decision"
-QUESTION_PLACEHOLDER = "Type your answer…"
-QUESTION_SUBMIT = "Answer"
-
 
 def approval_summary(tool: str, permission: str, arguments: dict[str, object]) -> str:
     """What is about to happen, in the terms the tool works in.
@@ -227,28 +355,20 @@ def approval_summary(tool: str, permission: str, arguments: dict[str, object]) -
     show a command as a command and a path as a path (`ApprovalRequest`'s docstring).
     """
     if tool in ("bash", "repl"):
-        body = str(arguments.get("cmd") or arguments.get("code") or "")
+        # `command` is `bash`'s parameter and `code` is `repl`'s. Getting this wrong is
+        # invisible in review and fatal in use: the card renders with an empty body and
+        # asks you to approve running nothing in particular.
+        body = str(arguments.get("command") or arguments.get("code") or "")
     elif "path" in arguments:
         body = str(arguments["path"])
     else:
         body = ", ".join(f"{key}={_short(str(value))}" for key, value in arguments.items())
-    return f"{tool} ({permission})\n\n{body}"
+    return f"{tool} ({permission})\n{body}"
 
 
-def config_location(path: object) -> str:
-    return f"Config: {path}"
-
-
-def config_saved(path: object) -> str:
-    return f"Saved to {path}"
-
-
-def no_key_error(provider: str) -> str:
-    return f"No API key for {provider}. Run /model to add one."
-
-
-def unknown_command(name: str) -> str:
-    return f"Unknown command /{name} — /help for the list."
+def _short(text: str, limit: int = 60) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 # --------------------------------------------------------------------- settings screen

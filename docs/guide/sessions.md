@@ -17,9 +17,18 @@ uv run stcode sessions          # recent sessions, newest first
 uv run stcode --resume 01HX…    # attach live, or read back from disk
 ```
 
+In the TUI, `/sessions` shows the same list as a tree — a sub-agent's session sits under
+the session that spawned it, and only a parent can be selected. `/clear` ends the current
+one and starts a fresh one; nothing is erased.
+→ [The TUI](tui.md#sessions-shows-a-tree)
+
 The id is a monotonic ULID: millisecond timestamp, then randomness, base32. It sorts by
 creation time as a plain string, which is why listing sessions needs no index and no
 database — the newest N are the last N filenames.
+
+**The file appears on the first message.** Start stcode in the wrong directory and close
+it again and there is nothing to list: the id was minted, the file never was. So the
+sessions you see are the sessions you used.
 
 Keeping them with the project instead of in your home directory:
 
@@ -31,7 +40,8 @@ keep = 100
 
 ## Append-only, and that is load-bearing
 
-Records are never rewritten. No branch pointer, no fork, no leaf.
+Records are never rewritten. No branch pointer, no fork, no leaf. Not even `/clear` —
+that starts a new session, and the old transcript stays exactly as it was.
 
 ```bash
 cp ~/.stcode/sessions/01HX….jsonl ~/.stcode/sessions/01HY….jsonl

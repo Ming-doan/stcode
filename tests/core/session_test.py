@@ -338,3 +338,21 @@ def test_a_child_is_deferred_too(tmp_path: Path) -> None:
     child.close()
     parent.close()
     assert [entry["id"] for entry in Session.list(directory=tmp_path)] == [parent.id]
+
+
+def test_the_listing_carries_the_first_thing_that_was_said(tmp_path: Path) -> None:
+    """A column of ULIDs and timestamps does not tell you which conversation was
+    which. The opening message does, and it is always the second line."""
+    session = Session.create(cwd=tmp_path, directory=tmp_path)
+    session.append(type="user", content="Add rate limiting\nto the search API")
+    session.append(type="assistant", content="ok")
+    session.close()
+
+    row = Session.list(directory=tmp_path)[0]
+    assert row["summary"] == "Add rate limiting to the search API"
+
+
+def test_a_session_with_nothing_said_summarises_as_nothing(tmp_path: Path) -> None:
+    session = Session.create(cwd=tmp_path, directory=tmp_path)
+    session.close()
+    assert Session.list(directory=tmp_path)[0]["summary"] == ""

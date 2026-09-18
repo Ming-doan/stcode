@@ -12,6 +12,7 @@ instead of rediscovering them.
 | --- | --- | --- |
 | [0001](0001-tool-search.md) | Load tool definitions on demand | **Rejected**, with a narrower alternative |
 | [0002](0002-file-and-image-input.md) | Files and images as model input | **Accepted**, not yet built |
+| [0003](0003-what-the-tui-owns.md) | What the TUI is allowed to own | **Accepted** |
 
 ## Writing one
 

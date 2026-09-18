@@ -10,22 +10,44 @@ uv run pytest -m live      # the handful that call a real provider
 ```
 tests/
   conftest.py              the loop fixtures and the workspace fixture
+  driving.py               `asynctest` — a fresh loop per test
   fakes.py                 the three test doubles
   fixtures/workspace/      a real small project, mounted as the agent's cwd
   core/                    one file per module, testing its public surface
+  cli/                     the same, for the terminal UI's own modules
   integration/             the flows the documentation describes
 ```
 
 `tests/` is on the path (`pythonpath` in `pytest.ini`), so any test module can
 `from fakes import ...` regardless of how deep it sits.
 
+`asynctest` lives in `driving.py` rather than in `conftest.py` because
+`tests/integration/conftest.py` is importable under that same name, so a test beneath it
+cannot reach the root one. Both conftests re-export it; `from conftest import asynctest`
+still works everywhere.
+
 ## Unit or integration
 
-| | `tests/core/` | `tests/integration/` |
+| | `tests/core/`, `tests/cli/` | `tests/integration/` |
 | --- | --- | --- |
 | Tests | one class, through its own surface | a flow a page in these docs describes |
 | Example | `Session.messages()` folds tool calls correctly | an agent built from a config file sends what the workspace holds |
 | Fakes | the layer directly above the one under test | the SDK, and nothing else |
+
+## Testing the TUI
+
+`tests/cli/` covers the parts that are functions — which trigger character is being
+typed, how a filter narrows, how a terminal's background reply is read — and those need
+no app at all.
+
+`tests/integration/tui_test.py` drives the real app with real keystrokes
+(`App.run_test()`) against a **real daemon on a real socket**, with `RecordingGateway` as
+the only fake. A UI test that mocked the client would be a test of our beliefs about the
+client, and the design claim is precisely that the screen is *just* a client.
+
+What those tests protect is the keyboard: pressing `?`, typing a path with a slash in it,
+hitting enter. Every one of them is something a person does in the first minute, and
+every one is invisible in code review.
 
 The rule for `tests/core/` is **the methods the module exposes**, not its internals. The
 component contracts in [Architecture](../architecture/index.md) are that list.
@@ -120,7 +142,7 @@ uv run mypy --strict stcode/core
 
 !!! warning "Not currently clean"
 
-    `mypy --strict` reports about 38 errors, mostly from provider SDK stubs
+    `mypy --strict` reports about 35 errors, mostly from provider SDK stubs
     (`google-genai`'s optional `id`/`name` fields, `openai`'s overloads) plus a handful
     of real ones. The convention is documented and the tool is installed; making it
     pass is outstanding work, not a claim about the present.

@@ -130,7 +130,7 @@ We are not competing on polish. We are betting on the rows in the middle.
 | Elision with head and tail kept | The beginning says what ran, the end says how it went |
 | A fresh process per `bash` call | Stateful shells make every failure irreproducible |
 | Steering a running turn | Delivered at the next tool boundary — the only place a `user` message is legal |
-| Four options on a question | Fits a modal, maps to number keys, forces the agent to prune |
+| Four options on a question | Fits a card above the input, and forces the agent to prune its own list |
 
 | Left behind | Why |
 | --- | --- |
@@ -222,7 +222,7 @@ Six steps, in order. Full version, with the reasoning for each, in
 
 - Python 3.12+, `uv` for everything. `uv run pytest` before claiming anything works.
 - Type hints mandatory in `core/`. `mypy --strict` on it — installed, and **not yet
-  clean**: ~38 errors, mostly provider SDK stubs. Documented in
+  clean**: ~35 errors, mostly provider SDK stubs. Documented in
   [docs/contributing/testing.md](docs/contributing/testing.md) rather than claimed.
 - Tests live in `tests/`: `tests/core/<module>_test.py` for a module's public surface,
   `tests/integration/` for the flows the documentation describes, `tests/fakes.py` for
@@ -298,5 +298,5 @@ unanswered — and §7 says that is a live question, not a rhetorical one. Runni
 the highest-value thing left.
 
 **Later:** compaction with a visible threshold, sessions in a live database, provider
-failover, `@`-mention in the TUI, `written_files` tracking, agent profiles that carry
-their own tools and MCP servers alongside the prompt.
+failover, `written_files` tracking, agent profiles that carry their own tools and MCP
+servers alongside the prompt.

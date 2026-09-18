@@ -6,7 +6,9 @@ Two things live here because nine test modules were each carrying their own copy
 * **Driving coroutines.** These tests do not use `pytest-asyncio`. A test either takes
   the `run` fixture (a module-scoped loop, for anything holding a subprocess or an MCP
   connection) or wears `@asynctest` (a fresh loop per test, for anything binding a
-  socket). The two are not interchangeable — see each one's docstring.
+  socket). The two are not interchangeable — see each one's docstring. `asynctest`
+  itself lives in `tests/driving.py`, because a test under
+  `tests/integration/conftest.py` cannot reach this module by the name `conftest`.
 * **The workspace.** `workspace` copies `tests/fixtures/workspace/` into `tmp_path` and
   hands back the root. Tests get a real project — config, `.mcp.json`, skills, a role,
   source files — without sharing mutable state with each other.
@@ -15,12 +17,14 @@ Two things live here because nine test modules were each carrying their own copy
 from __future__ import annotations
 
 import asyncio
-import functools
 import shutil
 from pathlib import Path
 from typing import Any, Coroutine, Iterator, TypeVar
 
 import pytest
+from driving import asynctest
+
+__all__ = ["asynctest", "loop", "run", "workspace"]
 
 T = TypeVar("T")
 
@@ -51,26 +55,6 @@ def run(loop: asyncio.AbstractEventLoop) -> Any:
     return _run
 
 
-def asynctest(fn: Any) -> Any:
-    """Run an `async def` test on a **fresh** loop of its own.
-
-    The opposite trade from `run`: tests that bind real sockets and start background
-    tasks must not share a loop, or one daemon's server outlives its test and is
-    still listening when the next one starts. `functools.wraps` keeps the signature
-    pytest introspects, so fixtures work unchanged.
-    """
-
-    @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(fn(*args, **kwargs))
-        finally:
-            asyncio.set_event_loop(None)
-            loop.close()
-
-    return wrapper
 
 
 @pytest.fixture

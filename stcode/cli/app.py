@@ -1,8 +1,9 @@
 """
 Chat screen — the main stcode UI, and a **client of the daemon**.
 
-Top to bottom: wordmark, transcript, status bar, prompt input, key hints. Slash commands
-are handled here, not by the agent; anything else is a prompt.
+Top to bottom: wordmark, transcript, a card when one is open, the input, and the status
+line under it. Slash commands are handled here, not by the agent; anything else is a
+prompt.
 
 This screen owns no conversation. It opens a socket, sends `push`, and renders frames —
 history, tools and approvals all live behind that socket, which is why closing the
@@ -14,31 +15,48 @@ starts in this process on the same address. The transport is real either way, so
 "or start" half and asks *which daemon?* instead — one branch, because the client is the
 same client.
 
-The two request–response pairs (`approval_request`, `question`) are answered by a modal
-whose result goes back under the `execution_id` it arrived with. Deliberately not
-awaited inline: parallel tool calls can raise two at once, and a pump blocked on a
-dialog would stop rendering the tool still running behind it.
+**Approval and questions are cards, not modals** ([cards.py](cards.py)): a modal covers
+the transcript, which is the thing you need in order to answer. Two can arrive at once
+from parallel tool calls, so they queue and the turn keeps streaming behind them.
+
+What is deliberately *not* announced: the config path, and "Connecting…". A path nobody
+asked for is noise on every start, and a connection that worked does not need a
+sentence. `?` has the paths when you want them.
 """
 
 from __future__ import annotations
 
 import contextlib
+import os
+import subprocess
+from collections import deque
+from contextlib import aclosing
 from pathlib import Path
-from typing import Any, Callable, ClassVar
+from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Vertical, VerticalScroll
-from textual.events import Resize
-from textual.widgets import Footer, Input, Static
+from textual.widgets import Static
 
 from stcode.cli import labels
-from stcode.cli.banner import banner_for_width
+from stcode.cli.banner import Banner
+from stcode.cli.cards import Card, CardZone, filter_rows, token_trigger
 from stcode.cli.connect import ConnectScreen
-from stcode.cli.prompts import ApprovalScreen, QuestionScreen
+from stcode.cli.modals import SessionsScreen, TrustScreen
+from stcode.cli.prefs import ThemePreference, UiPrefs, load_prefs, save_prefs, ui_path
+from stcode.cli.prompt import Prompt
 from stcode.cli.settings import SettingsScreen
+from stcode.cli.theme import THEMES, TerminalMode, detect_terminal_mode, theme_name_for
+from stcode.cli.transcript import (
+    Message,
+    Notice,
+    PlatformNote,
+    Thinking,
+    ToolCall,
+    Transcript,
+)
 from stcode.core.configs import (
     GatewayConfig,
     apply_cli_overrides,
@@ -51,48 +69,9 @@ from stcode.core.daemon import Daemon, DaemonClient
 from stcode.core.harness.approvals import ApprovalMode, next_approval_mode, parse_approval_mode
 from stcode.core.providers import ProviderConfig, resolve_secret
 
-
-class Banner(Static):
-    """The wordmark, swapped for a compact one when the terminal gets narrow."""
-
-    def on_mount(self) -> None:
-        self._render_for(self.size.width)
-
-    def on_resize(self, event: Resize) -> None:
-        self._render_for(event.size.width)
-
-    def _render_for(self, width: int) -> None:
-        self.update(banner_for_width(width))
-
-
-class ChatMessage(Static):
-    """One transcript entry. Body text is never parsed as markup — it is model or user
-    output, and a stray `[` should not blow up the render."""
-
-    def __init__(self, role: str, body: str = "") -> None:
-        super().__init__(classes=f"message {role}")
-        self._role = role
-        self.body = body
-
-    def on_mount(self) -> None:
-        self._refresh_body()
-
-    def append(self, text: str) -> None:
-        self.body += text
-        self._refresh_body()
-
-    def set_body(self, body: str) -> None:
-        self.body = body
-        self._refresh_body()
-
-    def _refresh_body(self) -> None:
-        prefix, style = labels.ROLE_PREFIX.get(self._role, labels.ROLE_PREFIX["notice"])
-        gutter = f"{prefix}  "
-        text = Text()
-        text.append(gutter, style=style)
-        # Hang later lines under the first, so multi-line output stays in one column.
-        text.append(self.body.replace("\n", "\n" + " " * len(gutter)))
-        self.update(text)
+FILE_LIMIT = 2000
+"""How many paths `@` offers. Past this the list is not a list you read, and the filter
+is doing the work anyway."""
 
 
 class StcodeApp(App[None]):
@@ -100,26 +79,20 @@ class StcodeApp(App[None]):
 
     TITLE = "stcode"
 
+    ENABLE_COMMAND_PALETTE = False
+    """The eleven commands in `/` are the whole surface. A second, fuzzy way to reach
+    the same things is a second place for them to drift."""
+
     CSS = """
     Screen {
         background: $background;
     }
 
-    #banner-area {
-        height: auto;
-        padding: 1 2 0 2;
-    }
-
     #banner {
-        color: $accent;
-        text-align: center;
         height: auto;
-    }
-
-    #tagline {
-        color: $text-muted;
+        padding: 1 2 1 2;
+        color: $primary;
         text-align: center;
-        margin-bottom: 1;
     }
 
     #transcript {
@@ -128,52 +101,102 @@ class StcodeApp(App[None]):
         scrollbar-size-vertical: 1;
     }
 
-    .message {
+    .entry {
+        height: auto;
         margin-bottom: 1;
     }
 
-    .message.user {
-        color: $text;
+    .entry.platform {
+        margin-bottom: 1;
     }
 
-    .message.assistant {
-        color: $text;
+    .entry.thinking {
+        max-height: 6;
+        scrollbar-size-vertical: 1;
     }
 
-    .message.thinking {
-        color: $text-muted;
-        text-style: italic;
+    /* Full width and tinted: "no API key" printed dim among tool output is a message
+       people read twenty minutes after they needed it. */
+    .entry.notice {
+        width: 1fr;
+        padding: 0 1;
+        color: $foreground;
     }
 
-    .message.notice {
-        color: $text-muted;
+    .entry.notice.error {
+        background: $error 25%;
     }
 
-    #status-bar {
-        height: 1;
-        padding: 0 2;
-        background: $panel;
+    .entry.notice.warning {
+        background: $warning 25%;
+    }
+
+    .entry.agent-row {
+        height: auto;
+    }
+
+    /* The row already carries the gap. Without this the entry inside it adds a second
+       one and a sub-agent's output reads as twice as far apart as the main agent's. */
+    .agent-row .entry {
+        margin-bottom: 0;
+    }
+
+    .agent-name {
+        height: auto;
+        padding-right: 1;
+    }
+
+    #cards {
+        height: auto;
+        max-height: 14;
+        margin: 0 2;
+        display: none;
+    }
+
+    .card {
+        height: auto;
+        padding: 0 1;
+        border: round $primary;
+        background: $surface;
+    }
+
+    .card OptionList {
+        height: auto;
+        max-height: 6;
+        background: $surface;
+        border: none;
+        padding: 0;
+        scrollbar-size-vertical: 1;
+    }
+
+    .card-body {
         color: $text-muted;
     }
 
     #prompt {
+        height: auto;
+        max-height: 10;
         margin: 0 2;
         border: round $primary;
+        background: $surface;
     }
 
     #prompt:focus {
         border: round $accent;
     }
+
+    #status {
+        height: 1;
+        padding: 0 3;
+        color: $text-muted;
+    }
     """
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+q", "quit", "Quit", priority=True),
-        Binding("f2", "open_settings", "Settings"),
-        # Focus navigation owns shift+tab, so this must be a priority binding.
-        Binding("shift+tab", "cycle_mode", "Mode", priority=True),
-        Binding("ctrl+l", "clear_transcript", "Clear"),
-        Binding("escape", "cancel_stream", "Stop"),
     ]
+    """++shift+tab++ is not here: a focused `TextArea` claims it for focus movement
+    before an app binding is reached, so the prompt posts `ModeCycle` instead."""
 
     def __init__(
         self,
@@ -183,6 +206,8 @@ class StcodeApp(App[None]):
         cwd: Path | None = None,
         resume: str = "",
         overrides: dict[str, Any] | None = None,
+        terminal_mode: TerminalMode = "dark",
+        prefs_path: Path | None = None,
     ) -> None:
         super().__init__()
         self._config_path = config_path or default_config_path()
@@ -196,35 +221,87 @@ class StcodeApp(App[None]):
         self._daemonless = daemonless
         self._cwd = cwd or Path.cwd()
         self._resume = resume
+        self._prefs_path = prefs_path or ui_path()
+        self.prefs: UiPrefs = load_prefs(self._prefs_path)
+        self._terminal_mode = terminal_mode
+        """Detected before the app started: Textual owns the tty afterwards, and two
+        things reading escape sequences off one terminal is a corrupted screen."""
+
         self._client: DaemonClient | None = None
         # Set only when this process started the daemon — the one case where quitting
         # should stop it.
         self._daemon: Daemon | None = None
         self._session_id = ""
-        self._stream: ChatMessage | None = None
-        self._stream_role = ""
+        self._info: dict[str, Any] = {}
+        self._files: list[str] = []
+        self._streams: dict[tuple[str, str], Message | Thinking] = {}
+        self._tools: dict[tuple[str, str], ToolCall] = {}
+        self._requests: deque[dict[str, Any]] = deque()
 
     # ------------------------------------------------------------------ layout
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="banner-area"):
-            yield Banner("", id="banner", markup=False)
-            yield Static(labels.TAGLINE, id="tagline")
-        yield VerticalScroll(id="transcript")
-        yield Static("", id="status-bar")
-        yield Input(placeholder=labels.PROMPT_PLACEHOLDER, id="prompt")
-        yield Footer()
+        yield Banner(id="banner")
+        yield Transcript(id="transcript")
+        yield CardZone(id="cards")
+        yield Prompt(labels.PROMPT_PLACEHOLDER)
+        yield Static("", id="status")
 
     def on_mount(self) -> None:
+        for theme in THEMES:
+            self.register_theme(theme)
+        self._apply_theme()
         self._refresh_status()
-        self.query_one("#prompt", Input).focus()
+        self.prompt.focus()
+        self._start()
+
+    @work
+    async def _start(self) -> None:
+        """First run, then trust, then connect — in that order, and each one can stop.
+
+        A worker because two of the three are modals: `push_screen_wait` needs
+        somewhere to suspend, and `on_mount` is not it.
+        """
         if self._first_run:
             self._open_settings(first_run=True)
             return
-        self._notice(labels.config_location(self._config_path))
         if not self.config.defaults.model:
-            self._notice(labels.NO_MODEL_NOTICE)
+            self._warn(labels.NO_MODEL_ERROR)
+        if not await self._ensure_trusted():
+            return
         self._connect()
+
+    async def _ensure_trusted(self) -> bool:
+        """Ask about this folder unless it is already trusted. False means leave.
+
+        Skipped entirely in `--daemonless`: the workspace belongs to the daemon's
+        machine, so there is nothing here to trust, and `/connect` is the question that
+        actually matters. → docs/decisions/0003-what-the-tui-owns.md
+        """
+        if self._daemonless or self.prefs.is_trusted(self._cwd):
+            return True
+        if not await self.push_screen_wait(TrustScreen(self._cwd)):
+            self.exit()
+            return False
+        self.prefs.trust(self._cwd)
+        self._save_prefs()
+        return True
+
+    # ------------------------------------------------------------- convenience
+
+    @property
+    def prompt(self) -> Prompt:
+        return self.query_one(Prompt)
+
+    @property
+    def transcript(self) -> Transcript:
+        return self.query_one("#transcript", Transcript)
+
+    @property
+    def cards(self) -> CardZone:
+        return self.query_one("#cards", CardZone)
+
+    # ------------------------------------------------------------------- daemon
 
     async def on_unmount(self) -> None:
         await self._close_connection()
@@ -244,8 +321,6 @@ class StcodeApp(App[None]):
                 await self._daemon.aclose()
             self._daemon = None
 
-    # ------------------------------------------------------------------- daemon
-
     @work(exclusive=True, group="daemon")
     async def _connect(self, ask: bool = False) -> None:
         """Find or start a daemon, open a session, then render its frames forever.
@@ -256,7 +331,6 @@ class StcodeApp(App[None]):
         """
         await self._close_connection()
         self._session_id = ""
-        self._notice(labels.CONNECTING)
         try:
             client, embedded = (
                 (await self._connect_elsewhere(), False) if ask else await self._open_client()
@@ -267,7 +341,7 @@ class StcodeApp(App[None]):
             return
 
         self._client = client
-        self._notice(labels.daemon_connected(self._daemon_address(), embedded))
+        self._note(labels.daemon_connected(self._daemon_address(), embedded))
         try:
             if self._resume:
                 # `attach` resumes from disk when the daemon is not holding it, so one
@@ -282,11 +356,19 @@ class StcodeApp(App[None]):
             self._error(labels.daemon_failed(exc))
             return
 
-        self._session_id = str(info.get("id", ""))
-        self._notice(labels.session_started(self._session_id, info.get("cwd", "")))
+        self._adopt_session(info)
+        self._note(labels.session_started(info.get("cwd", "")))
+        # Fetched once, up front, so `?` and `/mcp` answer instantly — and because the
+        # answers are facts about the *daemon's* machine, which this one cannot see.
+        self._load_info()
 
-        async for frame in client.events():
-            self._render(frame)
+        # `aclosing`, for the same reason `Agent.run` documents it: this worker is
+        # cancelled when the app exits, and a generator left suspended is finalised
+        # whenever the garbage collector gets to it — possibly after the event loop has
+        # closed, which surfaces as an unraisable `Event loop is closed`.
+        async with aclosing(client.events()) as frames:
+            async for frame in frames:
+                self._render(frame)
 
     async def _open_client(self) -> tuple[DaemonClient, bool]:
         """Connect, or start a daemon here and connect to that.
@@ -295,13 +377,14 @@ class StcodeApp(App[None]):
         exactly how "no daemon yet" looks. What it means depends on the mode — start
         one, or ask where the right one is.
         """
+        if self._daemonless:
+            # Ask first rather than probing: in this shape the address *is* the
+            # question, and the stored one is a guess from a previous run.
+            return await self._connect_elsewhere(), False
         try:
             return await DaemonClient.connect(self.config), False
         except OSError:
             pass
-        if self._daemonless:
-            return await self._connect_elsewhere(), False
-        self._notice(labels.DAEMON_STARTING)
         daemon = Daemon(self.config)
         await daemon.start()
         self._daemon = daemon
@@ -315,7 +398,7 @@ class StcodeApp(App[None]):
         container's host and port right first try is not the common case, and a typo
         should not drop the user back to an empty screen.
         """
-        reason = labels.no_daemon_here(self._daemon_address())
+        reason = labels.CONNECT_INTRO
         while True:
             settings = await self.push_screen_wait(
                 ConnectScreen(self.config.daemon, reason=reason)
@@ -339,50 +422,47 @@ class StcodeApp(App[None]):
             return settings.socket
         return f"{settings.host}:{settings.port}"
 
+    @work(group="info")
+    async def _load_info(self) -> None:
+        if self._client is None:
+            return
+        with contextlib.suppress(Exception):
+            self._info = await self._client.info()
+        self._refresh_status()
+
     # ---------------------------------------------------------------- rendering
 
     def _render(self, frame: dict[str, Any]) -> None:
+        agent = str(frame.get("agent", ""))
         match frame.get("type"):
             case "text_delta":
-                self._stream_into("assistant", str(frame.get("text", "")))
+                self._stream_into("assistant", str(frame.get("text", "")), agent)
             case "reasoning_delta":
-                self._stream_into("thinking", str(frame.get("text", "")))
+                self._stream_into("thinking", str(frame.get("text", "")), agent)
             case "tool_started":
-                self._notice(
-                    labels.tool_started(str(frame.get("name", "")), dict(frame.get("arguments", {})))
-                )
+                self._tool_started(frame, agent)
             case "tool_finished":
-                self._notice(
-                    labels.tool_finished(
-                        str(frame.get("name", "")),
-                        bool(frame.get("ok", True)),
-                        str(frame.get("preview", "")),
-                    )
-                )
+                self._tool_finished(frame, agent)
             case "turn_finished":
-                self._end_stream()
-                self._notice(labels.turn_usage(dict(frame.get("usage", {}))))
+                self._end_streams(agent)
+                if not agent:
+                    self._note(labels.turn_usage(dict(frame.get("usage", {}))))
             case "agent_failed":
-                self._end_stream()
-                self._error(str(frame.get("message", "")))
-            case "approval_request":
-                self._ask_approval(frame)
-            case "question":
-                self._ask_question(frame)
+                self._end_streams(agent)
+                self._error(str(frame.get("message", "")), agent=agent)
+            case "approval_request" | "question":
+                self._enqueue_request(frame)
             case "supervisor":
-                self._end_stream()
-                self._notice(labels.supervisor_nudge(str(frame.get("text", ""))))
+                self._end_streams(agent)
+                self._note(labels.supervisor_nudge(str(frame.get("text", ""))))
             case "progress":
-                self._notice(str(frame.get("text", "")))
+                self._note(str(frame.get("text", "")))
             case "history":
                 self._replay(frame)
             case "session":
                 # The daemon is authoritative: a refused `set_mode` must not leave the
-                # status bar showing a mode that is not in force, nor reach the config.
-                mode = str(frame.get("approval_mode", ""))
-                if mode:
-                    self._adopt_mode(mode)  # type: ignore[arg-type]
-                self._refresh_status()
+                # status line showing a mode that is not in force, nor reach the config.
+                self._adopt_session(frame)
             case "error":
                 self._error(str(frame.get("message", "")))
 
@@ -394,19 +474,26 @@ class StcodeApp(App[None]):
         for record in frame.get("records", []):
             match record.get("type"):
                 case "user":
-                    self._add_message("user", str(record.get("content", "")))
+                    self.transcript.add(Message("user", str(record.get("content", ""))))
                 case "assistant" if record.get("content"):
-                    self._add_message("assistant", str(record.get("content", "")))
+                    self.transcript.add(Message("assistant", str(record.get("content", ""))))
                 case "tool_call":
-                    self._notice(
-                        labels.tool_started(
-                            str(record.get("name", "")), dict(record.get("arguments", {}))
-                        )
+                    call = ToolCall(
+                        str(record.get("name", "")), dict(record.get("arguments", {}))
                     )
+                    self.transcript.add(call)
+                    self._tools[("", str(record.get("id", "")))] = call
+                case "tool_result":
+                    call = self._tools.pop(("", str(record.get("id", ""))), None)
+                    if call is not None:
+                        call.finish(
+                            ok=not record.get("is_error", False),
+                            preview=str(record.get("content", "")),
+                        )
                 case "supervisor":
-                    self._notice(labels.supervisor_nudge(str(record.get("content", ""))))
+                    self._note(labels.supervisor_nudge(str(record.get("content", ""))))
                 case "inbox":
-                    self._notice(
+                    self._note(
                         labels.inbox_message(
                             str(record.get("from", "")),
                             str(record.get("subject", "")),
@@ -415,85 +502,326 @@ class StcodeApp(App[None]):
                     )
                 case "error":
                     self._error(str(record.get("message", "")))
+        self._settle()
 
-    def _stream_into(self, role: str, text: str) -> None:
-        """Append a delta, opening a new bubble when the kind of delta changes.
+    def _tool_started(self, frame: dict[str, Any], agent: str) -> None:
+        self._end_streams(agent)
+        call = ToolCall(str(frame.get("name", "")), dict(frame.get("arguments", {})))
+        self.transcript.add(call, agent=agent)
+        self._tools[(agent, str(frame.get("id", "")))] = call
+        self._settle()
 
-        Deltas carry no boundaries, so the only signal a block ended is that a different
-        kind of event arrived.
+    def _tool_finished(self, frame: dict[str, Any], agent: str) -> None:
+        call = self._tools.pop((agent, str(frame.get("id", ""))), None)
+        if call is None:
+            # A result with no box: the client attached mid-turn. One box saying what
+            # came back beats silently dropping it.
+            call = ToolCall(str(frame.get("name", "")), {})
+            self.transcript.add(call, agent=agent)
+        call.finish(ok=bool(frame.get("ok", True)), preview=str(frame.get("preview", "")))
+
+    def _stream_into(self, kind: str, text: str, agent: str) -> None:
+        """Append a delta, opening a new block when the kind of delta changes.
+
+        Keyed by `(agent, kind)`: deltas carry no boundaries, so a different kind
+        arriving is the only signal a block ended — and two sub-agents running in
+        parallel must not stream into each other's block.
         """
-        if self._stream is None or self._stream_role != role:
-            self._stream = self._add_message(role, "")
-            self._stream_role = role
-        self._stream.append(text)
-        self.query_one("#transcript", VerticalScroll).scroll_end(animate=False)
+        key = (agent, kind)
+        block = self._streams.get(key)
+        if block is None:
+            other = "thinking" if kind == "assistant" else "assistant"
+            self._close_stream((agent, other))
+            block = Thinking() if kind == "thinking" else Message("assistant")
+            self.transcript.add(block, agent=agent)
+            self._streams[key] = block
+        block.append(text)
+        self.transcript.scroll_end(animate=False)
+        self._settle()
 
-    def _end_stream(self) -> None:
-        if self._stream is not None and not self._stream.body.strip():
-            self._stream.remove()
-        self._stream = None
-        self._stream_role = ""
+    def _end_streams(self, agent: str = "") -> None:
+        for kind in ("assistant", "thinking"):
+            self._close_stream((agent, kind))
+
+    def _close_stream(self, key: tuple[str, str]) -> None:
+        block = self._streams.pop(key, None)
+        if block is not None and not block.body.strip():
+            block.remove()
+
+    def _settle(self) -> None:
+        """Hide the banner once the transcript has outgrown the screen.
+
+        After the refresh, not during it: mounting is queued, so `max_scroll_y` read
+        immediately after adding an entry is the value from *before* that entry existed
+        — and the banner would sit there through a whole conversation.
+        """
+        self.call_after_refresh(self._settle_now)
+
+    def _settle_now(self) -> None:
+        with contextlib.suppress(Exception):
+            self.query_one("#banner", Banner).follow(
+                transcript_scrolls=self.transcript.scrolls
+            )
+
+    # ------------------------------------------------------------------ output
+
+    def _note(self, body: str) -> None:
+        """What the platform did, as a rule across the screen."""
+        self._end_streams()
+        self.transcript.add(PlatformNote(body))
+        self._settle()
+
+    def _warn(self, body: str) -> None:
+        self.transcript.add(Notice(body, level="warning"))
+        self._settle()
+
+    def _error(self, body: str, *, agent: str = "") -> None:
+        self._end_streams(agent)
+        self.transcript.add(Notice(body, level="error"), agent=agent)
+        self._settle()
+
+    # ------------------------------------------------------------------- cards
+
+    def _show_card(self, card: Card, *, hotkeys: dict[str, str] | None = None) -> Card:
+        shown = self.cards.show(card)
+        self.prompt.card_open = True
+        self.prompt.card_hotkeys = dict(hotkeys or {})
+        return shown
+
+    def _close_card(self) -> None:
+        self.cards.clear()
+        self.prompt.card_open = False
+        self.prompt.card_hotkeys = {}
+        # A request that arrived while something else was open gets its turn now.
+        self._show_next_request()
+
+    @on(Prompt.HelpRequested)
+    def _help_card(self) -> None:
+        self._show_card(
+            Card(
+                labels.CARD_HELP,
+                labels.help_rows(
+                    config=str(self._config_path),
+                    prefs=str(self._prefs_path),
+                    session=str(self._info.get("session_path", "")),
+                    daemon=str(self._info.get("daemon", "")),
+                ),
+                footer=labels.CARD_FOOTER_CLOSE,
+                selectable=False,
+            )
+        )
+
+    @on(Prompt.CardMove)
+    def _card_move(self, message: Prompt.CardMove) -> None:
+        card = self.cards.current
+        if card is not None:
+            card.move(message.delta)
+
+    @on(Prompt.CardClose)
+    def _card_close(self) -> None:
+        self._close_card()
+
+    @on(Prompt.CardHotkey)
+    def _card_hotkey(self, message: Prompt.CardHotkey) -> None:
+        card = self.cards.current
+        if card is not None:
+            card.choose_value(message.value)
+
+    @on(Prompt.CardChoose)
+    def _card_choose(self) -> None:
+        card = self.cards.current
+        if card is None:
+            return
+        # A question always accepts something the user typed instead: the tool's own
+        # docstring promises the model that the answer may be none of the options.
+        if card.kind == labels.CARD_QUESTION and self.prompt.text.strip():
+            self._answer_question(card.token, self.prompt.clear_text().strip())
+            self._close_card()
+            return
+        if not card.choose():
+            self._close_card()
+
+    @on(Card.Chosen)
+    def _card_chosen(self, message: Card.Chosen) -> None:
+        match message.kind:
+            case labels.CARD_COMMANDS:
+                self.prompt.clear_text()
+                self._close_card()
+                self._run_command(message.value)
+                return
+            case labels.CARD_FILES:
+                self.prompt.insert_token("@", message.value)
+            case labels.CARD_MODE:
+                mode = parse_approval_mode(message.value)
+                if mode is not None:
+                    self._set_mode(mode)
+            case labels.CARD_THEME:
+                self._set_theme(message.value)  # type: ignore[arg-type]
+            case labels.CARD_EFFORT:
+                self._set_effort(message.value)
+            case labels.CARD_APPROVE:
+                self._answer_approval(message.token, message.value == "approve")
+            case labels.CARD_QUESTION:
+                self._answer_question(message.token, message.value)
+        self._close_card()
+
+    @on(Prompt.Changed)
+    def _prompt_changed(self) -> None:
+        """Open, filter or close the `/` and `@` cards as the token under the cursor
+        changes. The one place that decides is `token_trigger`."""
+        card = self.cards.current
+        if card is not None and card.kind in (labels.CARD_APPROVE, labels.CARD_QUESTION):
+            return  # A request keeps the floor until it is answered.
+        if card is not None and card.kind == labels.CARD_HELP:
+            # `?` inserted nothing, so the second one is a literal question mark — and
+            # the card it opened gets out of the way as soon as there is text.
+            if self.prompt.text:
+                self._close_card()
+            return
+        trigger = token_trigger(self.prompt.text, self.prompt.cursor_offset)
+        if trigger is None:
+            if card is not None:
+                self._close_card()
+            return
+        symbol, query = trigger
+        available = (
+            labels.commands_for(daemonless=self._daemonless)
+            if symbol == "/"
+            else labels.file_rows(self._files)
+        )
+        rows = filter_rows(available, query)
+        kind = labels.CARD_COMMANDS if symbol == "/" else labels.CARD_FILES
+        if symbol == "@" and not self._files:
+            self._load_files()
+        if card is not None and card.kind == kind:
+            card.show(rows)
+            return
+        self._show_card(Card(kind, rows, footer=labels.CARD_FOOTER_CHOOSE))
 
     # ---------------------------------------------------------------- approvals
 
-    def _ask_approval(self, frame: dict[str, Any]) -> None:
-        self._ask(frame, ApprovalScreen, self._answer_approval, bool)
+    def _enqueue_request(self, frame: dict[str, Any]) -> None:
+        """Queue an approval or a question, and show it if the floor is free.
 
-    def _ask_question(self, frame: dict[str, Any]) -> None:
-        self._ask(frame, QuestionScreen, self._answer_question, lambda v: v or "")
+        Parallel tool calls can raise two at once. Queued rather than stacked: two
+        cards is two answers to give with one keyboard, and the second would be
+        answering a question hidden behind the first.
+        """
+        self._end_streams()
+        self._requests.append(frame)
+        current = self.cards.current
+        if current is None or current.kind not in (labels.CARD_APPROVE, labels.CARD_QUESTION):
+            self._close_card_silently()
+            self._show_next_request()
 
-    def _ask(
-        self,
-        frame: dict[str, Any],
-        screen: type[Any],
-        answer: Callable[[str, Any], None],
-        coerce: Callable[[Any], Any],
-    ) -> None:
-        """Show a modal and send its result back under the id the request arrived with."""
-        execution_id = str(frame.get("execution_id", ""))
-        self._end_stream()
-        self.push_screen(screen(frame), lambda value: answer(execution_id, coerce(value)))
+    def _close_card_silently(self) -> None:
+        self.cards.clear()
+        self.prompt.card_open = False
+        self.prompt.card_hotkeys = {}
+
+    def _show_next_request(self) -> None:
+        if not self._requests or self.cards.current is not None:
+            return
+        frame = self._requests.popleft()
+        if frame.get("type") == "approval_request":
+            self._show_approval(frame)
+        else:
+            self._show_question(frame)
+
+    def _show_approval(self, frame: dict[str, Any]) -> None:
+        summary = labels.approval_summary(
+            str(frame.get("tool", "")),
+            str(frame.get("permission", "")),
+            dict(frame.get("arguments", {})),
+        )
+        agent = str(frame.get("agent_name", "")) or ""
+        title = labels.CARD_APPROVE if agent in ("", "main") else f"{labels.CARD_APPROVE} {agent}"
+        self._show_card(
+            Card(
+                labels.CARD_APPROVE,
+                # Deny first, so the highlighted row — and therefore a reflexive enter —
+                # is the safe answer.
+                [("deny", "the model is told you declined"), ("approve", "run it")],
+                title=title,
+                body=summary,
+                footer=labels.CARD_FOOTER_APPROVE,
+                token=str(frame.get("execution_id", "")),
+            ),
+            hotkeys={"y": "approve", "n": "deny"},
+        )
+
+    def _show_question(self, frame: dict[str, Any]) -> None:
+        options = [str(option) for option in frame.get("options", [])]
+        self._show_card(
+            Card(
+                labels.CARD_QUESTION,
+                [(option, "") for option in options],
+                title=str(frame.get("header", "")) or labels.CARD_QUESTION,
+                body=str(frame.get("question", "")),
+                footer=labels.CARD_FOOTER_QUESTION,
+                token=str(frame.get("execution_id", "")),
+                selectable=bool(options),
+            )
+        )
 
     @work(group="answers")
     async def _answer_approval(self, execution_id: str, approved: bool) -> None:
         if self._client is not None:
             await self._client.approve(execution_id, approved)
         if not approved:
-            self._notice(labels.APPROVAL_DENIED)
+            self._note(labels.APPROVAL_DENIED)
 
     @work(group="answers")
     async def _answer_question(self, execution_id: str, text: str) -> None:
         if self._client is not None:
             await self._client.answer(execution_id, text)
 
-    # ---------------------------------------------------------------- settings
+    # ------------------------------------------------------------------- files
 
-    def action_open_settings(self) -> None:
-        self._open_settings(first_run=False)
+    @work(thread=True, group="files")
+    def _load_files(self) -> None:
+        """List the workspace once, in a thread.
+
+        `git ls-files` when the workspace is a repo — it already knows what is ignored,
+        and reimplementing `.gitignore` to build a mention list would be a second
+        opinion about which files exist. A plain walk otherwise.
+        """
+        root = Path(str(self._info.get("cwd", "") or self._cwd))
+        if not root.is_dir():
+            self._files = []  # The workspace is on the daemon's machine.
+            return
+        self._files = _list_files(root)
+
+    # ---------------------------------------------------------------- settings
 
     def _open_settings(self, *, first_run: bool) -> None:
         def saved(config: GatewayConfig | None) -> None:
             if config is None:
                 if first_run:
-                    self._notice(labels.SETUP_SKIPPED)
+                    self._warn(labels.SETUP_SKIPPED)
                 return
-            path = save_config(config, self._config_path)
+            save_config(config, self._config_path)
             # Saved first, then flags back on top: what the user typed belongs in the
             # file, what they passed on the command line belongs only to this run.
             self.config = apply_cli_overrides(config, **self._overrides)
             self._first_run = False
             self._refresh_status()
-            self._notice(labels.config_saved(path))
             if not self.config.defaults.model:
-                self._notice(labels.NO_MODEL_NOTICE)
-            # The daemon built its gateway from the old config, so new credentials
-            # reach it only through a new connection.
-            self._connect()
+                self._warn(labels.NO_MODEL_ERROR)
+            if self._session_id:
+                # Reaches the running agent, which is the difference between `/model`
+                # and editing the config file.
+                self._push_meta(model=self.config.defaults.model)
+            else:
+                # First run: the daemon built its gateway from the old config, so new
+                # credentials reach it only through a new connection.
+                self._start()
 
         self.push_screen(SettingsScreen(self.config, first_run=first_run), saved)
 
     # -------------------------------------------------------------------- mode
 
+    @on(Prompt.ModeCycle)
     def action_cycle_mode(self) -> None:
         self._set_mode(next_approval_mode(self.config.defaults.approval_mode))
 
@@ -503,28 +831,41 @@ class StcodeApp(App[None]):
         Nothing is announced or written while a session is attached: the daemon can
         refuse `full-auto` on the host, and announcing first would both lie and
         *persist* a mode it will refuse to start in next time. The `session` frame it
-        sends back is the answer, and `_adopt_mode` is where a confirmed change lands.
+        sends back is the answer, and `_adopt_session` is where a confirmed change lands.
         """
         if self._client is not None and self._session_id:
             self._push_mode(mode)
             return
         self.config.defaults.approval_mode = mode
         self._refresh_status()
-        self._notice(labels.mode_changed(mode))
+        self._note(labels.mode_changed(mode))
         self._persist()
 
-    def _adopt_mode(self, mode: ApprovalMode) -> None:
-        """Take the mode the daemon reports as the truth, and only then write it down."""
-        if mode == self.config.defaults.approval_mode:
-            return
-        self.config.defaults.approval_mode = mode
-        self._notice(labels.mode_changed(mode))
-        self._persist()
+    def _adopt_session(self, frame: dict[str, Any]) -> None:
+        """Take what the daemon reports as the truth, and only then write it down."""
+        session_id = str(frame.get("id", ""))
+        if session_id:
+            self._session_id = session_id
+        mode = str(frame.get("approval_mode", ""))
+        if mode and mode != self.config.defaults.approval_mode:
+            self.config.defaults.approval_mode = mode  # type: ignore[assignment]
+            self._note(labels.mode_changed(mode))  # type: ignore[arg-type]
+            self._persist()
+        self._effective = {
+            "model": str(frame.get("model", "")),
+            "provider": str(frame.get("provider", "")),
+            "effort": str(frame.get("reasoning_effort", "")),
+        }
+        self._refresh_status()
 
     def _persist(self) -> None:
         """Only once a config file exists; skipping setup should not create one."""
         if config_exists(self._config_path):
             save_config(self.config, self._config_path)
+
+    def _save_prefs(self) -> None:
+        with contextlib.suppress(OSError):
+            save_prefs(self.prefs, self._prefs_path)
 
     @work(group="answers")
     async def _push_mode(self, mode: ApprovalMode) -> None:
@@ -532,58 +873,66 @@ class StcodeApp(App[None]):
         if self._client is not None and self._session_id:
             await self._client.set_mode(mode)
 
+    @work(group="answers")
+    async def _push_meta(self, **fields: Any) -> None:
+        """`/model` and `/effort`, as a `meta` record on the live session."""
+        if self._client is not None and self._session_id:
+            await self._client.set_meta(**fields)
+
+    # ------------------------------------------------------------------- theme
+
+    def _apply_theme(self) -> None:
+        self.theme = theme_name_for(self.prefs.theme, detected=self._terminal_mode)
+
+    def _set_theme(self, preference: ThemePreference) -> None:
+        self.prefs.theme = preference
+        self._apply_theme()
+        self._save_prefs()
+        self._note(labels.theme_changed(preference))
+
+    def _set_effort(self, effort: str) -> None:
+        if self._client is None or not self._session_id:
+            self._error(labels.not_connected())
+            return
+        self._push_meta(reasoning_effort=effort)
+        self._note(labels.effort_changed(effort))
+
     # ------------------------------------------------------------- status line
 
     def _refresh_status(self) -> None:
+        effective = getattr(self, "_effective", {})
         defaults = self.config.defaults
         mode = defaults.approval_mode
+        model = effective.get("model") or defaults.model
+        provider = effective.get("provider") or defaults.provider
+
         text = Text()
         text.append("model ", style="dim")
-        if defaults.model:
-            text.append(defaults.model, style="bold")
-        else:
-            text.append(labels.STATUS_NO_MODEL, style="bold yellow")
+        text.append(model or labels.STATUS_NO_MODEL, style="bold" if model else "bold $warning")
         text.append("   provider ", style="dim")
-        text.append(defaults.provider)
+        text.append(provider)
         text.append("   mode ", style="dim")
         text.append(mode, style=f"bold {labels.APPROVAL_MODE_COLOR.get(mode, 'white')}")
-        if not self._has_credential():
-            text.append(f"   {labels.STATUS_NO_KEY}", style="bold yellow")
-        self.query_one("#status-bar", Static).update(text)
+        if effective.get("effort"):
+            text.append("   effort ", style="dim")
+            text.append(str(effective["effort"]))
+        if self._daemonless:
+            # The one shape where "which agent am I talking to" is a live question.
+            text.append("   daemon ", style="dim")
+            text.append(self._daemon_address())
+        with contextlib.suppress(Exception):
+            self.query_one("#status", Static).update(text)
 
     def _has_credential(self) -> bool:
         provider = self.config.providers.get(self.config.defaults.provider, ProviderConfig())
         return bool(resolve_secret(provider.api_key_env, provider.api_key))
 
-    # ------------------------------------------------------------------ output
-
-    def _add_message(self, role: str, body: str) -> ChatMessage:
-        widget = ChatMessage(role, body)
-        transcript = self.query_one("#transcript", VerticalScroll)
-        transcript.mount(widget)
-        transcript.scroll_end(animate=False)
-        return widget
-
-    def _notice(self, body: str) -> None:
-        self._end_stream()
-        self._add_message("notice", body)
-
-    def _error(self, body: str) -> None:
-        self._end_stream()
-        self._add_message("error", body)
-
-    def action_clear_transcript(self) -> None:
-        """Clears the *view*. The session is append-only and is not touched."""
-        self.query_one("#transcript", VerticalScroll).remove_children()
-        self._stream = None
-        self._stream_role = ""
-
     # ---------------------------------------------------------------- commands
 
-    @on(Input.Submitted, "#prompt")
-    def _on_submit(self, event: Input.Submitted) -> None:
-        text = event.value.strip()
-        event.input.value = ""
+    @on(Prompt.Submitted)
+    def _on_submit(self, message: Prompt.Submitted) -> None:
+        text = message.text.strip()
+        self.prompt.clear_text()
         if not text:
             return
         if text.startswith("/"):
@@ -600,29 +949,115 @@ class StcodeApp(App[None]):
             case "quit" | "exit" | "q":
                 self.exit()
             case "model":
-                self.action_open_settings()
-            case "mode" if not argument:
-                self.action_cycle_mode()
-            case "mode":
+                self._open_settings(first_run=False)
+            case "effort":
+                self._show_card(
+                    Card(labels.CARD_EFFORT, labels.EFFORT_ROWS, footer=labels.CARD_FOOTER_CHOOSE)
+                )
+            case "mode" if argument:
                 mode = parse_approval_mode(argument)
                 if mode is None:
                     self._error(labels.unknown_mode(argument))
                 else:
                     self._set_mode(mode)
+            case "mode":
+                self._show_card(
+                    Card(labels.CARD_MODE, labels.mode_rows(), footer=labels.CARD_FOOTER_CHOOSE)
+                )
+            case "theme":
+                self._show_card(
+                    Card(labels.CARD_THEME, labels.THEME_ROWS, footer=labels.CARD_FOOTER_CHOOSE)
+                )
+            case "connect" if not self._daemonless:
+                self._error(labels.daemonless_only(name))
             case "connect":
                 self._connect(ask=True)
+            case "sessions":
+                self._pick_session()
             case "clear":
-                self.action_clear_transcript()
+                self._clear_session()
+            case "mcp":
+                servers = list(self._info.get("mcp", []))
+                self._show_card(
+                    Card(
+                        "mcp",
+                        labels.mcp_rows(servers) or [(labels.NO_MCP_SERVERS, "")],
+                        footer=labels.CARD_FOOTER_CLOSE,
+                        selectable=False,
+                    )
+                )
+            case "skills":
+                skills = list(self._info.get("skills", []))
+                self._show_card(
+                    Card(
+                        "skills",
+                        labels.skill_rows(skills) or [(labels.NO_SKILLS, "")],
+                        footer=labels.CARD_FOOTER_CLOSE,
+                        selectable=False,
+                    )
+                )
             case "help":
-                self._notice(labels.COMMAND_HELP)
+                self._help_card()
             case _:
                 self._error(labels.unknown_command(name))
+
+    @work(group="sessions")
+    async def _pick_session(self) -> None:
+        """Show the tree, then attach to whatever was picked.
+
+        Detach and clear before attaching: the `history` frame that follows is the whole
+        transcript, and rendering it under the previous conversation would read as one
+        session that changed subject.
+        """
+        if self._client is None:
+            self._error(labels.not_connected())
+            return
+        rows = await self._client.sessions(50)
+        chosen = await self.push_screen_wait(SessionsScreen(rows))
+        if not chosen or chosen == self._session_id:
+            return
+        await self._client.detach(self._session_id)
+        self._reset_view()
+        info = await self._client.attach(chosen)
+        self._adopt_session(info)
+        self._note(labels.session_resumed(chosen))
+
+    @work(group="sessions")
+    async def _clear_session(self) -> None:
+        """End this session and start another. Nothing is erased.
+
+        A `create`, which is why this is cheap: a session file is not written until its
+        first message, so clearing twice leaves no debris and the daemon drops what it
+        was holding. → docs/decisions/0003-what-the-tui-owns.md
+        """
+        if self._client is None:
+            self._error(labels.not_connected())
+            return
+        previous = self._session_id
+        info = await self._client.create(
+            cwd=self._cwd, approval_mode=self.config.defaults.approval_mode
+        )
+        if previous:
+            await self._client.detach(previous)
+        self._reset_view()
+        self._adopt_session(info)
+        self._note(labels.session_cleared())
+
+    def _reset_view(self) -> None:
+        """Clear the *view* and the handles into it. The session files are untouched."""
+        self.transcript.clear()
+        self._streams.clear()
+        self._tools.clear()
+        self._requests.clear()
+        self._close_card_silently()
+        self._settle()
 
     # ------------------------------------------------------------------- reply
 
     def _send(self, text: str) -> None:
         defaults = self.config.defaults
-        self._add_message("user", text)
+        self.transcript.add(Message("user", text))
+        self._settle()
         if not defaults.model:
             self._error(labels.NO_MODEL_ERROR)
             return
@@ -630,18 +1065,19 @@ class StcodeApp(App[None]):
             self._error(labels.no_key_error(defaults.provider))
             return
         if self._client is None or not self._session_id:
-            self._error(labels.CONNECTING)
+            self._error(labels.not_connected())
             return
         self._push(text)
 
     @work(group="push")
     async def _push(self, text: str) -> None:
-        """Queue the message. A push arriving mid-turn waits for the next one; it never
-        splices into the turn in flight."""
+        """Queue the message. A push arriving mid-turn waits for the next tool
+        boundary; it never splices into the model call in flight."""
         if self._client is not None:
             await self._client.push(text)
 
-    def action_cancel_stream(self) -> None:
+    @on(Prompt.Interrupted)
+    def _on_interrupt(self) -> None:
         """Esc stops the agent. `push` never does; this is the message that does."""
         self._interrupt()
 
@@ -649,7 +1085,44 @@ class StcodeApp(App[None]):
     async def _interrupt(self) -> None:
         if self._client is not None and self._session_id:
             await self._client.interrupt()
-            self._notice(labels.STREAM_STOPPED)
+            self._note(labels.STREAM_STOPPED)
+
+
+def _list_files(root: Path, limit: int = FILE_LIMIT) -> list[str]:
+    """Workspace paths for `@`, relative to `root`, newest convention first: git."""
+    try:
+        finished = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if finished.returncode == 0 and finished.stdout.strip():
+            return sorted(finished.stdout.split("\n"))[:limit]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return _walk(root, limit)
+
+
+def _walk(root: Path, limit: int) -> list[str]:
+    """Every file under `root`, dot-directories skipped and bounded.
+
+    Bounded because this runs on a directory nobody vetted: a home directory, or a
+    workspace with a 40,000-file build output in it, must not turn typing `@` into a
+    minute of walking.
+    """
+    found: list[str] = []
+    for current, directories, filenames in os.walk(root):
+        directories[:] = [name for name in directories if not name.startswith(".")]
+        for filename in filenames:
+            if filename.startswith("."):
+                continue
+            found.append(str(Path(current, filename).relative_to(root)))
+            if len(found) >= limit:
+                return sorted(found)
+    return sorted(found)
 
 
 def run(
@@ -660,10 +1133,20 @@ def run(
     resume: str = "",
     overrides: dict[str, Any] | None = None,
 ) -> None:
+    """Detect the terminal's theme, then hand it the screen.
+
+    Detection first and outside the app: Textual owns the tty once it starts, and two
+    things reading raw escape sequences off one terminal is a race whose loser is a
+    corrupted screen.
+    """
     StcodeApp(
         config_path=config_path,
         daemonless=daemonless,
         cwd=cwd,
         resume=resume,
         overrides=overrides,
+        terminal_mode=detect_terminal_mode(),
     ).run()
+
+
+__all__ = ["FILE_LIMIT", "StcodeApp", "run"]

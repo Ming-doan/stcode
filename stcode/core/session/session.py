@@ -31,6 +31,7 @@ abstraction.
 
 from __future__ import annotations
 
+import builtins
 import json
 import os
 from datetime import datetime, timezone
@@ -64,13 +65,20 @@ def sessions_dir(directory: str | Path | None = None) -> Path:
 
 
 class Session:
-    """An append-only JSONL transcript of one agent's work."""
+    """An append-only JSONL transcript of one agent's work.
+
+    `builtins.list[...]` in the annotations below is not decoration: this class has a
+    classmethod called `list`, which shadows the builtin inside the class body, so a
+    bare `list[dict[str, Any]]` on a method resolves to the classmethod and every
+    annotation using it is quietly wrong. The name `Session.list()` is worth keeping;
+    the four extra characters are the price.
+    """
 
     def __init__(
         self,
         path: Path,
         *,
-        records: list[dict[str, Any]] | None = None,
+        records: builtins.list[dict[str, Any]] | None = None,
         defer: bool = False,
     ) -> None:
         """Open `path`, adopting whatever is already in it.
@@ -88,8 +96,8 @@ class Session:
         self.id = path.stem
         if records is None:
             records = list(read_records(path)) if path.is_file() else []
-        self._records: list[dict[str, Any]] = records
-        self._held: list[dict[str, Any]] = []
+        self._records: builtins.list[dict[str, Any]] = records
+        self._held: builtins.list[dict[str, Any]] = []
         """Records appended before the file was opened. Written, in order, by `_start`."""
 
         self._file: TextIO | None = None
@@ -158,7 +166,9 @@ class Session:
         return cls(path)
 
     @classmethod
-    def list(cls, limit: int = 20, *, directory: str | Path | None = None) -> list[dict[str, Any]]:
+    def list(
+        cls, limit: int = 20, *, directory: str | Path | None = None
+    ) -> builtins.list[dict[str, Any]]:
         """The `meta` record of each session, newest first.
 
         A directory listing and one line per file. No index, no SQLite: ULID filenames
@@ -167,11 +177,12 @@ class Session:
         root = sessions_dir(directory)
         if not root.is_dir():
             return []
-        summaries: list[dict[str, Any]] = []
+        summaries: builtins.list[dict[str, Any]] = []
         for path in sorted(root.glob("*.jsonl"), reverse=True)[:limit]:
             meta = _first_meta(path)
             meta.setdefault("id", path.stem)
             meta["path"] = str(path)
+            meta["summary"] = _summary(path)
             summaries.append(meta)
         return summaries
 
@@ -269,17 +280,17 @@ class Session:
             )
         return merged
 
-    def _meta_records(self) -> list[dict[str, Any]]:
+    def _meta_records(self) -> builtins.list[dict[str, Any]]:
         return [record for record in self._records if record.get("type") == "meta"]
 
-    def records(self) -> list[dict[str, Any]]:
+    def records(self) -> builtins.list[dict[str, Any]]:
         return list(self._records)
 
-    def tail(self, count: int = 30) -> list[dict[str, Any]]:
+    def tail(self, count: int = 30) -> builtins.list[dict[str, Any]]:
         """The last `count` raw records — the supervisor's input."""
         return list(self._records[-count:]) if count > 0 else []
 
-    def messages(self) -> list[Message]:
+    def messages(self) -> builtins.list[Message]:
         """Fold the transcript into what the gateway sends.
 
         Three foldings, each demanded by the wire format:
@@ -292,9 +303,9 @@ class Session:
         * `supervisor` and `inbox` become prefixed user messages — neither is a role any
           provider knows, and the model has to be told who is talking.
         """
-        messages: list[Message] = []
-        assistant_blocks: list[ContentBlock] = []
-        result_blocks: list[ContentBlock] = []
+        messages: builtins.list[Message] = []
+        assistant_blocks: builtins.list[ContentBlock] = []
+        result_blocks: builtins.list[ContentBlock] = []
 
         def flush_assistant() -> None:
             nonlocal assistant_blocks
@@ -405,6 +416,29 @@ def read_records(path: Path) -> Iterator[dict[str, Any]]:
                 continue
             if isinstance(record, dict):
                 yield record
+
+
+SUMMARY_SCAN = 20
+"""How far into a file to look for the first thing that was said. It is the second
+line in every session there has ever been; the bound is there so a corrupt file cannot
+turn a directory listing into a full read."""
+
+SUMMARY_CHARS = 72
+
+
+def _summary(path: Path) -> str:
+    """The first thing the user said, as one short line.
+
+    What makes a session list usable: a column of ULIDs and timestamps does not tell
+    you which conversation was which, and the opening message always does.
+    """
+    for index, record in enumerate(read_records(path)):
+        if index >= SUMMARY_SCAN:
+            break
+        if record.get("type") == "user":
+            text = " ".join(str(record.get("content", "")).split())
+            return text if len(text) <= SUMMARY_CHARS else text[: SUMMARY_CHARS - 1] + "…"
+    return ""
 
 
 def _first_meta(path: Path) -> dict[str, Any]:

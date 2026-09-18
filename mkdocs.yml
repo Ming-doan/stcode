@@ -115,6 +115,7 @@ nav:
       - Index: decisions/index.md
       - 0001 Tool search: decisions/0001-tool-search.md
       - 0002 File and image input: decisions/0002-file-and-image-input.md
+      - 0003 What the TUI owns: decisions/0003-what-the-tui-owns.md
   - Contributing:
       - How a change is made: contributing/workflow.md
       - Testing: contributing/testing.md

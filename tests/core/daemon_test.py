@@ -21,6 +21,7 @@ What each group is protecting:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from contextlib import aclosing
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -838,3 +839,40 @@ def test_event_frame_names_the_sub_agent_that_produced_it() -> None:
 
     assert "agent" not in own, "a frame with no agent is the session's own agent"
     assert child == {"type": "text_delta", "text": "hi", "session": "s1", "agent": "scout"}
+
+
+@asynctest
+async def test_abandoning_the_event_stream_cancels_the_reads_it_was_parked_on(
+    sandbox: Path, tmp_path: Path
+) -> None:
+    """`events()` waits on two futures at once. Dropping the generator while it is
+    parked used to leak both, and a task garbage-collected after the loop has closed
+    surfaces as `RuntimeError: Event loop is closed` from nowhere in particular —
+    during shutdown, which is exactly when nobody wants a new mystery."""
+
+    def parked() -> list[asyncio.Task[Any]]:
+        return [
+            task
+            for task in asyncio.all_tasks()
+            if "Queue.get" in repr(task.get_coro()) or "Event.wait" in repr(task.get_coro())
+        ]
+
+    async with Harnessed(config_for(tmp_path), RecordingGateway([])) as env:
+        client = await env.client()
+        await client.create(cwd=sandbox)
+
+        async def read_forever() -> None:
+            async for _frame in client.events():
+                pass
+
+        reader = asyncio.create_task(read_forever())
+        await asyncio.sleep(0.05)
+        assert parked(), "the stream never parked, so this proves nothing"
+
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reader
+        await asyncio.sleep(0.05)
+
+        assert not parked()
+        await client.aclose()
