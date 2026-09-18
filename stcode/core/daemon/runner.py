@@ -34,6 +34,7 @@ from stcode.core.agent import Agent
 from stcode.core.daemon.protocol import (
     ApprovalRequested,
     ErrorMessage,
+    InfoReply,
     Progress,
     QuestionAsked,
     SessionOpened,
@@ -73,7 +74,10 @@ class SessionRunner:
         # The agent asks; this runner answers over the wire. Wired here rather than in
         # `Harness.create`, because the harness must not know a socket exists.
         agent.attach(
-            on_approval=self.request_approval, on_ask=self.ask, on_progress=self.progress
+            on_approval=self.request_approval,
+            on_ask=self.ask,
+            on_progress=self.progress,
+            on_event=self.emit_child,
         )
 
     # ---- lifecycle ----
@@ -170,14 +174,50 @@ class SessionRunner:
             sink.put_nowait(frame)
 
     def describe(self) -> SessionOpened:
-        meta = self.agent.session.meta()
+        """What this session *is* — meta with any overrides folded on top.
+
+        The effective settings, not the ones it started with: after a `/model` the two
+        differ, and a status line showing the older of them is a status line that lies.
+        """
+        session = self.agent.session
+        settings = {**session.meta(), **session.overrides()}
         return SessionOpened(
             id=self.id,
-            cwd=str(meta.get("cwd", "")),
-            role=str(meta.get("role", "")),
-            model=str(meta.get("model", "")),
+            cwd=str(settings.get("cwd", "")),
+            role=str(settings.get("role", "")),
+            model=str(settings.get("model", "")),
+            provider=str(settings.get("provider", "")),
+            reasoning_effort=str(settings.get("reasoning_effort", "")),
             approval_mode=self.agent.harness.approval_mode,
             busy=self.agent.busy,
+            started=session.started,
+        )
+
+    def inform(self, **extra: Any) -> InfoReply:
+        """What this machine has — skills, MCP servers, tools, paths.
+
+        Assembled here because every field is the *agent's*, and a client cannot see
+        any of it once the agent is in a container. `extra` is what only the daemon
+        knows: its own address, and which config file it was started from.
+        """
+        harness = self.agent.harness
+        skills = harness.context.skills
+        return InfoReply(
+            session=self.id,
+            cwd=str(harness.context.cwd),
+            role=str(self.agent.session.meta().get("role", "")),
+            session_path=str(self.agent.session.path),
+            approval_mode=harness.approval_mode,
+            tools=harness.tool_names(),
+            skills=[
+                {"name": skill.name, "description": skill.description, "source": skill.source}
+                for skill in (skills or [])
+            ],
+            mcp=[
+                {"name": server, "tools": tools}
+                for server, tools in sorted(harness.mcp_servers.items())
+            ],
+            **extra,
         )
 
     def open_requests(self) -> list[dict[str, Any]]:
@@ -192,6 +232,16 @@ class SessionRunner:
 
     async def interrupt(self) -> None:
         await self.agent.interrupt()
+
+    def set_meta(self, fields: dict[str, Any]) -> None:
+        """Override this session's model, provider or reasoning effort.
+
+        Straight through to the session: `Agent._overrides()` reads it back before the
+        next model call, so this reaches the live turn the same way `set_mode` does —
+        at the next request, never inside the one in flight.
+        """
+        if fields:
+            self.agent.session.set_meta(**fields)
 
     def set_mode(self, mode: ApprovalMode) -> None:
         """Change the approval mode of the live agent.
@@ -223,6 +273,15 @@ class SessionRunner:
 
     async def progress(self, text: str) -> None:
         self.broadcast(Progress(session=self.id, text=text).model_dump())
+
+    def emit_child(self, agent_name: str, event: Any) -> None:
+        """Fan out one sub-agent event, named.
+
+        The same frame a parent's event produces plus an `agent` field — and nothing is
+        recorded, because the sub-agent's own session already has it. Synchronous: this
+        is the tail of `Runtime.emit`, and a sub-agent must not wait on a client.
+        """
+        self.broadcast(event_frame(self.id, event, agent=agent_name))
 
     async def _await_client(self, execution_id: str, message: Any, *, verb: str) -> Any:
         """Ask the attached clients something and block this tool until one answers.

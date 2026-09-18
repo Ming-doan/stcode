@@ -213,3 +213,128 @@ def test_opening_a_path_that_does_not_exist_yet_starts_empty(tmp_path: Path) -> 
     session = Session(tmp_path / "nested" / "fresh.jsonl")
     assert session.records() == [] and session.path.is_file()
     session.close()
+
+
+# ---- the file appears on the first message ----------------------------------------
+
+
+def test_a_deferred_session_writes_no_file_until_the_first_append(tmp_path: Path) -> None:
+    """An id with nothing behind it. `/clear` is a new session, and a UI that was opened
+    and closed again must not leave a transcript to list."""
+    session = Session.create(cwd=tmp_path, directory=tmp_path, defer=True, model="m")
+    assert session.id and not session.started
+    assert not session.path.exists()
+    # Readable before it exists: the meta is held in memory, not invented later.
+    assert session.meta()["cwd"] == str(tmp_path)
+
+    session.append(type="user", content="hi")
+    assert session.started and session.path.is_file()
+    records = list(read_records(session.path))
+    assert [r["type"] for r in records] == ["meta", "user"]
+    assert records[0]["model"] == "m"
+    session.close()
+
+
+def test_a_deferred_session_nobody_used_leaves_nothing_behind(tmp_path: Path) -> None:
+    for _ in range(5):
+        Session.create(directory=tmp_path, defer=True).close()
+    assert list(tmp_path.glob("*.jsonl")) == []
+    assert Session.list(directory=tmp_path) == []
+
+
+def test_an_eager_session_still_writes_its_meta_immediately(tmp_path: Path) -> None:
+    """The default is unchanged: `Session.create()` is a file on disk."""
+    session = Session.create(directory=tmp_path)
+    assert session.started and session.path.is_file()
+    session.close()
+
+
+# ---- meta is a merged view -------------------------------------------------------
+
+
+def test_a_later_meta_record_overrides_an_earlier_one_without_rewriting(
+    tmp_path: Path,
+) -> None:
+    """How `/model` reaches a running session without breaking rule 4."""
+    session = Session.create(cwd=tmp_path, directory=tmp_path, model="claude-sonnet-5")
+    session.append(type="user", content="why is this flaky?")
+    session.append(type="meta", model="claude-opus-5", reasoning_effort="high")
+
+    # `meta()` is still what the session *started* as — what `stcode sessions` lists.
+    assert session.meta()["model"] == "claude-sonnet-5"
+    assert session.overrides() == {"model": "claude-opus-5", "reasoning_effort": "high"}
+    # Nothing was rewritten: both records are in the file, in order.
+    assert [r["type"] for r in read_records(session.path)] == ["meta", "user", "meta"]
+    session.close()
+
+
+def test_the_last_override_wins_and_bookkeeping_is_not_an_override(tmp_path: Path) -> None:
+    session = Session.create(directory=tmp_path, model="a")
+    session.append(type="user", content="go")
+    session.append(type="meta", model="b")
+    session.append(type="meta", model="c", provider="anthropic")
+    assert session.overrides() == {"model": "c", "provider": "anthropic"}
+    # `ts` and `type` are not settings, and neither is the id.
+    assert not {"ts", "type", "id"} & set(session.overrides())
+    session.close()
+
+
+def test_an_override_never_becomes_a_message(tmp_path: Path) -> None:
+    """`meta` is not `MODEL_VISIBLE`. A model told "model=claude-opus-5" in its own
+    history is being charged to read something it cannot act on."""
+    session = Session.create(directory=tmp_path)
+    session.append(type="user", content="go")
+    session.append(type="meta", model="claude-opus-5")
+    assert [m.role for m in session.messages()] == ["user"]
+    session.close()
+
+
+def test_setting_meta_before_the_first_message_leaves_one_meta_record(
+    tmp_path: Path,
+) -> None:
+    """Nothing is rewritten because nothing was written. Picking a model in `/model`
+    before typing must not create the file `defer` exists to avoid."""
+    session = Session.create(directory=tmp_path, defer=True, model="a")
+    session.set_meta(model="b", reasoning_effort="low")
+    assert not session.path.exists()
+
+    session.append(type="user", content="hi")
+    records = list(read_records(session.path))
+    assert [r["type"] for r in records] == ["meta", "user"]
+    assert records[0]["model"] == "b" and records[0]["reasoning_effort"] == "low"
+    assert session.overrides() == {}  # it *is* the meta now, not an override
+    session.close()
+
+
+def test_setting_meta_on_a_started_session_appends(tmp_path: Path) -> None:
+    session = Session.create(directory=tmp_path, model="a")
+    session.append(type="user", content="hi")
+    session.set_meta(model="b")
+    assert session.meta()["model"] == "a"
+    assert session.overrides() == {"model": "b"}
+    session.close()
+
+
+def test_a_child_does_not_inherit_its_parents_overrides(tmp_path: Path) -> None:
+    """`task(difficulty="low")` must still route to the cheap tier. An override that
+    silently upgraded every scout to the expensive model makes tiers decorative."""
+    parent = Session.create(cwd=tmp_path, directory=tmp_path, model="claude-sonnet-5")
+    parent.append(type="user", content="go")
+    parent.set_meta(model="claude-opus-5", reasoning_effort="max")
+
+    child = parent.child("scout")
+    assert child.meta()["model"] == "claude-sonnet-5"
+    assert child.overrides() == {}
+    parent.close()
+    child.close()
+
+
+def test_a_child_is_deferred_too(tmp_path: Path) -> None:
+    """A sub-agent that dies before its first append leaves no file."""
+    parent = Session.create(cwd=tmp_path, directory=tmp_path)
+    child = parent.child("scout")
+    assert not child.started and not child.path.exists()
+    assert child.meta()["parent"] == parent.id and child.meta()["agent_name"] == "scout"
+    child.close()
+    parent.close()
+    assert [entry["id"] for entry in Session.list(directory=tmp_path)] == [parent.id]

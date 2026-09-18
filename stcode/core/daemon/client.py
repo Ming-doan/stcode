@@ -7,14 +7,14 @@ DaemonClient — the other end of the same JSONL.
         async for frame in client.events():
             ...
 
-Thin on purpose: it opens the transport, sends the eight client messages, and hands back
+Thin on purpose: it opens the transport, sends the client messages, and hands back
 what the daemon says. It renders and interprets nothing — that would put display in
 `core/`.
 
-**Requests and events share one socket.** `create`, `attach` and `sessions` expect an
-answer while deltas arrive, so one reader routes each frame to a waiter parked on that
-frame's type, else to the event queue. Type is enough: a client has at most one of those
-three in flight, and everything else is fire-and-forget or keyed by `execution_id`.
+**Requests and events share one socket.** `create`, `attach`, `sessions` and `info`
+expect an answer while deltas arrive, so one reader routes each frame to a waiter parked
+on that frame's type, else to the event queue. Type is enough: a client has at most one
+of those in flight, and everything else is fire-and-forget or keyed by `execution_id`.
 """
 
 from __future__ import annotations
@@ -32,16 +32,19 @@ from stcode.core.daemon.protocol import (
     Attach,
     Create,
     Detach,
+    Info,
     Interrupt,
     ProtocolError,
     Push,
     Sessions,
+    SetMeta,
     SetMode,
     decode,
     encode,
 )
 from stcode.core.daemon.server import socket_path
 from stcode.core.harness.approvals import ApprovalMode
+from stcode.core.providers.types import ReasoningEffort
 
 REPLY_TIMEOUT = 30.0
 """How long a synchronous verb waits. Long enough for `create` to sample git and
@@ -207,6 +210,33 @@ class DaemonClient:
 
     async def set_mode(self, mode: ApprovalMode, session_id: str = "") -> None:
         await self._fire(SetMode(mode=mode, session=session_id))
+
+    async def set_meta(
+        self,
+        *,
+        model: str | None = None,
+        provider: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        session_id: str = "",
+    ) -> None:
+        """Override this session's model, provider or reasoning effort.
+
+        Fire-and-forget like `set_mode`, and answered the same way: the daemon sends a
+        `session` frame saying what the settings now *are*. A client must never show a
+        change it only asked for.
+        """
+        await self._fire(
+            SetMeta(
+                model=model,
+                provider=provider,
+                reasoning_effort=reasoning_effort,
+                session=session_id,
+            )
+        )
+
+    async def info(self, session_id: str = "") -> dict[str, Any]:
+        """Skills, MCP servers, tools and paths — as the **daemon's** machine sees them."""
+        return await self._request(Info(session=session_id), "info")
 
     async def _fire(self, message: Any) -> None:
         self._send(message)

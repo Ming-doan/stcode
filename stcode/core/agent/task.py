@@ -95,7 +95,11 @@ def make_task_tool(parent: "Agent") -> Tool[Any]:
         )
         async with child:
             await runtime.progress(f"{name}: {prompt.splitlines()[0][:80]}")
-            return await child.result(prompt)
+            # Every event the child produces goes out to whoever is watching, tagged
+            # with this sub-agent's name. Out the side rather than into the parent's
+            # stream: the parent's events are its turn, each with a record behind it,
+            # and the child's belong to the child's transcript.
+            return await child.result(prompt, on_event=lambda event: runtime.emit(name, event))
 
     return task
 

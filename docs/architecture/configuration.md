@@ -18,6 +18,13 @@ Written 0600, atomically (write-then-rename), because it may hold a literal API 
 UI rewrites the whole file from the model, so hand-added comments do not survive a save —
 values do.
 
+## What is *not* in this file
+
+The TUI's own state — the theme, and the folders you have trusted — is in
+`~/.stcode/ui.toml`, read by the terminal client and by nothing else. `config.toml` is
+what a `--headless` daemon reads, and a container has no theme and trusts nothing.
+→ [decision 0003](../decisions/0003-what-the-tui-owns.md)
+
 ## Credentials
 
 Two ways, and **the environment wins when set**:

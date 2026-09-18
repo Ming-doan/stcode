@@ -332,11 +332,21 @@ class FakeAgent:
         self.on_approval: Any = None
         self.on_ask: Any = None
         self.on_progress: Any = None
+        self.on_event: Any = None
 
     # ---- the surface `SessionRunner` uses ----
 
-    def attach(self, *, on_ask: Any = None, on_approval: Any = None, on_progress: Any = None, tools: Any = ()) -> "FakeAgent":
+    def attach(
+        self,
+        *,
+        on_ask: Any = None,
+        on_approval: Any = None,
+        on_progress: Any = None,
+        on_event: Any = None,
+        tools: Any = (),
+    ) -> "FakeAgent":
         self.on_ask, self.on_approval, self.on_progress = on_ask, on_approval, on_progress
+        self.on_event = on_event
         return self
 
     @property

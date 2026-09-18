@@ -30,8 +30,10 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+from stcode import __version__
 from stcode.core.agent import Agent
 from stcode.core.common import trace
+from stcode.core.common.paths import default_config_path
 from stcode.core.configs import GatewayConfig
 from stcode.core.daemon.autonomy import AutonomyRefused, guard_autonomy
 from stcode.core.daemon.protocol import (
@@ -43,11 +45,13 @@ from stcode.core.daemon.protocol import (
     Detach,
     ErrorMessage,
     History,
+    Info,
     Interrupt,
     ProtocolError,
     Push,
     Sessions,
     SessionList,
+    SetMeta,
     SetMode,
     decode,
     encode,
@@ -225,6 +229,22 @@ class Daemon:
             cwd=meta.get("cwd") or None, role=str(meta.get("role", "")), session=session
         )
 
+    async def drop_unused(self, runner: SessionRunner) -> None:
+        """Forget a session that never wrote anything and has nobody watching.
+
+        `/clear` is a `create`, so without this the daemon holds every session anybody
+        opened and walked away from, for as long as it runs.
+
+        A session that **has** written a record is never dropped, however long its last
+        client has been gone: detach does not kill the agent, and that rule has no
+        exceptions. The test is the transcript, not the clock.
+        """
+        if runner.watchers or runner.agent.session.started:
+            return
+        self.sessions.pop(runner.id, None)
+        await runner.aclose()
+        log.info("session %s dropped — never used", runner.id)
+
     def session_summaries(self, limit: int = 20) -> list[dict[str, Any]]:
         """What this daemon is holding, merged over what is on disk.
 
@@ -316,7 +336,7 @@ class _Connection:
         """Detach from everything, then close the socket. **Never touches the agents** —
         that is the whole promise of the daemon."""
         for session_id in list(self._attached):
-            self._detach(session_id)
+            await self._detach(session_id)
         self._drain_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._drain_task
@@ -339,7 +359,7 @@ class _Connection:
                 runner = await self._daemon.resume_session(message.session)
                 self._attach(runner, replay=message.replay)
             case Detach():
-                self._detach(self._target_id(message.session))
+                await self._detach(self._target_id(message.session))
             case Sessions():
                 self.send(SessionList(sessions=self._daemon.session_summaries(message.limit)))
             case Push():
@@ -350,6 +370,22 @@ class _Connection:
                 self._runner(message.session).resolve(message.execution_id, message.approved)
             case Answer():
                 self._runner(message.session).resolve(message.execution_id, message.text)
+            case SetMeta():
+                runner = self._runner(message.session)
+                runner.set_meta(message.fields())
+                # Same discipline as `set_mode`: report what the settings now *are*,
+                # so a client never shows a change it only asked for.
+                self.send(runner.describe())
+            case Info():
+                runner = self._runner(message.session)
+                self.send(
+                    runner.inform(
+                        version=__version__,
+                        daemon=self._daemon.address,
+                        config_path=str(default_config_path()),
+                        session_dir=str(self._daemon.config.session.dir),
+                    )
+                )
             case SetMode():
                 runner = self._runner(message.session)
                 # `create` is not the only door a mode arrives through, so the guard
@@ -384,13 +420,15 @@ class _Connection:
             self.send(frame)
         runner.start()
 
-    def _detach(self, session_id: str) -> None:
+    async def _detach(self, session_id: str) -> None:
         runner = self._daemon.sessions.get(session_id)
         if runner is not None:
             runner.unsubscribe(self._outbox)
         self._attached.discard(session_id)
         if self._current == session_id:
             self._current = next(iter(self._attached), "")
+        if runner is not None:
+            await self._daemon.drop_unused(runner)
 
     def _target_id(self, session_id: str) -> str:
         return session_id or self._current

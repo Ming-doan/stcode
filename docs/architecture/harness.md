@@ -187,6 +187,26 @@ the fact. Without a REPL the hint says to re-call with a narrower range instead.
 entries or 8 MB of text. Nothing else ever removed an entry, so a long session used to
 hold every large result it had ever produced.
 
+## Callbacks the host supplies
+
+Four, all optional, all with the same shape: the harness holds them, `Runtime` carries
+them into a call, and a tool that does not need one never knows it exists.
+
+| | |
+| --- | --- |
+| `on_approval` | `async (ApprovalRequest) -> bool` — the permission gate |
+| `on_ask` | `async (Question) -> str` — `ask_user_question` |
+| `on_progress` | `async (str) -> None` — a line from a long-running tool |
+| `on_event` | `(name, event) -> None` — a sub-agent's event, for a host that renders it |
+
+`on_event` is the one worth explaining. It exists so `task` can forward its child's
+stream to whoever is watching without the child's events entering the parent's turn
+(→ [the agent loop](agent-loop.md#a-sub-agents-events-go-out-the-side)). Synchronous and
+fire-and-forget: it is a render hint, and a tool must never be slowed down — or failed —
+by a client that has stopped reading.
+
+Left unset, it is a no-op, which is the whole behaviour of an agent nobody is watching.
+
 ## Prompts
 
 `core/harness/prompts/`. One axis — **mode**: `plan` researches and cannot write,

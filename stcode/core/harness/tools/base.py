@@ -108,6 +108,14 @@ ProgressFn = Callable[[str], Any]
 ApprovalFn = Callable[[ApprovalRequest], Awaitable[bool]]
 AskFn = Callable[[Question], Awaitable[str]]
 
+EventFn = Callable[[str, Any], None]
+"""`(agent_name, event) -> None`. A sub-agent's event, for a host that renders one.
+
+Synchronous and fire-and-forget, unlike the three above. It is a render hint: a tool
+must never be slowed down — or failed — by a client that has stopped reading. Left
+unset it is a no-op, which is the whole behaviour of an agent nobody is watching.
+"""
+
 
 # ---- runtime -------------------------------------------------------------------
 
@@ -151,6 +159,7 @@ class Runtime(Generic[CtxT]):
     on_progress: ProgressFn | None = None
     on_approval: ApprovalFn | None = None
     on_ask: AskFn | None = None
+    on_event: EventFn | None = None
 
     logger: logging.Logger = logger
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -202,6 +211,20 @@ class Runtime(Generic[CtxT]):
         outcome = self.on_progress(text)
         if inspect.isawaitable(outcome):
             await outcome
+
+    def emit(self, agent_name: str, event: Any) -> None:
+        """Hand one sub-agent event to whoever is watching. A no-op when nobody is.
+
+        Not a coroutine, and deliberately swallowing what the host raises: this is the
+        only callback whose failure has nothing to do with the work. A UI that blew up
+        rendering a delta must not take the sub-agent down with it.
+        """
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(agent_name, event)
+        except Exception:  # noqa: BLE001 — see above
+            self.logger.debug("on_event raised for %s", agent_name, exc_info=True)
 
     async def request_approval(self, permission: ToolPermission, arguments: dict[str, Any]) -> bool:
         """Ask the human to approve this call, per the mode in force.
@@ -598,6 +621,7 @@ __all__ = [
     "ApprovalFn",
     "ApprovalRequest",
     "AskFn",
+    "EventFn",
     "DEFAULT_MAX_OUTPUT",
     "ProgressFn",
     "Question",

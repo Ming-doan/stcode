@@ -49,6 +49,8 @@ Client → Daemon
 {"type":"push","text":"…"}
 {"type":"interrupt"}
 {"type":"set_mode","mode":"auto-edit"}
+{"type":"set_meta","model":"claude-opus-5","reasoning_effort":"high"}
+{"type":"info"}                                     → skills, MCP servers, paths
 {"type":"approval","execution_id":"ab12","approved":true}
 {"type":"answer","execution_id":"cd34","text":"Postgres"}
 
@@ -59,7 +61,9 @@ Daemon → Client
 {"type":"approval_request","execution_id":"ab12","tool":"bash","arguments":{…}}
 {"type":"question","execution_id":"cd34","question":"…","options":[…]}
 {"type":"history","records":[…]}                    # replay on re-attach, raw records
+{"type":"info","skills":[…],"mcp":[…],"config_path":"…"}
 {"type":"progress","text":"…"}                      # advisory; nothing is recorded
+{"type":"text_delta","text":"…","agent":"api-scout"} # a sub-agent's, same frame
 {"type":"turn_finished","usage":{…}}                # the full four-field Usage
 {"type":"agent_failed","message":"…"}               # a turn ending badly
 {"type":"error","message":"…"}                      # a protocol or daemon failure
@@ -68,6 +72,21 @@ Daemon → Client
 Every frame from the daemon carries a `session` id, because several clients may attach to
 several sessions over one connection. Client messages take an optional `session` and
 default to the last one that connection created or attached to.
+
+Frames from a **sub-agent** carry an `agent` name as well, and nothing else changes: a
+`text_delta` from `api-scout` is the same frame with one more field. No wrapper type, for
+the same reason agent events are not re-wrapped onto the wire — a parallel set of
+sub-agent messages would be a translation layer whose only job is staying in sync.
+Absent, `agent` means the session's own agent.
+
+`set_meta` and `info` are the two verbs the TUI needed and the protocol did not have.
+`set_meta` appends a `meta` record to the live session, which is how `/model` and
+`/effort` reach a running agent without rewriting anything
+(→ [sessions](session.md#meta-is-a-merged-view)). `info` answers the questions a client
+cannot answer for itself — which skills were found, which MCP servers connected and what
+they offer, where the config file is — all of which are facts about the machine the
+**daemon** is on, not the one the terminal is on. That distinction is invisible in solo
+mode and the whole point in `--daemonless`.
 
 ## Five things to get right the first time
 
@@ -95,6 +114,18 @@ To stop the work instead, send `interrupt`.
 last watcher fails every pending request with `ToolDenied` **naming the real reason** —
 not "the user declined", because a headless agent told a human refused it will act on
 that lie.
+
+## An unstarted session is not a session
+
+A session file is not created until its first message
+([sessions](session.md#the-file-appears-on-the-first-message)), so `create` can produce a
+session id with nothing behind it. When the last client detaches from one of those, the
+daemon closes it and drops it from the registry.
+
+Without that, `/clear` — which is a `create` — would leave the daemon holding every
+abandoned session for as long as it runs. With it, a client that connects, looks around
+and leaves holds nothing open. A session that has written a record is never dropped:
+detach does not kill the agent, and that rule has no exceptions.
 
 ## `full-auto` and the container rule
 

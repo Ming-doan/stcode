@@ -618,3 +618,89 @@ def test_config_naming_a_tool_that_does_not_exist_refuses(tmp_path: Path) -> Non
     agent = build(tmp_path, [])
     with pytest.raises(ValueError, match="do not exist"):
         apply_tool_policy(agent.harness, AgentConfig(exclude_tools=["websearch"]))
+
+
+# ---- the model is decided per call ------------------------------------------------
+
+
+def test_a_model_override_reaches_the_gateway_on_the_next_call(
+    tmp_path: Path, run: Any
+) -> None:
+    """`/model` mid-conversation takes effect on the next model call, not the next
+    session. Read fresh per call, like the tool definitions, because a value cached at
+    construction can no longer be changed by the person watching the turn."""
+    agent = build(tmp_path, [says("one"), says("two")])
+    run(drain(agent, "first"))
+    assert agent.gateway.last.options.get("model") is None  # type: ignore[attr-defined]
+
+    agent.session.set_meta(model="claude-opus-5", reasoning_effort="high")
+    run(drain(agent, "second"))
+
+    call = agent.gateway.last  # type: ignore[attr-defined]
+    assert call.options["model"] == "claude-opus-5"
+    assert call.options["reasoning_effort"] == "high"
+    # The tier is a statement about this piece of work and is not what was overridden.
+    assert call.difficulty == "high"
+    run(agent.aclose())
+
+
+def test_the_model_a_session_started_with_is_not_an_override(tmp_path: Path, run: Any) -> None:
+    """`[defaults] model` is recorded in `meta` for the human reading the trajectory.
+    Treating it as an override would pin every difficulty tier to one model."""
+    agent = build(tmp_path, [says("hi")])
+    agent.session.append(type="meta", **{})  # no-op record, not a settings change
+    run(drain(agent, "go"))
+    assert agent.gateway.last.options.get("model") is None  # type: ignore[attr-defined]
+    run(agent.aclose())
+
+
+# ---- a sub-agent's events go out the side ----------------------------------------
+
+
+def test_a_subagents_events_are_forwarded_to_the_host(tmp_path: Path, run: Any) -> None:
+    """The UI shows a sub-agent working. The parent's transcript does not grow because
+    of it, and its tool output still never enters the parent's context."""
+    seen: list[tuple[str, str]] = []
+    parent = build(
+        tmp_path,
+        [
+            calls_tool("c1", "task", prompt="Find the handlers.", name="scout"),
+            says("The scout found them."),
+        ],
+    )
+    parent.enable_task()
+    parent.harness.on_event = lambda name, event: seen.append((name, event.type))
+    parent.gateway._turns.insert(  # type: ignore[attr-defined]
+        1, calls_tool("k1", "glob", pattern="*.py")
+    )
+    parent.gateway._turns.insert(2, says("Handlers are in src/api.py."))  # type: ignore[attr-defined]
+
+    events = run(drain(parent, "where are the handlers?"))
+
+    assert ("scout", "tool_started") in seen
+    assert ("scout", "text_delta") in seen
+    assert ("scout", "turn_finished") in seen
+    # The parent's own events do not travel this way — they are its turn.
+    assert [name for name, _ in seen] == ["scout"] * len(seen)
+    # Nothing of the child's landed in the parent's transcript, and the parent got the
+    # final message and nothing else.
+    assert not any(r.get("name") == "glob" for r in parent.session.records())
+    finished = next(e for e in events if isinstance(e, ToolFinished) and e.name == "task")
+    assert "src/api.py" in finished.preview
+    run(parent.aclose())
+
+
+def test_an_unwatched_agent_forwards_nothing_and_does_not_care(
+    tmp_path: Path, run: Any
+) -> None:
+    """`on_event` unset is the whole behaviour of an agent nobody is watching."""
+    parent = build(
+        tmp_path,
+        [calls_tool("c1", "task", prompt="Look.", name="scout"), says("done")],
+    )
+    parent.enable_task()
+    parent.gateway._turns.insert(1, says("nothing here"))  # type: ignore[attr-defined]
+    assert parent.harness.on_event is None
+    events = run(drain(parent, "look"))
+    assert isinstance(events[-1], TurnFinished)
+    run(parent.aclose())

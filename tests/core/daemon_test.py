@@ -720,3 +720,121 @@ async def test_interrupt_reaches_the_agent(tmp_path: Path) -> None:
     assert agent.interrupted == 1
     await runner.aclose()
     assert agent.closed
+
+
+# ---- set_meta: the model reaches a running agent ---------------------------------
+
+
+@asynctest
+async def test_set_meta_reaches_the_live_session(sandbox: Path, tmp_path: Path) -> None:
+    """`/model` and `/effort` are not "next session" settings. The record lands in the
+    transcript, so a session that used two models is readable afterwards."""
+    async with Harnessed(config_for(tmp_path), RecordingGateway([])) as env:
+        client = await env.client()
+        info = await client.create(cwd=sandbox)
+        runner = env.daemon.sessions[info["id"]]
+        runner.agent.session.append(type="user", content="started")
+
+        await client.set_meta(model="claude-opus-5", reasoning_effort="high")
+        frame = await client.next_event(2)
+
+        assert frame["type"] == "session"
+        assert frame["model"] == "claude-opus-5"
+        assert frame["reasoning_effort"] == "high"
+        assert runner.agent.session.overrides() == {
+            "model": "claude-opus-5",
+            "reasoning_effort": "high",
+        }
+        await client.aclose()
+
+
+@asynctest
+async def test_set_meta_before_the_first_message_writes_no_file(
+    sandbox: Path, tmp_path: Path
+) -> None:
+    """Choosing a model before typing must not create the file `defer` exists to
+    avoid — nothing is written, so nothing has to be rewritten."""
+    async with Harnessed(config_for(tmp_path), RecordingGateway([])) as env:
+        client = await env.client()
+        info = await client.create(cwd=sandbox)
+        await client.set_meta(model="claude-opus-5")
+        await client.next_event(2)
+
+        session = env.daemon.sessions[info["id"]].agent.session
+        assert not session.started and not session.path.exists()
+        assert session.meta()["model"] == "claude-opus-5"
+        assert session.overrides() == {}
+        await client.aclose()
+
+
+# ---- info: facts about the daemon's machine, not the terminal's -------------------
+
+
+@asynctest
+async def test_info_reports_the_skills_and_paths_the_daemon_can_see(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """In `--daemonless` the terminal cannot answer "which skills are there" for
+    itself: the workspace is on the other machine."""
+    async with Harnessed(config_for(tmp_path), RecordingGateway([])) as env:
+        client = await env.client()
+        await client.create(cwd=workspace)
+        reply = await client.info()
+
+        assert {entry["name"] for entry in reply["skills"]} >= {"release-notes", "db-migrations"}
+        assert all(entry["description"] for entry in reply["skills"])
+        assert reply["cwd"] == str(workspace)
+        assert reply["config_path"]
+        assert "read" in reply["tools"] and "bash" in reply["tools"]
+        assert reply["daemon"] == env.daemon.address
+        await client.aclose()
+
+
+# ---- an unstarted session is not a session ---------------------------------------
+
+
+@asynctest
+async def test_an_unstarted_session_is_dropped_when_the_last_client_leaves(
+    sandbox: Path, tmp_path: Path
+) -> None:
+    """`/clear` is a `create`. Without this the daemon accumulates every session
+    anybody ever abandoned."""
+    async with Harnessed(config_for(tmp_path), RecordingGateway([])) as env:
+        client = await env.client()
+        info = await client.create(cwd=sandbox)
+        assert info["id"] in env.daemon.sessions
+
+        await client.detach()
+        assert await until_true(lambda: info["id"] not in env.daemon.sessions)
+        assert list((tmp_path / "sessions").glob("*.jsonl")) == []
+        await client.aclose()
+
+
+@asynctest
+async def test_a_session_that_has_written_a_record_is_never_dropped(
+    sandbox: Path, tmp_path: Path
+) -> None:
+    """Detach does not kill the agent, and that rule has no exceptions."""
+    async with Harnessed(config_for(tmp_path), RecordingGateway([says("hi")])) as env:
+        client = await env.client()
+        info = await client.create(cwd=sandbox)
+        await client.push("go")
+        await collect(client, until="turn_finished")
+
+        await client.detach()
+        await asyncio.sleep(0.05)
+        assert info["id"] in env.daemon.sessions
+        await client.aclose()
+
+
+# ---- sub-agent frames ------------------------------------------------------------
+
+
+def test_event_frame_names_the_sub_agent_that_produced_it() -> None:
+    """One extra field, not a wrapper type — the same reason agent events are not
+    re-wrapped onto the wire in the first place."""
+    own = event_frame("s1", TextDelta(text="hi"))
+    child = event_frame("s1", TextDelta(text="hi"), agent="scout")
+
+    assert "agent" not in own, "a frame with no agent is the session's own agent"
+    assert child == {"type": "text_delta", "text": "hi", "session": "s1", "agent": "scout"}

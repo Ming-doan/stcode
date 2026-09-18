@@ -825,6 +825,29 @@ def test_expose_decides_whether_the_prompt_grows(mcp_project: Path, run: Any, ex
         run(harness.aclose())
 
 
+@pytest.mark.parametrize("expose", ["code", "tools"])
+def test_the_connected_servers_are_remembered_for_a_client_to_show(
+    mcp_project: Path, run: Any, expose: str
+) -> None:
+    """`/mcp` has to answer "what is connected" in both modes. In `code` mode the
+    manager is closed as soon as it has been asked what the server offers, so the
+    answer has to be kept — the connection is gone, the facts are not."""
+    harness = run(
+        Harness.create(mcp_project, approval_mode="full-auto", mcp_expose=expose, load_repl=False)
+    )
+    try:
+        assert "bookshop" in harness.mcp_servers
+        assert "search_books" in harness.mcp_servers["bookshop"]
+    finally:
+        run(harness.aclose())
+
+
+def test_a_harness_with_no_mcp_config_reports_no_servers(tmp_path: Path, run: Any) -> None:
+    harness = run(Harness.create(cwd=tmp_path, load_git=False, load_repl=False))
+    assert harness.mcp_servers == {}
+    run(harness.aclose())
+
+
 def test_a_generated_stub_really_calls_the_server(mcp_project: Path, run: Any) -> None:
     """End to end: generate, import inside the REPL, call, get parsed data back."""
     from stcode.core.repl import PyREPL

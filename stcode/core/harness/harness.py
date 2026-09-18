@@ -40,6 +40,7 @@ from stcode.core.harness.tools import BUILTIN_TOOLS, MAIN_TOOLS, WORKER_TOOLS, T
 from stcode.core.harness.tools.base import (
     ApprovalFn,
     AskFn,
+    EventFn,
     ProgressFn,
     Runtime,
     Tool,
@@ -74,6 +75,7 @@ class Harness:
         on_progress: ProgressFn | None = None,
         on_approval: ApprovalFn | None = None,
         on_ask: AskFn | None = None,
+        on_event: EventFn | None = None,
         mcp: MCPManager | None = None,
         cancel: asyncio.Event | None = None,
     ) -> None:
@@ -102,6 +104,13 @@ class Harness:
         self.mcp_catalogue = mcp_catalogue
         """Server and tool *names*, for the prompt. Empty in `tools` mode, where the
         definitions are advertised instead."""
+
+        self.mcp_servers: dict[str, list[str]] = {}
+        """Server -> tool names, for a client that wants to show what is connected.
+
+        Kept because in `code` mode the manager is closed as soon as it has said what
+        each server offers: the connection is gone by then, the facts are not, and
+        `/mcp` still has to be able to answer."""
         # Whatever `elide` cuts is parked here; `_share_output` copies it into the
         # REPL's `tool_out` so the model can reach it. Bounded: nothing else would ever
         # remove an entry, and a long session would hold every large result it made.
@@ -109,6 +118,7 @@ class Harness:
         self.on_progress = on_progress
         self.on_approval = on_approval
         self.on_ask = on_ask
+        self.on_event = on_event
         # One event, shared by every `Runtime` this harness hands out, so a single
         # `set()` reaches every tool in flight. A per-call event nobody holds a
         # reference to could never be set at all.
@@ -161,6 +171,9 @@ class Harness:
             if servers:
                 manager = MCPManager()
                 await manager.open(servers)
+                harness.mcp_servers = {
+                    server: sorted(tools) for server, tools in manager.schemas().items()
+                }
                 if mcp_expose == "tools":
                     harness.mcp = manager
                     harness.registry.extend(manager.tools.values(), replace=True)
@@ -222,6 +235,9 @@ class Harness:
             on_progress=self.on_progress,
             on_approval=self.on_approval,
             on_ask=self.on_ask,
+            # A sub-agent gets no `task`, so it never emits; passed anyway so the
+            # arrow is one-way and a future nested case does not silently go dark.
+            on_event=self.on_event,
             mcp=self.mcp,
             # Interrupting the parent must reach its children: a sub-agent still
             # editing files after Esc is exactly the orphan to avoid.
@@ -289,6 +305,7 @@ class Harness:
             on_progress=self.on_progress,
             on_approval=self.on_approval,
             on_ask=self.on_ask,
+            on_event=self.on_event,
         )
 
     async def invoke(

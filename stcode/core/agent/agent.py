@@ -42,7 +42,7 @@ from stcode.core.agent.supervisor import Supervisor
 from stcode.core.common import trace
 from stcode.core.harness import Harness
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
-from stcode.core.harness.tools.base import ApprovalFn, AskFn, ProgressFn, Tool
+from stcode.core.harness.tools.base import ApprovalFn, AskFn, EventFn, ProgressFn, Tool
 from stcode.core.providers.gateway import Difficulty, LLMGateway
 from stcode.core.providers.types import (
     MessageStop,
@@ -145,6 +145,9 @@ class Agent:
             role=role,
             model=config.defaults.model,
             directory=config.session.dir,
+            # No file until the first message. A `stcode` that was opened in the wrong
+            # directory and closed again should leave nothing to list.
+            defer=True,
         )
         harness.session_id = session.id
 
@@ -182,6 +185,7 @@ class Agent:
         on_ask: AskFn | None = None,
         on_approval: ApprovalFn | None = None,
         on_progress: ProgressFn | None = None,
+        on_event: EventFn | None = None,
         tools: Iterable["Tool[Any] | Callable[[Agent], Tool[Any]]"] = (),
     ) -> "Agent":
         """Wire this agent to a caller: its callbacks, and any tools it brings.
@@ -194,6 +198,10 @@ class Agent:
         A tool may be a `Tool`, or a factory taking this agent — the shape a tool needs
         when it closes over the agent it was built for, as `task` does.
 
+        `on_event` is the one that is not about this agent: it is where a **sub-agent's**
+        events go, so a host can render one working without those events entering this
+        agent's turn.
+
         Returns `self`, so it chains onto `Agent.create(...)`.
         """
         if on_ask is not None:
@@ -202,6 +210,8 @@ class Agent:
             self.harness.on_approval = on_approval
         if on_progress is not None:
             self.harness.on_progress = on_progress
+        if on_event is not None:
+            self.harness.on_event = on_event
         for entry in tools:
             built = entry if isinstance(entry, Tool) else entry(self)
             self.harness.registry.register(built, replace=True)
@@ -293,9 +303,16 @@ class Agent:
                 if isinstance(event, (TurnFinished, AgentFailed)):
                     return
 
-    async def result(self, text: str) -> str:
-        """Run one turn and return just the final text. What `task` hands its parent."""
+    async def result(self, text: str, *, on_event: Callable[[AgentEvent], None] | None = None) -> str:
+        """Run one turn and return just the final text. What `task` hands its parent.
+
+        `on_event` sees everything that happened on the way, which is how a watching
+        client gets to show the sub-agent working. The return value is unaffected: the
+        parent still gets the final message and nothing else.
+        """
         async for event in self.run(text):
+            if on_event is not None:
+                on_event(event)
             if isinstance(event, TurnFinished):
                 return event.text
             if isinstance(event, AgentFailed):
@@ -462,12 +479,32 @@ class Agent:
         self.session.append(type="supervisor", content=nudge)
         yield SupervisorNudge(text=nudge)
 
+    def _overrides(self) -> dict[str, Any]:
+        """`provider`, `model` and `reasoning_effort` from this session's own `meta`.
+
+        Read before every call rather than cached on the agent, for the same reason the
+        tool definitions are: a value fixed at construction is a value the person
+        watching the turn can no longer change.
+
+        Absent keys are **omitted**, not passed as None, so difficulty routing is
+        untouched when nobody has overridden anything. `difficulty` itself is never
+        overridden here — a tier is a statement about one piece of work, an override is
+        a statement about the conversation, and sub-agents inherit neither.
+        """
+        overrides = self.session.overrides()
+        return {
+            key: overrides[key]
+            for key in ("provider", "model", "reasoning_effort")
+            if overrides.get(key)
+        }
+
     async def _stream(self) -> AsyncIterator[Any]:
         async for event in self.gateway.stream(
             self.session.messages(),
             system=self.harness.system_prompt(),
             tools=self.harness.tool_definitions(),
             difficulty=self.difficulty,
+            **self._overrides(),
         ):
             if isinstance(event, MessageStop):
                 # The gateway emits usage, the agent records it. A gateway importing

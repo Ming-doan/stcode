@@ -92,6 +92,24 @@ sees it at its next `raise_if_cancelled()` and the stream stops at its next even
 `ToolFinished` carries a 240-char preview rather than the result: `daemon/protocol.py`
 maps these one-to-one onto the wire, and a 4 MB payload does not belong on a socket.
 
+### A sub-agent's events go out the side
+
+They do **not** enter the parent's stream. `Harness.on_event` is a callback in the same
+family as `on_progress` — the host supplies it, the harness carries it, a tool calls it —
+and `task` forwards every event its child produces through it, tagged with the child's
+name.
+
+Out through `on_event` rather than `yield`ed into the parent's turn, because the two are
+different kinds of thing. The parent's events *are* its turn: each one has a record
+behind it in the parent's session. A child's events belong to the child's transcript, and
+a parent that yielded them would be claiming a history it does not have — while the tool
+that is producing them is still parked inside `_run_tools`, where there is nothing to
+yield from.
+
+So it stays what it is: observational. The UI renders it, the session does not record it,
+and the promise that a sub-agent's tool output never enters the parent's context is
+untouched.
+
 ## `attach()` — the host's one method
 
 ```py
@@ -123,6 +141,11 @@ task(prompt, name, tools=None, scope=None, difficulty="medium")
 The child gets its own `Harness` (via `for_subagent`), its own session file linked to the
 parent's by one `parent` field in `meta`, and **shares** the parent's gateway — closing
 that mid-turn would kill the parent's stream.
+
+It runs through `child.run(prompt)` rather than `child.result(prompt)` so the events can
+be forwarded as they happen; the return value is still the final message and nothing
+else. A watching client therefore sees the sub-agent work, and the model still only gets
+the paragraph.
 
 Three rules, each with a failure behind it:
 
@@ -157,6 +180,23 @@ frame but never awaits `_run_turn().aclose()`. So every level wraps the one unde
 ```
 run → events → _run_turn → _turn_body → _stream → the provider's
 ```
+
+## The model is decided per call, not per agent
+
+`_stream()` reads `session.overrides()` before every model call and passes `model`,
+`provider` and `reasoning_effort` to the gateway when they are set. The override arrives
+as an appended `meta` record — that is what `/model` and `/effort` do
+(→ [sessions](session.md#meta-is-a-merged-view)) — so it takes effect on the next call
+without restarting the agent, exactly as `set_mode` does for approvals.
+
+Read fresh each call, not cached on the agent, for the same reason the tool definitions
+are: a value cached at construction is a value that can no longer be changed by the
+person watching the turn.
+
+`difficulty` is untouched by this. A tier is a statement about *this piece of work* —
+`task(difficulty="low")`, the supervisor's cheap call — and an override is a statement
+about the conversation. Overrides are not inherited by sub-agents, so the two never
+fight.
 
 ## Configuration that reaches here
 

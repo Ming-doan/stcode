@@ -9,7 +9,10 @@ Everything crossing a process boundary is shaped here and nowhere else.
   with the right `type`, so a `TextDelta` is dumped as-is plus a `session` field.
 * `turn_finished` carries the **full four-field `Usage`** — the cache counts are the
   evidence for the prompt-caching claim.
-* `set_mode` exists, so `/mode` reaches the live session rather than only later ones.
+* `set_mode` and `set_meta` exist, so `/mode`, `/model` and `/effort` reach the live
+  session rather than only later ones.
+* `info` exists because a client cannot answer "which skills are there" for itself —
+  in `--daemonless` the workspace is on the daemon's machine, not the terminal's.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from stcode.core.agent.events import AgentEvent
 from stcode.core.harness.approvals import ApprovalMode
 from stcode.core.harness.tools.base import ApprovalRequest, Question
+from stcode.core.providers.types import ReasoningEffort
 
 
 class ProtocolError(Exception):
@@ -114,8 +118,44 @@ class SetMode(BaseModel):
     session: str = ""
 
 
+class SetMeta(BaseModel):
+    """Change a live session's model, provider or reasoning effort.
+
+    A **patch**: an unset field is left alone, so `/effort` does not have to restate
+    the model. It lands as a `meta` record appended to the session, which is why the
+    change is in the transcript and nothing is rewritten.
+    """
+
+    type: Literal["set_meta"] = "set_meta"
+    model: str | None = None
+    provider: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    session: str = ""
+
+    def fields(self) -> dict[str, Any]:
+        """Just the settings that were actually given."""
+        return {
+            key: value
+            for key, value in (
+                ("model", self.model),
+                ("provider", self.provider),
+                ("reasoning_effort", self.reasoning_effort),
+            )
+            if value
+        }
+
+
+class Info(BaseModel):
+    """Ask what this daemon's machine has: skills, MCP servers, tools, paths."""
+
+    type: Literal["info"] = "info"
+    session: str = ""
+
+
 ClientMessage = Annotated[
-    Union[Create, Attach, Detach, Sessions, Push, Interrupt, Approval, Answer, SetMode],
+    Union[
+        Create, Attach, Detach, Sessions, Push, Interrupt, Approval, Answer, SetMode, SetMeta, Info
+    ],
     Field(discriminator="type"),
 ]
 
@@ -126,15 +166,24 @@ _CLIENT_ADAPTER: TypeAdapter[ClientMessage] = TypeAdapter(ClientMessage)
 
 
 class SessionOpened(BaseModel):
-    """Answer to `create` and to `attach`: which session this connection is now on."""
+    """Answer to `create`, `attach`, `set_mode` and `set_meta`: what this session now is.
+
+    The settings are the **effective** ones — `meta` merged with any overrides — because
+    a status line showing what a session started as is a status line that lies after the
+    first `/model`. `started` says whether the transcript exists yet: a session can be
+    an id and nothing more until its first message.
+    """
 
     type: Literal["session"] = "session"
     id: str
     cwd: str = ""
     role: str = ""
     model: str = ""
+    provider: str = ""
+    reasoning_effort: str = ""
     approval_mode: str = ""
     busy: bool = False
+    started: bool = False
 
 
 class SessionList(BaseModel):
@@ -205,6 +254,30 @@ class QuestionAsked(BaseModel):
         )
 
 
+class InfoReply(BaseModel):
+    """Answer to `info`: what the **daemon's** machine has.
+
+    Every field here is something a client cannot see for itself once the agent is in a
+    container: the workspace, the config file, the skills that were discovered, the MCP
+    servers that answered. In solo mode that distinction is invisible; in
+    `--daemonless` it is the whole reason this message exists.
+    """
+
+    type: Literal["info"] = "info"
+    session: str = ""
+    version: str = ""
+    daemon: str = ""
+    cwd: str = ""
+    role: str = ""
+    config_path: str = ""
+    session_path: str = ""
+    session_dir: str = ""
+    approval_mode: str = ""
+    tools: list[str] = Field(default_factory=list)
+    skills: list[dict[str, str]] = Field(default_factory=list)
+    mcp: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class Progress(BaseModel):
     """A line of progress from a long-running tool. Advisory: nothing is recorded."""
 
@@ -223,7 +296,14 @@ class ErrorMessage(BaseModel):
 
 
 ServerMessage = Union[
-    SessionOpened, SessionList, History, ApprovalRequested, QuestionAsked, Progress, ErrorMessage
+    SessionOpened,
+    SessionList,
+    History,
+    ApprovalRequested,
+    QuestionAsked,
+    InfoReply,
+    Progress,
+    ErrorMessage,
 ]
 
 
@@ -266,9 +346,18 @@ def parse_client_message(payload: dict[str, Any]) -> ClientMessage:
         raise ProtocolError(f"bad {kind!r} message: {detail}") from exc
 
 
-def event_frame(session: str, event: AgentEvent) -> dict[str, Any]:
-    """An agent event as it goes on the wire: itself, plus which session it came from."""
-    return {**event.model_dump(mode="json"), "session": session}
+def event_frame(session: str, event: AgentEvent, *, agent: str = "") -> dict[str, Any]:
+    """An agent event as it goes on the wire: itself, plus where it came from.
+
+    `agent` names the **sub-agent** that produced it and is omitted when there is none,
+    so a frame without the field is the session's own agent. One extra field rather
+    than a parallel set of sub-agent message types — the same reason agent events are
+    not re-wrapped in the first place.
+    """
+    frame = {**event.model_dump(mode="json"), "session": session}
+    if agent:
+        frame["agent"] = agent
+    return frame
 
 
 __all__ = [
@@ -281,6 +370,8 @@ __all__ = [
     "Detach",
     "ErrorMessage",
     "History",
+    "Info",
+    "InfoReply",
     "Interrupt",
     "Progress",
     "ProtocolError",
@@ -290,6 +381,7 @@ __all__ = [
     "SessionList",
     "SessionOpened",
     "Sessions",
+    "SetMeta",
     "SetMode",
     "decode",
     "encode",

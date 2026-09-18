@@ -4,6 +4,7 @@
 
 ```py
 s = Session.create(cwd=root, role="backend-dev", directory=config.session.dir)
+s = Session.create(cwd=root, defer=True)             # no file until the first append
 s = Session.resume("01M2QF…")
 Session.list(limit=20)
 
@@ -11,6 +12,8 @@ s.append(type="user", content="Add rate limiting")   # sync, ~20µs
 s.messages()        # -> list[Message] for the gateway
 s.tail(30)          # -> raw records for the supervisor
 s.records()         # -> everything, for anyone reading the trajectory
+s.meta()            # -> the first meta record: what this session started as
+s.overrides()       # -> later meta records, merged: what has been changed since
 ```
 
 `~/.stcode/sessions/<id>.jsonl`, or `./.stcode/sessions/` with `[session] dir` for
@@ -28,6 +31,21 @@ the loop", because ~20µs of buffered write beats the machinery to avoid it.
 Opening a file adopts whatever is already in it. Appending to a file whose earlier
 content was never loaded breaks the premise: `messages()` would describe a shorter
 conversation than the file does. Pointing at an existing file *means* resuming it.
+
+## The file appears on the first message
+
+`Session.create(defer=True)` mints the id and holds the `meta` record in memory. The
+file is created on the first `append` — meta first, then that record — and `started`
+says which side of that line a session is on.
+
+Two things depend on it. The TUI's `/clear` is "end this session, begin another", and
+without deferral that is a directory filling with empty files. And a `stcode` that was
+started and closed without a word — wrong directory, checking a flag — used to leave a
+transcript that `stcode sessions` listed forever.
+
+The daemon drops an unstarted session with no watchers when the last client detaches: a
+session that wrote nothing and has nobody watching is not a session.
+→ [decision 0003](../decisions/0003-what-the-tui-owns.md)
 
 ## The record types
 
@@ -62,6 +80,33 @@ sub-agent leaves no natural stack trace, so this file *is* the stack trace.
   provider knows, and the prefix is what stops a nudge reading like a new instruction
   from the user.
 
+## `meta` is a merged view
+
+`meta()` is the **first** `meta` record — what the session started as, and what
+`stcode sessions` lists. `overrides()` is every `meta` record after it, merged, later
+wins.
+
+That second half is how `/model` and `/effort` change a running session without
+breaking rule 4. Nothing is rewritten; a new `meta` record is appended, and the agent
+reads `overrides()` before every model call:
+
+```jsonl
+{"ts":"…","type":"meta","id":"01M2…","cwd":"/w","model":"claude-sonnet-5"}
+{"ts":"…","type":"user","content":"why is this test flaky?"}
+{"ts":"…","type":"meta","model":"claude-opus-5","reasoning_effort":"high"}
+```
+
+The transcript then says *when* the model changed, which is the only thing that makes a
+session that used two models readable afterwards.
+
+Three fields are honoured: `model`, `provider`, `reasoning_effort`. An override with a
+`model` but no `provider` keeps the difficulty tier's provider and credentials and swaps
+only the model name — that is the gateway's existing rule, not a special case here.
+
+**Sub-agents do not inherit overrides.** `child()` copies from `meta()` alone, so
+`task(difficulty="low")` still routes to the cheap tier. An override that silently
+upgraded every scout to the expensive model would make difficulty tiers decorative.
+
 ## Ids
 
 `new_id()`, from `core/common/ids.py`. A monotonic ULID: 48 bits of millisecond
@@ -89,6 +134,14 @@ in-millisecond ordering and a dash-free filename is not a trade worth making yet
 its `meta`. Interleaving a child's tool calls into the parent's transcript would make
 `messages()` produce a conversation neither agent had; one field is enough to reassemble
 the tree afterwards.
+
+`agent_name` is the other field, and the two together are what the TUI's `/sessions`
+tree is built from — a group-by over the `meta` lines, not an index.
+
+A child is created deferred like any other session, so a sub-agent that is spawned and
+fails before its first append leaves no file. Watching a sub-agent's events in the
+parent's transcript changes nothing about either file: the events travel on the
+`progress` side-channel, and the child's records go only to the child's file.
 
 ## Reading a session
 
