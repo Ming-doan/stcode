@@ -29,13 +29,15 @@ DEFAULT_EVERY = 8
 """Iterations between checks. Low enough to catch a loop before it burns the turn's
 budget, high enough not to interrupt a productive stretch."""
 
-DEFAULT_WINDOW = 30
-"""Records the heuristics look at. About two iterations' worth of calls and results."""
+DEFAULT_WINDOW = 80
+"""Records the heuristics look at. At ~4 records per iteration (assistant, tool_call,
+tool_result, usage), 80 records represents ~20 iterations — sufficient to observe patterns
+across multiple checks."""
 
 REPEAT_THRESHOLD = 3
 ERROR_RATE_THRESHOLD = 0.5
 SAME_FILE_THRESHOLD = 4
-IDLE_CALLS_THRESHOLD = 10
+IDLE_CALLS_THRESHOLD = 8
 """Calls with no file written before "lots of looking, no doing" counts. High on
 purpose: research legitimately writes nothing, and a supervisor that fires on reading is
 one you switch off."""

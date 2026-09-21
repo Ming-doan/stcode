@@ -218,9 +218,17 @@ class Daemon:
         mode = approval_mode or self.config.defaults.approval_mode
         guard_autonomy(mode, self.has_approver)
 
+        resolved_cwd = None
+        if cwd is not None:
+            p = Path(cwd).expanduser()
+            if p.is_dir():
+                resolved_cwd = p
+            else:
+                log.warning("requested cwd %s does not exist; falling back to daemon cwd", cwd)
+
         agent = await Agent.create(
             self.config,
-            cwd=cwd,
+            cwd=resolved_cwd,
             role=role or self.config.team.role,
             approval_mode=mode,
             session=session,

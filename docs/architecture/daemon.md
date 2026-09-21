@@ -36,6 +36,18 @@ No implementation switches between them. `--daemonless` never starts an agent lo
 nothing answers it asks *which daemon?* rather than quietly running the work on your
 laptop. `/connect` moves a running UI to a different one.
 
+### Workspace and CWD ownership
+
+The **daemon owns file execution, tool execution, and session state**.
+* In **solo mode** (`stcode`), the TUI and daemon run on the same host, and the TUI supplies
+  its local directory to seed the session's `cwd`.
+* In **container mode** (`stcode --headless` in container, `stcode --daemonless` on host),
+  the workspace belongs strictly to the **daemon's machine**. The client leaves `cwd` empty
+  unless explicitly passed via `--cwd`, allowing the daemon to initialize the agent at its
+  own container workspace (`Path.cwd()`, e.g. `/workspace`). If an incoming `cwd` does not
+  exist on the daemon filesystem, the daemon logs a warning and falls back to its own
+  working directory.
+
 ## The protocol
 
 JSONL, one message per line, the same framing on unix and TCP.

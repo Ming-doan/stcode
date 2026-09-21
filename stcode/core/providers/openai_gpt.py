@@ -5,9 +5,12 @@ OpenAI LLM Provider
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, AsyncGenerator
 
 from openai import AsyncOpenAI
+
+log = logging.getLogger("stcode.providers.openai")
 
 from stcode.core.providers.base import BaseModelProvider
 from stcode.core.providers.types import (
@@ -36,6 +39,36 @@ _FINISH_REASON_MAP: dict[str, StopReason] = {
     "length": "max_tokens",
     "content_filter": "refusal",
 }
+
+
+def _parse_tool_arguments(raw_json: str) -> dict[str, Any]:
+    """Parse tool call arguments from streamed chunks with lenient repair.
+
+    A stream cut off by `finish_reason="length"` or an open-source proxy often drops the
+    closing quote or bracket. Attempting simple repairs prevents a truncated generation
+    from crashing the turn with JSONDecodeError.
+    """
+    if not raw_json or not raw_json.strip():
+        return {}
+    cleaned = raw_json.strip()
+    try:
+        val = json.loads(cleaned)
+        return val if isinstance(val, dict) else {"_value": val}
+    except json.JSONDecodeError:
+        pass
+
+    # Try common truncation closures (unclosed string or unclosed objects)
+    for suffix in ['"}', '"}]', "}", "]}", '"]}', '"]}}']:
+        try:
+            val = json.loads(cleaned + suffix)
+            if isinstance(val, dict):
+                log.debug("Repaired truncated tool arguments using suffix %r", suffix)
+                return val
+        except json.JSONDecodeError:
+            continue
+
+    log.warning("Malformed tool call arguments received from model: %s", raw_json)
+    return {"_raw": raw_json, "_error": "JSONDecodeError"}
 
 
 class OpenAIProvider(BaseModelProvider):
@@ -150,9 +183,18 @@ class OpenAIProvider(BaseModelProvider):
                         yield ToolCallEnd(
                             id=call["id"],
                             name=call["name"],
-                            input=json.loads(call["json"]) if call["json"] else {},
+                            input=_parse_tool_arguments(call["json"]),
                         )
                     pending_calls.clear()
+
+        # Flush any remaining calls if finish_reason was omitted or stream ended early
+        for call in pending_calls.values():
+            yield ToolCallEnd(
+                id=call["id"],
+                name=call["name"],
+                input=_parse_tool_arguments(call["json"]),
+            )
+        pending_calls.clear()
 
         yield MessageStop(stop_reason=stop_reason, usage=usage)
 

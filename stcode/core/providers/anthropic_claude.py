@@ -147,7 +147,8 @@ class AnthropicProvider(BaseModelProvider):
                     call_id = pending_calls.pop(event.index, None)
                     if call_id is not None:
                         block = event.content_block
-                        yield ToolCallEnd(id=call_id, name=block.name, input=block.input)
+                        args = block.input if isinstance(getattr(block, "input", None), dict) else {}
+                        yield ToolCallEnd(id=call_id, name=block.name, input=args)
                 elif event.type == "message_delta":
                     usage.output_tokens = event.usage.output_tokens
                     if event.delta.stop_reason is not None:

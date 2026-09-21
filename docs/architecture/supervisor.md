@@ -14,7 +14,7 @@ for stagnation as part of it; this is the cheap version of that idea.
 
 ## Counting first, model second
 
-Four plain-Python heuristics run over the last `window` (30) records. They cost nothing.
+Four plain-Python heuristics run over the last `window` (80) records. They cost nothing.
 Only a hit spends one `difficulty="low"` call — and that model is explicitly allowed to
 answer `NONE`.
 
@@ -22,12 +22,14 @@ answer `NONE`.
 | --- | --- |
 | Repetition | the same tool with the same arguments **3×** in the window |
 | Failure rate | more than **half** the calls in the window returned `is_error` |
-| Looking, not doing | **10** calls with no file written |
+| Looking, not doing | **8** calls with no file written |
 | Thrashing one file | the same file written or edited **4×** |
 
-The thresholds are deliberately forgiving. Research legitimately writes nothing for a
-long stretch, and a supervisor that fires on reading is one you switch off — at which
-point it catches nothing at all.
+The thresholds are deliberately forgiving. At ~4 records per tool iteration (assistant,
+tool_call, tool_result, usage), a window of 80 records observes ~20 iterations — broad
+enough to observe real tool trends without drowning the slice in non-call events. Research
+legitimately writes nothing for a long stretch, and a supervisor that fires on reading is
+one you switch off — at which point it catches nothing at all.
 
 ## Three rules
 
@@ -72,7 +74,7 @@ invisible to the person watching.
 [supervisor]
 enabled    = true
 every      = 8          # tool-call iterations between checks, within a turn
-window     = 30         # records the heuristics look at
+window     = 80         # records the heuristics look at
 difficulty = "low"      # the tier a hit spends
 ```
 

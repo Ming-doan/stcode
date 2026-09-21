@@ -274,6 +274,7 @@ class StcodeApp(App[None]):
         # `--daemonless`: never start an agent here. Starting a local one would run the
         # work on this machine instead — the opposite of what was asked for.
         self._daemonless = daemonless
+        self._explicit_cwd = cwd is not None
         self._cwd = cwd or Path.cwd()
         self._resume = resume
         self._prefs_path = prefs_path or ui_path()
@@ -410,8 +411,9 @@ class StcodeApp(App[None]):
                 # transcript" without the client knowing which happened.
                 info = await client.attach(self._resume)
             else:
+                create_cwd = self._cwd if (self._explicit_cwd or not self._daemonless) else None
                 info = await client.create(
-                    cwd=self._cwd, approval_mode=self.config.defaults.approval_mode
+                    cwd=create_cwd, approval_mode=self.config.defaults.approval_mode
                 )
         except Exception as exc:  # noqa: BLE001
             self._error(labels.daemon_failed(exc))

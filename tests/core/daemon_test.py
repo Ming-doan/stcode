@@ -933,3 +933,19 @@ def test_session_usage_counts_every_call_not_every_turn() -> None:
 
 def test_session_usage_of_a_session_that_never_called_anything() -> None:
     assert session_usage([{"type": "meta", "id": "x"}])["calls"] == 0
+
+
+@asynctest
+async def test_create_session_falls_back_when_cwd_does_not_exist(tmp_path: Path) -> None:
+    config = GatewayConfig()
+    config.session.dir = tmp_path / "sessions"
+    gateway = RecordingGateway([says("hello")])
+    daemon = Daemon(config, gateway=gateway)
+    non_existent = tmp_path / "does_not_exist_at_all"
+
+    runner = await daemon.create_session(cwd=non_existent)
+    try:
+        assert runner.agent.harness.context.cwd == Path.cwd()
+    finally:
+        await daemon.aclose()
+

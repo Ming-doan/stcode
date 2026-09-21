@@ -135,10 +135,10 @@ class GoogleGenAIProvider(BaseModelProvider):
                     elif part.function_call is not None:
                         has_tool_call = True
                         call = part.function_call
-                        call_id = call.id or call.name
-                        args = call.args or {}
+                        call_id = call.id or call.name or ""
+                        args = dict(call.args) if call.args else {}
                         yield ToolCallStart(id=call_id, name=call.name)
-                        yield ToolCallDelta(id=call_id, partial_json=json.dumps(args))
+                        yield ToolCallDelta(id=call_id, partial_json=json.dumps(args, default=str))
                         yield ToolCallEnd(id=call_id, name=call.name, input=args)
             if chunk.usage_metadata is not None:
                 usage = Usage(

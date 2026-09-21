@@ -138,7 +138,7 @@ class SupervisorConfig(BaseModel):
 
     enabled: bool = True
     every: int = 8
-    window: int = 30
+    window: int = 80
     difficulty: Difficulty = "low"
 
 

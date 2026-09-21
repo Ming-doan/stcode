@@ -148,3 +148,18 @@ prompt section dynamic as a performance regression, because it is one.
 4. It is now selectable from `[providers]` and any `[routing]` tier.
 
 An OpenAI-compatible endpoint needs none of that — point `base_url` at it.
+
+## Streaming tool call arguments and resilience
+
+OpenAI-compatible providers stream tool arguments as raw string deltas across multiple chunks,
+which the adapter accumulates. In production, local or third-party inference proxies (e.g. vLLM,
+Ollama, LiteLLM) may cut generation off unexpectedly — hitting `max_tokens` (`finish_reason="length"`),
+dropping trailing closures, or terminating an SSE stream mid-argument.
+
+Rather than letting unhandled `JSONDecodeError` crash the turn:
+* `OpenAIProvider` applies lenient parsing, attempting to close truncated strings or objects.
+* Irreparable payloads emit a safe error dictionary rather than raising, leaving argument validation
+  to `Tool.invoke()`. The model receives a standard tool validation error in the next turn and
+  can correct its input, rather than dying with an unrecoverable exception.
+* Pending calls are cleanly flushed when the stream closes even if the upstream omitted a final
+  `finish_reason` chunk.

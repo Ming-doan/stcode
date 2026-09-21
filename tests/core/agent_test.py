@@ -426,15 +426,24 @@ def test_heuristics_catch_the_four_shapes_of_stuck() -> None:
     )
     assert rewritten and "src/main.py" in rewritten
 
-    # Ten different reads is not repetition, and nothing was written: the "all looking,
+    # Eight different reads is not repetition, and nothing was written: the "all looking,
     # no doing" shape, which needs its own check.
     idle = Supervisor.smell(
         [
             {"type": "tool_call", "id": str(n), "name": "read", "arguments": {"path": f"{n}.py"}}
-            for n in range(10)
+            for n in range(8)
         ]
     )
     assert idle and "without writing a single file" in idle
+    assert (
+        Supervisor.smell(
+            [
+                {"type": "tool_call", "id": str(n), "name": "read", "arguments": {"path": f"{n}.py"}}
+                for n in range(7)
+            ]
+        )
+        is None
+    )
 
 
 def test_a_false_alarm_costs_nothing_beyond_one_cheap_call(run: Any) -> None:

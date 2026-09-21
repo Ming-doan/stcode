@@ -148,6 +148,8 @@ class Harness:
         a coding session cannot start.
         """
         root = Path(cwd).expanduser() if cwd else Path.cwd()
+        if not root.is_dir():
+            root = Path.cwd()
         context = kwargs.pop("context", None) or HarnessContext(cwd=root)
         context.cwd = root
         if load_skills and context.skills is None:

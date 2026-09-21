@@ -651,3 +651,23 @@ async def test_reconfigure_reaches_a_gateway_someone_else_is_holding():
     assert fake.last.api_key == "new", "the cached client outlived the credentials"
     assert fake.last.model == "m2"
     assert fake.closed, "the client built around the old key was not closed"
+
+
+def test_openai_parse_tool_arguments_repair_and_resilience():
+    from stcode.core.providers.openai_gpt import _parse_tool_arguments
+
+    assert _parse_tool_arguments("") == {}
+    assert _parse_tool_arguments("   ") == {}
+    assert _parse_tool_arguments('{"command": "pytest"}') == {"command": "pytest"}
+
+    # Truncated unterminated strings (common when finish_reason='length')
+    repaired1 = _parse_tool_arguments('{"command": "echo hello')
+    assert repaired1 == {"command": "echo hello"}
+
+    repaired2 = _parse_tool_arguments('{"command":"')
+    assert repaired2 == {"command": ""}
+
+    # Irreparable malformed input returns safe error dict rather than raising JSONDecodeError
+    malformed = _parse_tool_arguments("{not json at all")
+    assert malformed == {"_raw": "{not json at all", "_error": "JSONDecodeError"}
+
