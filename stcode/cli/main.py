@@ -10,10 +10,17 @@ One binary because they are one system, and nothing switches implementation:
 between them is the same socket.
 
 Transport and address flags override `[daemon]` for this run only.
+
+`stcode <path>` opens a session in that directory. It is a rewrite to `--cwd` rather
+than an argument on the group, because a `click` group consumes its own arguments before
+it looks for a subcommand — declaring one there makes `stcode sessions` mean "open the
+directory ./sessions". Only the **first** token is read this way, and only when it is
+not a subcommand, so the grammar stays "the path comes first, flags after".
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -58,7 +65,12 @@ def main(
     ] = False,
     cwd: Annotated[
         Path | None,
-        typer.Option("--cwd", "-C", help="Workspace for the session. Defaults to the current directory."),
+        typer.Option(
+            "--cwd",
+            "-C",
+            help="Workspace for the session. Defaults to the current directory. "
+            "`stcode <path>` is the same thing, spelled shorter.",
+        ),
     ] = None,
     mode: Annotated[
         str | None,
@@ -121,6 +133,17 @@ def main(
     if headless:
         _serve(config, overrides)
         return
+
+    # Resolved, not kept as typed: `.` reaches the prefs file as the trusted path, the
+    # daemon as the session's cwd and the UI as the root it lists files under, and a
+    # relative one means something different in each of them.
+    cwd = cwd.expanduser().resolve() if cwd is not None else None
+    if cwd is not None and not cwd.is_dir():
+        # Said here rather than three screens later: the workspace is the one argument
+        # everything else is relative to, and a typo in it looks like an agent that
+        # cannot see your files.
+        typer.secho(f"{cwd} is not a directory.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
 
     # Imported lazily: `stcode config` and `--headless` shouldn't pay for loading textual.
     from stcode.cli.app import run
@@ -207,5 +230,32 @@ def show_config(config: ConfigOption = None) -> None:
     typer.echo(f"sessions: {settings.session.dir}")
 
 
+def workspace_argv(argv: list[str], commands: set[str]) -> list[str]:
+    """Rewrite a leading path into `--cwd <path>`. Everything else is untouched.
+
+    The first token only, and only when it is neither a flag nor a subcommand. A token
+    that is neither but also does not look like a path — `stcode sesions` — is left
+    alone, so a mistyped command still gets click's "No such command" instead of being
+    silently accepted as a directory that does not exist.
+    """
+    if not argv:
+        return argv
+    first = argv[0]
+    if first.startswith("-") or first in commands:
+        return argv
+    looks_like_a_path = (
+        Path(first).expanduser().is_dir() or first.startswith(("~", ".", "/")) or "/" in first
+    )
+    if not looks_like_a_path:
+        return argv
+    return ["--cwd", first, *argv[1:]]
+
+
+def run_cli() -> None:
+    """The console entry point. → `workspace_argv`."""
+    commands = set(typer.main.get_command(cli).commands)  # type: ignore[attr-defined]
+    cli(args=workspace_argv(sys.argv[1:], commands))
+
+
 if __name__ == "__main__":
-    cli()
+    run_cli()

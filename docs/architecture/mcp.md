@@ -47,6 +47,26 @@ of the context window.
 The workspace and `.stcode/` are both on the REPL's `PYTHONPATH`, which is what makes
 `from mcp_servers.github import create_issue` work from a cell.
 
+One tree, in the workspace, generated from the **merged** config — so a global server
+and a project one are siblings under the same package and the agent has one directory to
+grep, not two. It is deleted and rewritten each session and carries a `.gitignore` of
+its own (`*`), because it is a build artefact and asking every project to add a line to
+its own ignore file is asking for the one that forgets.
+
+### One loop, one connection
+
+Each stub calls `mcp.call(server, tool, …)`, which connects on first use and caches the
+manager **with the event loop it was opened on**. The loop is part of the key because a
+connection does not outlive it: a cell that runs `asyncio.run(...)` gets a loop of its
+own, and closing it cancels the task holding the `AsyncExitStack`, whose `finally`
+empties the manager's clients.
+
+Cached by name alone, the next call got that manager back and indexed an empty dict —
+a bare `KeyError: '<server>'` raised three frames below anything that could explain it,
+with no way to recover short of restarting the REPL. Keyed by loop, a stale entry is
+dropped and the next call reconnects. The prompt and `repl`'s docstring also say to use
+top-level `await`, which is the case where nothing is dropped in the first place.
+
 ## `expose = "tools"` — the escape hatch
 
 Registers them the ordinary way and advertises them every turn. One small server with two
@@ -83,4 +103,16 @@ enabled = true
 expose  = "code"        # or "tools"
 ```
 
-`.mcp.json` / `mcp.json` in the workspace, or `STCODE_MCP_CONFIG` pointing elsewhere.
+Servers come from every config that applies, merged by name, lowest precedence first:
+`~/.stcode/{mcp,.mcp}.json`, then the workspace's `{.mcp,mcp}.json`, then
+`$STCODE_MCP_CONFIG`, then an explicit path. A name defined twice takes the later
+entry **whole** — a field-level merge would produce a server neither file describes.
+
+Merged rather than first-wins because the two files answer different questions: the
+global one is "the servers I use everywhere", the project one is "the servers this
+repository needs", and letting either hide the other makes adding one server look like
+losing all the rest.
+
+`url` servers accept `headers`, which is how a hosted server is authenticated. The SDK
+builds its own HTTP client for a bare URL, so a configured header means building the
+transport here instead — the alternative is accepting an API key and never sending it.

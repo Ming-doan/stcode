@@ -24,7 +24,7 @@ from typing import Any, Coroutine, Iterator, TypeVar
 import pytest
 from driving import asynctest
 
-__all__ = ["asynctest", "loop", "run", "workspace"]
+__all__ = ["asynctest", "isolated_mcp_config", "loop", "run", "workspace"]
 
 T = TypeVar("T")
 
@@ -55,6 +55,22 @@ def run(loop: asyncio.AbstractEventLoop) -> Any:
     return _run
 
 
+
+
+@pytest.fixture(autouse=True)
+def isolated_mcp_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the developer's own `~/.stcode/mcp.json` out of every test.
+
+    The global config is merged under the project's, so without this a laptop with
+    context7 configured runs a different suite from a laptop without one — and the test
+    that asserts "no config, no servers" fails on the machine of whoever uses the
+    feature. `USER_MCP_DIR` is computed from `Path.home()` at import time, so moving
+    `$HOME` is too late; the attribute is what has to move.
+    """
+    from stcode.core.harness import mcp as mcp_module
+
+    monkeypatch.setattr(mcp_module, "USER_MCP_DIR", tmp_path / "no-such-home" / ".stcode")
+    monkeypatch.delenv("STCODE_MCP_CONFIG", raising=False)
 
 
 @pytest.fixture

@@ -314,6 +314,17 @@ ServerMessage = Union[
 
 # ---- framing --------------------------------------------------------------------
 
+STREAM_LIMIT = 64 * 1024 * 1024
+"""How long one line may be, on both ends of every connection.
+
+`asyncio`'s streams default to **64 KiB** per line, and a line over it raises
+`ValueError` out of the read loop rather than arriving. The framing here is one message
+per line, and `history` is one message carrying a whole transcript — so the default cap
+means *a session stops being resumable the moment its file passes 64 KiB*, which is
+about thirty tool calls. The frame is built in memory either way; this only says the
+reader must be willing to receive what the writer was willing to send.
+"""
+
 
 def encode(message: BaseModel | dict[str, Any]) -> bytes:
     """One message, one line, UTF-8. `default=str` so a stray Path or datetime in a
@@ -366,6 +377,7 @@ def event_frame(session: str, event: AgentEvent, *, agent: str = "") -> dict[str
 
 
 __all__ = [
+    "STREAM_LIMIT",
     "Answer",
     "Approval",
     "ApprovalRequested",

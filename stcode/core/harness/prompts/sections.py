@@ -189,7 +189,10 @@ def mcp_section(catalogue: str, directory: str) -> str:
         "result = await <tool>(...)\n"
         "print(len(result))   # filter first, print second — the result stays in the\n"
         "                     # variable and never enters this conversation\n"
-        "```"
+        "```\n\n"
+        "Await at the top level of the cell, as above. Never wrap these in "
+        "`asyncio.run(...)`: that opens an event loop of its own and closes it on the "
+        "way out, which drops the server connection the next cell would have reused."
     )
 
 

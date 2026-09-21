@@ -18,6 +18,7 @@ from stcode.cli.transcript import (
     THINKING_LINES,
     agent_colour,
     format_arguments,
+    platform_rule,
     shell_render,
     thinking_tail,
     tool_render,
@@ -126,3 +127,18 @@ def test_a_flood_of_output_is_bounded() -> None:
     """`!cat` on the wrong file should not be how a session scrolls away."""
     rendered = _plain(shell_render("cat big", "\n".join(str(n) for n in range(500))))
     assert "more lines, not shown" in rendered
+
+
+# ---- the platform rule -----------------------------------------------------------
+
+
+def test_a_platform_note_is_one_rule_however_many_lines_it_was_given() -> None:
+    """Rich draws a rule per line of its title.
+
+    A tool's streamed output once reached here as a platform note, and forty lines of
+    an MCP result came out as forty dashed rules with a word centred in each — the
+    transcript unreadable for the rest of the session.
+    """
+    rendered = _plain(platform_rule("one\ntwo\nthree"))
+    assert len(rendered.strip().splitlines()) == 1
+    assert "one two three" in rendered

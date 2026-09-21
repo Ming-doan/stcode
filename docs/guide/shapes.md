@@ -28,6 +28,20 @@ Looks for a daemon at the configured address. If one answers, it attaches. If no
 does, it starts one in the background and attaches to that. You will not usually notice
 which happened.
 
+The session's workspace is the current directory, or one you name:
+
+```bash
+uv run stcode                # here
+uv run stcode ~/code/api     # there, without cd-ing first
+uv run stcode . --mode plan  # the path comes first, flags after
+```
+
+`stcode <path>` and `--cwd <path>` are the same thing. The path has to come **first**,
+because the argument is read before the subcommand is chosen — otherwise `stcode
+sessions` would mean "open the directory ./sessions". A first word that is neither a
+flag, a subcommand, nor anything path-shaped is left alone, so a mistyped command still
+gets told it is not a command.
+
 ## `--headless` — the daemon alone
 
 No UI, no terminal control, just a socket. This is what a container's entrypoint runs.

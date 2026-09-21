@@ -43,7 +43,9 @@ async def repl(
     you need to reason about — output is capped at 8192 characters, and the variable
     holding the rest is still there to slice.
 
-    Top-level `await` works.
+    Top-level `await` works — use it. Do not call `asyncio.run(...)`: it opens its own
+    event loop and closes it when the cell ends, which drops anything the namespace was
+    holding open, such as an MCP server connection.
 
     `tool_out` is a dict already in the namespace. When a tool result was elided, the
     whole value is in there under the id the elision named — slice it here rather than

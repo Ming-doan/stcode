@@ -69,6 +69,22 @@ Daemon → Client
 {"type":"error","message":"…"}                      # a protocol or daemon failure
 ```
 
+### A line is as long as it needs to be
+
+`asyncio`'s streams cap a line at **64 KiB** by default, and both ends open theirs with
+`limit=STREAM_LIMIT` (64 MiB) instead. This is not tuning. `history` is one message
+carrying a whole transcript, so at the default a session simply *stopped being
+resumable* somewhere around its thirtieth tool call: the client's read loop raised
+`ValueError` on the frame, the connection died, and the UI showed an empty screen for a
+session whose file on disk was intact. A `push` with a file pasted into it is the same
+failure in the other direction.
+
+The frame is built in memory on the sending side either way; the limit only says the
+reader is willing to receive what the writer was willing to send. A line that somehow
+exceeds even that is reported as an `error` frame rather than ending the read loop in
+silence — the silence is what made the original bug take a session file and a hex dump
+to diagnose.
+
 Every frame from the daemon carries a `session` id, because several clients may attach to
 several sessions over one connection. Client messages take an optional `session` and
 default to the last one that connection created or attached to.

@@ -724,6 +724,113 @@ def mcp_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
+# ---- where the config comes from -------------------------------------------------
+
+
+def write_mcp(path: Path, **servers: dict[str, Any]) -> Path:
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mcpServers": servers}))
+    return path
+
+
+def test_the_global_and_the_project_config_are_merged_not_shadowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adding one server to a project must not unplug every global one.
+
+    First-wins meant a project `.mcp.json` hid `~/.stcode/mcp.json` entirely, so the
+    server you configured once for every repository disappeared from the one repository
+    that configured a server of its own.
+    """
+    from stcode.core.harness import mcp as mcp_module
+
+    home = tmp_path / "home" / ".stcode"
+    monkeypatch.setattr(mcp_module, "USER_MCP_DIR", home)
+    write_mcp(home / "mcp.json", context7={"url": "https://example.invalid/mcp"})
+    project = tmp_path / "project"
+    write_mcp(project / ".mcp.json", bookshop={"command": "python", "args": ["server.py"]})
+
+    servers = mcp_module.load_mcp_config(cwd=project)
+    assert sorted(servers) == ["bookshop", "context7"]
+
+
+def test_a_project_server_replaces_the_global_one_of_the_same_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole entry, not field by field: half a command from each file is a server
+    nobody configured."""
+    from stcode.core.harness import mcp as mcp_module
+
+    home = tmp_path / "home" / ".stcode"
+    monkeypatch.setattr(mcp_module, "USER_MCP_DIR", home)
+    write_mcp(home / "mcp.json", docs={"url": "https://global.invalid/mcp", "type": "http"})
+    project = tmp_path / "project"
+    write_mcp(project / ".mcp.json", docs={"command": "local-docs"})
+
+    docs = mcp_module.load_mcp_config(cwd=project)["docs"]
+    assert docs.command == "local-docs"
+    assert docs.url is None, "the project entry replaces the global one outright"
+
+
+def test_headers_survive_the_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hosted server is authenticated by a header. Dropping the field means a
+    configured API key is never sent and the server answers as anonymous."""
+    from stcode.core.harness import mcp as mcp_module
+
+    monkeypatch.setattr(mcp_module, "USER_MCP_DIR", tmp_path / "nowhere")
+    project = tmp_path / "project"
+    write_mcp(project / ".mcp.json", docs={"url": "https://x.invalid/mcp", "headers": {"KEY": "k"}})
+    assert mcp_module.load_mcp_config(cwd=project)["docs"].headers == {"KEY": "k"}
+
+
+def test_the_generated_tree_ignores_itself(tmp_path: Path) -> None:
+    """It is rewritten from the config every session, so it is a build artefact — and
+    one nobody should have to add to their own `.gitignore`."""
+    from stcode.core.harness.mcp import generate_server_code
+
+    generate_server_code(tmp_path, {"srv": {"tool": {"description": "", "input_schema": {}}}})
+    assert (tmp_path / ".stcode/mcp_servers/.gitignore").read_text() == "*\n"
+
+
+def test_a_repl_manager_from_a_dead_loop_is_not_reused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`asyncio.run` in a cell closes its loop, which cancels the task holding the MCP
+    connection and empties the manager's clients. Cached by name alone, the next cell
+    got that manager back and raised `KeyError: '<server>'` from inside the stub."""
+    import asyncio as asyncio_module
+
+    from stcode.core.harness import mcp as mcp_module
+
+    class Stale:
+        _clients: dict[str, Any] = {}
+
+    class Live:
+        _clients = {"srv": object()}
+
+    dead_loop = asyncio_module.new_event_loop()
+    try:
+        monkeypatch.setitem(mcp_module._REPL_MANAGERS, "srv", (dead_loop, Live()))
+
+        async def check() -> None:
+            # Same manager, different loop: not reusable, and dropped rather than returned.
+            assert mcp_module._live_manager("srv") is None
+            assert "srv" not in mcp_module._REPL_MANAGERS
+
+            live = Live()
+            mcp_module._REPL_MANAGERS["srv"] = (asyncio_module.get_running_loop(), live)
+            assert mcp_module._live_manager("srv") is live
+
+            # Same loop, but the connection is gone — equally unusable.
+            mcp_module._REPL_MANAGERS["srv"] = (asyncio_module.get_running_loop(), Stale())
+            assert mcp_module._live_manager("srv") is None
+
+        asyncio_module.run(check())
+    finally:
+        dead_loop.close()
+        mcp_module._REPL_MANAGERS.pop("srv", None)
+
+
 def test_generated_stub_is_importable_python_with_the_right_signature(tmp_path: Path) -> None:
     import importlib.util
     import inspect as inspect_module

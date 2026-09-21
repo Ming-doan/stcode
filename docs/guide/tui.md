@@ -86,13 +86,14 @@ there is nothing here to trust; you get the `/connect` modal first instead.
 
 ## Reading the transcript
 
-Seven shapes, each one because it has to be told apart from the others at a glance.
+Eight shapes, each one because it has to be told apart from the others at a glance.
 
 | | |
 | --- | --- |
 | `───── attached to ~/.stcode/daemon.sock ─────` | **the platform acted** — connected, mode changed, session cleared. Full width, dim italic, centred. Not the model talking |
 | a tinted block | **what you said.** Tinted so that scrolling back to find where you asked something is looking rather than reading |
 | `│ the middleware is probably in src/api` | **thinking.** Quoted and dim, so reasoning never reads as an answer. Capped at six lines while it streams — the last six — and scrollable afterwards |
+| dim, unquoted | **a running tool's output**, while it is still running: a REPL cell printing, a URL being fetched. Last six lines, advisory, never in the session |
 | plain text | **the model's answer** |
 | a green or red box | **a tool call and its result.** The colour is the outcome |
 | a rule down the left | **a `!` command you ran.** Never in the session |
@@ -192,6 +193,10 @@ Four characters do something instead of being an ordinary line of text:
 The first three **filter as you keep typing** — `/mo` narrows to `/model` and `/mode`, `@mw`
 to `src/api/mw.py`. Six rows are visible and the list scrolls.
 
+The first `@` of a session lists the workspace in a thread, so it can open a beat before
+it has anything to show. It says `listing the workspace…` and fills itself in when the
+listing arrives — there is nothing to retype.
+
 `/` and `@` are inserted as you type them — they are the start of a token, and `/mo` is
 what is in the input. `?` is not: it is a toggle on an empty input, so it opens the card
 and inserts nothing. **Typing it again inserts it** — `?` then `?` gives you a literal
@@ -218,7 +223,8 @@ name.
 | `/sessions` | earlier sessions, as a tree |
 | `/connect` | point this client at a different daemon (`--daemonless` only) |
 | `/mcp` | the MCP servers this session connected to, and their tools |
-| `/skills` | the skills this session found |
+| `/skills` | the skills this session found. Choosing one writes its name into the input |
+| `/<skill>` | run a skill: `/pdf split page 3 out` |
 | `/clear` | end this session and start a fresh one |
 | `/help` | the help card — same as `?` |
 | `/quit` | leave. The agent keeps working |
@@ -226,6 +232,25 @@ name.
 There is no command palette. ++ctrl+p++ does nothing, and the commands above are the
 whole surface — a second, fuzzy way to reach the same twelve things is a second place for
 them to drift.
+
+### Skills are commands
+
+Every skill this session found is on the `/` list under the built-in commands, so `/pdf`
+is one keystroke and one enter rather than a sentence to compose. `/skills` is the same
+set with the descriptions, and **choosing one writes `/name` into the input rather than
+sending it** — a skill usually needs a sentence after it saying what to do, and a card
+that fired on enter would leave nowhere to put it.
+
+```
+/agent-browser check that the login page still works on mobile
+```
+
+What reaches the agent is an ordinary message naming the skill, so everything after the
+name is the task, passed through untouched. A skill cannot shadow a built-in command: if
+you install one called `clear`, `/clear` still ends the session.
+
+A name that is neither a command nor a skill is still an error — skills joining the list
+does not turn a typo into a message to the model.
 
 ### `/model` sets the routing too
 
@@ -370,6 +395,26 @@ Both arrive as a **card above the input**, not a modal:
 
 A modal covers the transcript, which is exactly the thing you need to read in order to
 answer — *why* is it running this? A card leaves it on screen.
+
+**What you are approving is bounded at ten lines**, head and tail, with a count of what
+is between them:
+
+```
+╭─ approve? ───────────────────────────────────────────────────────╮
+│ repl (execute)                                                   │
+│ import asyncio                                                   │
+│ from mcp_servers.context7 import resolve_library_id              │
+│ … 31 more lines …                                                │
+│ asyncio.run(main())                                              │
+│                                         n deny      y approve    │
+╰──────────────────────────────────────────────────────────────────╯
+```
+
+The card is laid out top to bottom, so a body that grows without limit pushes **deny**
+and **approve** off the bottom of the screen — a card that asks a question and shows no
+way to answer it. Elided rather than summarised, like any other output: the head says
+what the cell is about to do, the tail says what it leaves behind, and the count says how
+much you are not being shown.
 
 Parallel tool calls can raise two requests at once. They **queue**, one card at a time,
 answered oldest first; the rest of the turn keeps streaming behind them — and the next

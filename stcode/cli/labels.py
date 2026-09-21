@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import os
 
+from typing import Sequence
+
 from stcode.core.harness.approvals import APPROVAL_MODES, ApprovalMode
 from stcode.core.providers import PROVIDERS, ProviderConfig, default_model_for, key_env_for
 from stcode.core.providers.types import REASONING_EFFORTS
@@ -161,10 +163,28 @@ leave that daemon running with nothing attached — which is a thing to do delib
 with `--daemonless`, not a thing to find in a list."""
 
 
-def commands_for(*, daemonless: bool) -> list[Row]:
-    if daemonless:
-        return list(COMMANDS)
-    return [row for row in COMMANDS if row[0] not in DAEMONLESS_ONLY]
+def commands_for(*, daemonless: bool, skills: Sequence[str] = ()) -> list[Row]:
+    """The `/` card: the built-in commands, then this session's skills.
+
+    Skills are listed as commands because that is how they are reached — `/pdf` is one
+    keystroke and one enter, where "please use the pdf skill" is a sentence to compose.
+    They come last and are marked, so a skill can never be mistaken for something the
+    UI itself does, and a skill named after a command cannot take it over.
+    """
+    rows = list(COMMANDS) if daemonless else [row for row in COMMANDS if row[0] not in DAEMONLESS_ONLY]
+    taken = {row[0] for row in rows}
+    return rows + [row for row in skill_commands(skills) if row[0] not in taken]
+
+
+def skill_commands(skills: Sequence[str]) -> list[Row]:
+    return [(skill_command(name), SKILL_COMMAND_HINT) for name in skills if name]
+
+
+def skill_command(name: str) -> str:
+    return f"/{name.strip().lstrip('/')}"
+
+
+SKILL_COMMAND_HINT = "skill — loads its instructions, then does the work"
 
 
 def daemonless_only(name: str) -> str:
@@ -222,6 +242,7 @@ CARD_FOOTER_CLOSE = "backspace or esc to close"
 CARD_FOOTER_APPROVE = "y approve · n deny · esc denies"
 CARD_FOOTER_QUESTION = "↑↓ then enter, or just type your own answer"
 
+FILES_LOADING = "listing the workspace…"
 NO_FILES_HERE = "Nothing to mention — this workspace is on the daemon's machine."
 NO_MCP_SERVERS = "No MCP servers. Add a .mcp.json to the workspace."
 NO_SKILLS = "No skills found. See docs/guide/skills.md."
@@ -242,6 +263,19 @@ def mcp_rows(servers: list[dict[str, object]]) -> list[Row]:
 
 def skill_rows(skills: list[dict[str, str]]) -> list[Row]:
     return [(skill.get("name", "?"), skill.get("description", "")) for skill in skills]
+
+
+def skill_request(name: str, argument: str = "") -> str:
+    """`/pdf split this in two` as the message the agent receives.
+
+    A message, not a new protocol verb. The agent already has `skill(name)` and the
+    catalogue that says what each one is for; what `/name` adds is saying *which* one
+    without a sentence. Anything typed after the name is the task, and it is passed
+    through untouched — it is the half only you can write.
+    """
+    task = argument.strip()
+    opening = f'Use the "{name}" skill.'
+    return f"{opening} {task}" if task else opening
 
 
 # ----------------------------------------------------------------------------- tokens
@@ -490,7 +524,23 @@ started with — and a UI that quietly did nothing would be worse than one that 
 # ------------------------------------------------------------------------- approvals
 
 
-def approval_summary(tool: str, permission: str, arguments: dict[str, object]) -> str:
+APPROVAL_BODY_LINES = 10
+"""How many lines of what you are approving the card shows.
+
+Bounded because the card is laid out top to bottom — title, body, the two answers,
+the footer — and a body that grows without limit pushes **deny** and **approve** off
+the bottom of the screen. A forty-line `repl` cell did exactly that, leaving a card
+that asks a question and shows no way to answer it.
+
+Ten because the head and the tail of a cell are where its intent is: the imports and
+the first statement say what it is going to do, the last line says what it leaves
+behind. The middle is where a long cell is most repetitive.
+"""
+
+
+def approval_summary(
+    tool: str, permission: str, arguments: dict[str, object], *, lines: int = APPROVAL_BODY_LINES
+) -> str:
     """What is about to happen, in the terms the tool works in.
 
     The engine sends validated arguments rather than a sentence precisely so this can
@@ -505,7 +555,21 @@ def approval_summary(tool: str, permission: str, arguments: dict[str, object]) -
         body = str(arguments["path"])
     else:
         body = ", ".join(f"{key}={_short(str(value))}" for key, value in arguments.items())
-    return f"{tool} ({permission})\n{body}"
+    return f"{tool} ({permission})\n{_elide_lines(body, lines)}"
+
+
+def _elide_lines(text: str, limit: int) -> str:
+    """Keep the head and the tail, and say how much is missing.
+
+    The same discipline as a tool result (invariant 1): elided, never summarised, and
+    the count is in the marker so "is that the whole cell?" has an answer on the card.
+    """
+    rows = text.splitlines()
+    if len(rows) <= limit:
+        return text
+    head = limit - 3
+    hidden = len(rows) - head - 2
+    return "\n".join([*rows[:head], f"… {hidden} more lines …", *rows[-2:]])
 
 
 def _short(text: str, limit: int = 60) -> str:

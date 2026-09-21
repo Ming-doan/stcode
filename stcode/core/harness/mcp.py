@@ -54,6 +54,10 @@ logger = logging.getLogger("stcode.harness.mcp")
 
 MCP_CONFIG_ENV = "STCODE_MCP_CONFIG"
 MCP_CONFIG_NAMES = (".mcp.json", "mcp.json")
+USER_MCP_DIR = Path.home() / ".stcode"
+"""Where the global config lives. A module constant, like `USER_SKILLS_DIR`, so a test
+can move it — `$HOME` is read at import time and setting it later is too late."""
+
 CONNECT_TIMEOUT = 30.0
 MCP_MAX_OUTPUT = 16384
 
@@ -66,6 +70,11 @@ class MCPServerConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str | None = None
     url: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    """Sent with every request to a `url` server. This is how a hosted server is
+    authenticated — the key is a header, not an argument — so dropping the field would
+    leave a configured credential silently unsent and the server answering as anonymous."""
+
     type: str | None = None
     enabled: bool = True
 
@@ -73,35 +82,48 @@ class MCPServerConfig(BaseModel):
         return self.url or " ".join([self.command or "?", *self.args])
 
 
-def load_mcp_config(path: str | Path | None = None, cwd: Path | None = None) -> dict[str, MCPServerConfig]:
-    """Read `mcpServers` from the first config file found.
+def mcp_config_paths(path: str | Path | None = None, cwd: Path | None = None) -> list[Path]:
+    """Every config that applies, **lowest precedence first**.
 
-    Order: explicit path, `$STCODE_MCP_CONFIG`, `.mcp.json` in the project. A missing
-    config is normal, not an error — most sessions have no MCP servers.
+    Global (`~/.stcode/mcp.json`), then the project's, then whatever was named
+    explicitly. The order is the merge order, so the last file to mention a server name
+    is the one that owns it.
     """
-    candidates: list[Path] = []
-    if path:
-        candidates.append(Path(path).expanduser())
-    if os.environ.get(MCP_CONFIG_ENV):
-        candidates.append(Path(os.environ[MCP_CONFIG_ENV]).expanduser())
+    candidates: list[Path] = [USER_MCP_DIR / name for name in MCP_CONFIG_NAMES]
     root = cwd or Path.cwd()
     candidates += [root / name for name in MCP_CONFIG_NAMES]
-    candidates.append(Path.home() / ".stcode" / "mcp.json")
+    if os.environ.get(MCP_CONFIG_ENV):
+        candidates.append(Path(os.environ[MCP_CONFIG_ENV]).expanduser())
+    if path:
+        candidates.append(Path(path).expanduser())
+    return [candidate for candidate in candidates if candidate.is_file()]
 
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
+
+def load_mcp_config(path: str | Path | None = None, cwd: Path | None = None) -> dict[str, MCPServerConfig]:
+    """Read `mcpServers` from every config that applies, merged by server name.
+
+    **Merged, not first-wins.** A global `~/.stcode/mcp.json` holds the servers you want
+    everywhere (context7, a docs server); a project's `.mcp.json` holds the ones this
+    repository needs and is checked in. Making one of them shadow the other entirely
+    means adding a single project server silently unplugs every global one.
+
+    The unit of precedence is the **whole entry**, not its fields: a name defined in two
+    places takes the later file's definition outright. Half a command from one file and
+    half from another is a server nobody configured.
+    """
+    servers: dict[str, MCPServerConfig] = {}
+    for candidate in mcp_config_paths(path, cwd):
         try:
             data = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ToolError(f"Could not read MCP config {candidate}: {exc}") from exc
-        servers = data.get("mcpServers", data)
-        return {
-            name: MCPServerConfig.model_validate(entry)
-            for name, entry in servers.items()
-            if isinstance(entry, dict)
-        }
-    return {}
+        entries = data.get("mcpServers", data)
+        if not isinstance(entries, dict):
+            continue
+        for name, entry in entries.items():
+            if isinstance(entry, dict):
+                servers[name] = MCPServerConfig.model_validate(entry)
+    return servers
 
 
 class MCPManager:
@@ -171,8 +193,24 @@ class MCPManager:
         from mcp import StdioServerParameters
         from mcp.client import Client
 
-        if config.url:
-            target: Any = config.url
+        if config.url and config.headers:
+            # A URL alone is enough for the SDK, but a URL *with headers* is not: the
+            # string form builds its own HTTP client and there is nowhere to put them.
+            # So the transport is built here instead — the alternative is accepting a
+            # configured API key and never sending it.
+            # `create_mcp_http_client` is public and documented but absent from the
+            # module's `__all__`, which is a packaging detail of the SDK rather than a
+            # statement about the function.
+            from mcp.client.streamable_http import (  # type: ignore[attr-defined]
+                create_mcp_http_client,
+                streamable_http_client,
+            )
+
+            target: Any = streamable_http_client(
+                config.url, http_client=create_mcp_http_client(dict(config.headers))
+            )
+        elif config.url:
+            target = config.url
         elif config.command:
             target = StdioServerParameters(
                 command=config.command,
@@ -265,21 +303,46 @@ Generated by stcode from {source}. Do not edit — regenerated every session.
 """
 '''
 
-_REPL_MANAGERS: dict[str, "MCPManager"] = {}
-"""One manager per server, in the REPL process. Each owns a task holding its stack, so
-a second server joining an already-open manager would never actually connect."""
+_REPL_MANAGERS: dict[str, tuple[Any, "MCPManager"]] = {}
+"""One manager per server, in the REPL process, **with the loop it was opened on**.
+
+Each manager owns a task holding its stack, so a second server joining an already-open
+manager would never actually connect. The loop is remembered because a connection does
+not outlive it: a cell that runs `asyncio.run(...)` gets a fresh loop, and closing it
+cancels the task holding the stack, whose `finally` empties `_clients`. Cached without
+the loop, the next call finds a manager that is still in the dict and no longer
+connected — which surfaced as a bare `KeyError: '<server>'` from inside the stub, three
+layers below anything that could explain it.
+"""
+
+
+def _live_manager(server: str) -> "MCPManager | None":
+    """The cached manager for `server`, if it is still usable from this task.
+
+    Same loop, still holding a client. Anything else is discarded rather than returned:
+    a stale entry is why reconnecting was impossible without restarting the REPL.
+    """
+    cached = _REPL_MANAGERS.get(server)
+    if cached is None:
+        return None
+    loop, manager = cached
+    if loop is asyncio.get_running_loop() and server in manager._clients:
+        return manager
+    _REPL_MANAGERS.pop(server, None)
+    return None
 
 
 async def call(server: str, tool: str, arguments: dict[str, Any]) -> Any:
     """Call one MCP tool. What every generated stub ends up in.
 
-    Connects on first use and holds the connection for the life of the REPL process.
+    Connects on first use and holds the connection for as long as the event loop that
+    opened it lives — which, in the REPL, is the whole session unless a cell closes it.
 
     Returns structured data when the server provides it, then parsed JSON, then text —
     the reason to call a tool from code is to filter before printing, and you cannot
     filter a paragraph.
     """
-    manager = _REPL_MANAGERS.get(server)
+    manager = _live_manager(server)
     if manager is None:
         servers = load_mcp_config()
         if server not in servers:
@@ -292,7 +355,7 @@ async def call(server: str, tool: str, arguments: dict[str, Any]) -> Any:
         if server not in manager._clients:
             problem = "; ".join(manager.problems) or "the server did not start"
             raise ToolError(f"Could not connect to the {server!r} MCP server: {problem}")
-        _REPL_MANAGERS[server] = manager
+        _REPL_MANAGERS[server] = (asyncio.get_running_loop(), manager)
 
     client = manager._clients[server]
     result = await client.call_tool(tool, {k: v for k, v in arguments.items() if v is not None})
@@ -341,6 +404,11 @@ def generate_server_code(
     if package.exists():
         shutil.rmtree(package, ignore_errors=True)
     package.mkdir(parents=True, exist_ok=True)
+    # Generated from the config on every session, so committing it would be committing
+    # a build artefact that is wrong the moment a server changes. The directory ignores
+    # itself rather than asking every project to edit its own `.gitignore` — and because
+    # the tree is deleted and rewritten each session, this file is written each time too.
+    (package / ".gitignore").write_text("*\n", encoding="utf-8")
 
     listing = "\n".join(
         f"  {name}/  ->  " + ", ".join(sorted(tools)) for name, tools in sorted(servers.items())
@@ -453,7 +521,10 @@ __all__ = [
     "MCPServerConfig",
     "MCP_CODE_DIRNAME",
     "MCP_CONFIG_ENV",
+    "MCP_CONFIG_NAMES",
+    "USER_MCP_DIR",
     "call",
     "generate_server_code",
     "load_mcp_config",
+    "mcp_config_paths",
 ]

@@ -1,11 +1,12 @@
 """
-The transcript — seven shapes, each one because it has to be told apart at a glance.
+The transcript — eight shapes, each one because it has to be told apart at a glance.
 
 | | |
 | --- | --- |
 | `───── attached to … ─────` | the platform acted. Not the model talking |
 | a tinted block | what **you** said |
 | `│ quoted, dim` | thinking. Capped at the last six lines while it streams |
+| dim, unquoted | a running tool's output. Advisory, never in the session |
 | plain text | the model's answer |
 | a green or red box | a tool call and its result — the colour *is* the outcome |
 | a rule down the left | a `!` command you ran. Never in the session |
@@ -48,6 +49,13 @@ finished tool call is that it ran and whether it worked, and a turn with six cal
 showing six lines is a screen of output with the conversation pushed off the top. The
 full value is in the session, and `ToolFinished` only carries 240 characters of it
 anyway.
+"""
+
+PROGRESS_LINES = 6
+"""Lines of a running tool's output kept on screen.
+
+The same six as `Thinking`, for the same reason: it is a sign of life, not a viewer.
+The tool's result is what gets a box, and the whole value is in the session.
 """
 
 SHELL_OUTPUT_LINES = 200
@@ -113,8 +121,12 @@ def platform_rule(text: str) -> RenderableType:
 
     A rule rather than a line of text: what the *platform* did is not part of the
     conversation, and it should not be possible to mistake one for the other.
+
+    Flattened to one line first. Rich draws a rule **per line** of its title, so a
+    multi-line string here comes out as a screen of dashes with a word centred in each
+    — which is what a tool's output looked like when it arrived as progress.
     """
-    return Rule(Text(text, style="italic dim"), characters="─", style="dim")
+    return Rule(Text(" ".join(text.split()), style="italic dim"), characters="─", style="dim")
 
 
 def tool_render(
@@ -245,6 +257,41 @@ class Thinking(VerticalScroll):
     def _refresh(self) -> None:
         quoted = "\n".join(f"│ {line}" for line in thinking_tail(self.body).splitlines())
         self._text.update(Text(quoted, style="italic dim"))
+        self.scroll_end(animate=False)
+
+
+class Progress(VerticalScroll):
+    """A long-running tool's output while it is still running — `repl`'s cell printing,
+    `bash`'s description, a web fetch saying which URL it is on.
+
+    Plain dim text, in a scroller that shows the last few lines. Deliberately *not* a
+    platform rule: a rule is one line saying what the platform did, and a REPL cell that
+    prints forty lines of an MCP result is neither one line nor the platform. Rendering
+    it as one produced forty dashed rules with a word centred in each.
+
+    It is also not the model talking, so it stays dim and unattributed, and it is never
+    written to the session — `Progress` is advisory, and the tool's own result is the
+    record.
+    """
+
+    def __init__(self, body: str = "") -> None:
+        super().__init__(classes="entry progress")
+        self.body = body
+        self._text = Static(markup=False)
+
+    def compose(self) -> Any:
+        yield self._text
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def append(self, text: str) -> None:
+        # One frame per line, so the lines have to be rejoined here rather than run on.
+        self.body = f"{self.body}\n{text}" if self.body else text
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._text.update(Text(thinking_tail(self.body, PROGRESS_LINES), style="dim"))
         self.scroll_end(animate=False)
 
 
@@ -383,6 +430,7 @@ class Transcript(VerticalScroll):
 __all__ = [
     "AGENT_COLOURS",
     "ARGUMENT_CHARS",
+    "PROGRESS_LINES",
     "SHELL_OUTPUT_LINES",
     "THINKING_LINES",
     "TOOL_RESULT_LINES",
@@ -390,6 +438,7 @@ __all__ = [
     "Message",
     "Notice",
     "PlatformNote",
+    "Progress",
     "ShellOutput",
     "Thinking",
     "ToolCall",

@@ -1,7 +1,8 @@
 # Quickstart
 
 ```bash
-uv run stcode
+uv run stcode              # work in this directory
+uv run stcode ~/code/api   # or in that one
 ```
 
 The first run opens a one-time setup screen. Pick a provider, paste an API key — or

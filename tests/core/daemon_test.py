@@ -419,6 +419,36 @@ async def test_reattach_replays_then_joins_the_live_stream(
 
 
 @asynctest
+async def test_a_transcript_past_the_default_stream_limit_still_replays(
+    sandbox: Path, tmp_path: Path
+) -> None:
+    """A session stops being resumable at 64 KiB unless the streams are told otherwise.
+
+    `asyncio` caps a line at 64 KiB by default and `history` is one line carrying the
+    whole transcript, so a session of about thirty tool calls produced a `ValueError`
+    inside the client's read loop and a UI that simply never showed the conversation.
+    """
+    long_answer = "x" * 100_000
+    gateway = RecordingGateway([says(long_answer), says("after")])
+    async with Harnessed(config_for(tmp_path), gateway) as env:
+        first = await env.client()
+        info = await first.create(cwd=sandbox)
+        await first.push("one")
+        await collect(first, until="turn_finished")
+        await first.aclose()
+
+        session_file = Path(config_for(tmp_path).session.dir) / f"{info['id']}.jsonl"
+        assert session_file.stat().st_size > 65_536, "the transcript is not big enough to test"
+
+        second = await env.client()
+        await second.attach(info["id"])
+        history = await second.next_event(2)
+        assert history["type"] == "history"
+        assert long_answer in [record.get("content") for record in history["records"]]
+        await second.aclose()
+
+
+@asynctest
 async def test_two_clients_watch_one_session(sandbox: Path, tmp_path: Path) -> None:
     gateway = RecordingGateway([says("shared")])
     async with Harnessed(config_for(tmp_path), gateway) as env:

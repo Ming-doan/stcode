@@ -27,6 +27,7 @@ from typing import Any, AsyncIterator
 
 from stcode.core.configs import GatewayConfig
 from stcode.core.daemon.protocol import (
+    STREAM_LIMIT,
     Answer,
     Approval,
     Attach,
@@ -76,9 +77,13 @@ class DaemonClient:
         listening — which is the caller's cue to start a daemon, not an error to hide."""
         settings = config.daemon
         if settings.transport == "unix":
-            reader, writer = await asyncio.open_unix_connection(str(socket_path(settings.socket)))
+            reader, writer = await asyncio.open_unix_connection(
+                str(socket_path(settings.socket)), limit=STREAM_LIMIT
+            )
         else:
-            reader, writer = await asyncio.open_connection(settings.host, settings.port)
+            reader, writer = await asyncio.open_connection(
+                settings.host, settings.port, limit=STREAM_LIMIT
+            )
         return cls(reader, writer)
 
     # ---- io ----
@@ -97,6 +102,14 @@ class DaemonClient:
                     waiter.set_result(frame)
                 else:
                     self._events.put_nowait(frame)
+        except ValueError as exc:
+            # A line longer than `STREAM_LIMIT`. The connection is unusable from here —
+            # the reader's buffer is past the point where the framing can be recovered —
+            # so it ends, but it ends *saying so*: the same failure read as "the UI
+            # cannot open that session" for as long as it was silent.
+            self._events.put_nowait(
+                {"type": "error", "message": f"frame too large for the connection: {exc}"}
+            )
         finally:
             self._closed.set()
             for waiter in self._waiters.values():

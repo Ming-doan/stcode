@@ -18,13 +18,23 @@ from typing import Any, Callable
 
 from conftest import asynctest
 from fakes import RecordingGateway, calls_tool, says
+from textual.widgets import OptionList
 
 from stcode.cli import labels
 from stcode.cli.app import StcodeApp
 from stcode.cli.cards import Card
 from stcode.cli.modals import TrustScreen
 from stcode.cli.prefs import UiPrefs, save_prefs
-from stcode.cli.transcript import AgentRow, Message, ShellOutput, ToolCall
+from stcode.cli.prompt import Prompt
+from stcode.cli.transcript import (
+    AgentRow,
+    Message,
+    Notice,
+    PlatformNote,
+    Progress,
+    ShellOutput,
+    ToolCall,
+)
 from stcode.core.configs import GatewayConfig, save_config
 from stcode.core.daemon import Daemon
 from stcode.core.providers.types import MessageStop, ToolCallEnd, Usage
@@ -195,9 +205,14 @@ async def test_a_slash_opens_the_commands_card_and_typing_filters_it(
             card = card_of(app)
             assert card is not None and card.kind == labels.CARD_COMMANDS
             # Not `COMMANDS`: this app is not `--daemonless`, so `/connect` is not on
-            # offer — it would move the terminal off the daemon it just started.
-            assert len(card.rows) == len(labels.COMMANDS) - 1
-            assert "/connect" not in [row[0] for row in card.rows]
+            # offer — it would move the terminal off the daemon it just started. The
+            # workspace's own skills are on the end, because `/name` is how one is run.
+            names = [row[0] for row in card.rows]
+            assert "/connect" not in names
+            assert names[: len(labels.COMMANDS) - 1] == [
+                row[0] for row in labels.COMMANDS if row[0] != "/connect"
+            ]
+            assert "/db-migrations" in names and "/release-notes" in names
 
             await pilot.press("m", "o", "d")
             await pilot.pause()
@@ -245,6 +260,131 @@ async def test_an_at_sign_offers_the_workspace_files(tmp_path: Path, workspace: 
             await pilot.pause()
             assert "app.py" in app.prompt.text
             assert card_of(app) is None
+
+
+@asynctest
+async def test_the_first_at_sign_fills_itself_in_once_the_listing_arrives(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """The listing runs in a thread, so the first `@` opens a card before there is
+    anything to put in it. Without refilling it, the first `@` of every session showed
+    nothing and only worked after backspacing and typing it again."""
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            assert app._files is None, "nothing is listed until the first `@`"
+
+            await pilot.press("at")
+            await pilot.pause()
+            card = card_of(app)
+            assert card is not None and card.kind == labels.CARD_FILES
+            # While it is loading the card says so, and enter cannot insert that.
+            if not card.selectable:
+                assert card.rows == [(labels.FILES_LOADING, "")]
+
+            assert await until(lambda: app._files is not None)
+            await pilot.pause()
+            card = card_of(app)
+            assert card is not None and card.selectable
+            assert any("app.py" in row[0] for row in card.rows), "no keystroke needed"
+
+
+# ---- skills ----------------------------------------------------------------------
+
+
+@asynctest
+async def test_choosing_a_skill_writes_its_name_into_the_input(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """The card names the skill; the sentence after it is yours. Firing on enter would
+    leave nowhere to say what to do with it."""
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            assert await until(lambda: bool(app._info.get("skills")))
+
+            app._run_command("/skills")
+            await pilot.pause()
+            card = card_of(app)
+            assert card is not None and card.kind == labels.CARD_SKILLS and card.selectable
+            first = card.rows[0][0]
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.prompt.text.startswith(f"/{first}")
+            assert card_of(app) is None
+
+
+@asynctest
+async def test_a_skill_command_reaches_the_agent_as_a_message(
+    tmp_path: Path, workspace: Path
+) -> None:
+    async with Harnessed(tmp_path, workspace, RecordingGateway([says("on it")])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            assert await until(lambda: bool(app._info.get("skills")))
+            name = str(app._info["skills"][0]["name"])
+
+            app._on_submit(Prompt.Submitted(f"/{name} do the thing"))
+            await pilot.pause()
+            sent = [
+                entry.body
+                for entry in app.transcript.query(Message)
+                if entry.has_class("user")
+            ]
+            assert sent == [labels.skill_request(name, "do the thing")]
+
+
+@asynctest
+async def test_an_unknown_slash_command_is_still_an_error(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """Skills joining the `/` list must not turn every typo into a message to the
+    model."""
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            app._on_submit(Prompt.Submitted("/nosuchthing"))
+            await pilot.pause()
+            assert any(
+                "nosuchthing" in entry._text for entry in app.transcript.query(Notice)
+            )
+
+
+# ---- a running tool's output -----------------------------------------------------
+
+
+@asynctest
+async def test_progress_is_one_block_not_a_rule_per_line(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """A REPL cell streams a line per frame.
+
+    Rendered as platform notes, an MCP result printed from a cell became forty dashed
+    rules with a word centred in each. One dim block, appended to, is what it is: the
+    tool is still running.
+    """
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            before = len(app.transcript.query(PlatformNote))
+            for line in ("- Title: Context7", "- Snippets: 1120", "----------"):
+                app._render({"type": "progress", "text": line})
+            await pilot.pause()
+
+            blocks = list(app.transcript.query(Progress))
+            assert len(blocks) == 1, "consecutive lines share one block"
+            assert blocks[0].body.splitlines() == [
+                "- Title: Context7",
+                "- Snippets: 1120",
+                "----------",
+            ]
+            assert len(app.transcript.query(PlatformNote)) == before
 
 
 # ---- sending, and what the transcript shows --------------------------------------
@@ -352,6 +492,38 @@ async def test_an_approval_is_a_card_and_the_transcript_stays_visible(
             await pilot.press("n")
             assert await until(lambda: card_of(app) is None)
             assert await until(lambda: len(gateway.calls) >= 2)
+
+
+@asynctest
+async def test_a_long_cell_does_not_push_the_answers_off_the_screen(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """The card is laid out top to bottom, so an unbounded body clips the two rows you
+    have to choose between — a question with no visible way to answer it."""
+    cell = "\n".join(f"print({index})" for index in range(60))
+    gateway = RecordingGateway([calls_tool("c1", "repl", code=cell), says("done")])
+    async with Harnessed(tmp_path, workspace, gateway, approval_mode="suggest") as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            await pilot.press("g", "o", "enter")
+            assert await until(lambda: card_of(app) is not None)
+            await pilot.pause()
+
+            card = card_of(app)
+            assert card is not None and card.kind == labels.CARD_APPROVE
+            assert "print(0)" in card._body and "print(59)" in card._body
+            assert "more lines" in card._body
+
+            zone = app.query_one("#cards")
+            options = card.query_one(OptionList)
+            assert options.region.height > 0, "the answers are not rendered at all"
+            assert (
+                options.region.bottom <= zone.region.bottom
+            ), "the answers are below the bottom of the card zone"
+
+            await pilot.press("n")
+            assert await until(lambda: card_of(app) is None)
 
 
 # ---- mode, theme, trust -----------------------------------------------------------

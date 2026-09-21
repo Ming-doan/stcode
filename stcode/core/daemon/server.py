@@ -37,6 +37,7 @@ from stcode.core.common.paths import default_config_path
 from stcode.core.configs import GatewayConfig
 from stcode.core.daemon.autonomy import AutonomyRefused, guard_autonomy
 from stcode.core.daemon.protocol import (
+    STREAM_LIMIT,
     Answer,
     Approval,
     Attach,
@@ -113,13 +114,17 @@ class Daemon:
             path = socket_path(settings.socket)
             path.parent.mkdir(parents=True, exist_ok=True)
             _clear_stale_socket(path)
-            self._server = await asyncio.start_unix_server(self._handle, path=str(path))
+            self._server = await asyncio.start_unix_server(
+                self._handle, path=str(path), limit=STREAM_LIMIT
+            )
             # The socket is the access control here: anyone who can open it can drive
             # an agent with your privileges.
             with contextlib.suppress(OSError):
                 path.chmod(0o600)
         else:
-            self._server = await asyncio.start_server(self._handle, settings.host, settings.port)
+            self._server = await asyncio.start_server(
+                self._handle, settings.host, settings.port, limit=STREAM_LIMIT
+            )
         log.info("listening on %s", self.address)
 
     async def serve_forever(self) -> None:
@@ -334,8 +339,9 @@ class _Connection:
 
     async def run(self) -> None:
         # StreamReader iterates by line, which is exactly the framing — no buffer of
-        # our own to get wrong. An over-long line raises, correctly: a client sending an
-        # unterminated megabyte is not one we can talk to.
+        # our own to get wrong. The cap is `STREAM_LIMIT` rather than asyncio's 64 KiB
+        # default: a pasted file in a `push` is an ordinary message, not a client we
+        # cannot talk to.
         async for line in self._reader:
             if not line.strip():
                 continue

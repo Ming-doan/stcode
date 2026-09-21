@@ -29,7 +29,7 @@ otel = [
 ]
 
 [project.scripts]
-stcode = "stcode.cli.main:cli"
+stcode = "stcode.cli.main:run_cli"
 
 [dependency-groups]
 dev = [

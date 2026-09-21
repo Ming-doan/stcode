@@ -61,6 +61,7 @@ from stcode.cli.transcript import (
     Message,
     Notice,
     PlatformNote,
+    Progress,
     ShellOutput,
     Thinking,
     ToolCall,
@@ -85,6 +86,17 @@ costing a redraw people can feel."""
 FILE_LIMIT = 2000
 """How many paths `@` offers. Past this the list is not a list you read, and the filter
 is doing the work anyway."""
+
+STREAM_KINDS = ("assistant", "thinking", "progress")
+"""The block kinds that arrive in pieces. One open block per kind per agent, and a
+piece of one kind closes the others: the frames carry no boundaries, so a change of
+kind is the only end-of-block signal there is."""
+
+_OPEN_STREAM = {
+    "assistant": lambda: Message("assistant"),
+    "thinking": Thinking,
+    "progress": Progress,
+}
 
 
 class StcodeApp(App[None]):
@@ -140,7 +152,7 @@ class StcodeApp(App[None]):
         border-left: thick $primary;
     }
 
-    .entry.thinking {
+    .entry.thinking, .entry.progress {
         max-height: 6;
         scrollbar-size-vertical: 1;
     }
@@ -176,9 +188,13 @@ class StcodeApp(App[None]):
         padding-right: 1;
     }
 
+    /* Tall enough for a card whose body is capped at `APPROVAL_BODY_LINES`, plus
+       the title, the rows, the footer and the border. The body cap is the tighter of
+       the two on purpose: whatever this height clips is clipped from the *bottom*, and
+       the bottom is where the answer you came to give is. */
     #cards {
         height: auto;
-        max-height: 14;
+        max-height: 18;
         margin: 0 2;
         display: none;
     }
@@ -200,6 +216,8 @@ class StcodeApp(App[None]):
     }
 
     .card-body {
+        height: auto;
+        max-height: 11;
         color: $text-muted;
     }
 
@@ -270,8 +288,11 @@ class StcodeApp(App[None]):
         self._daemon: Daemon | None = None
         self._session_id = ""
         self._info: dict[str, Any] = {}
-        self._files: list[str] = []
-        self._streams: dict[tuple[str, str], Message | Thinking] = {}
+        self._files: list[str] | None = None
+        """Every path `@` can offer, or None while the workspace has not been listed.
+        The distinction is the difference between an empty card and an honest one."""
+
+        self._streams: dict[tuple[str, str], Message | Thinking | Progress] = {}
         self._tools: dict[tuple[str, str], ToolCall] = {}
         self._requests: deque[dict[str, Any]] = deque()
         self._working = False
@@ -501,7 +522,7 @@ class StcodeApp(App[None]):
                 self._end_streams(agent)
                 self._note(labels.supervisor_nudge(str(frame.get("text", ""))))
             case "progress":
-                self._note(str(frame.get("text", "")))
+                self._stream_into("progress", str(frame.get("text", "")), agent)
             case "history":
                 self._replay(frame)
             case "session":
@@ -572,13 +593,18 @@ class StcodeApp(App[None]):
         Keyed by `(agent, kind)`: deltas carry no boundaries, so a different kind
         arriving is the only signal a block ended — and two sub-agents running in
         parallel must not stream into each other's block.
+
+        `progress` is one of the kinds for the same reason the other two are: a REPL
+        cell streams a line at a time, and one entry per line is a screen of entries
+        for one tool call.
         """
         key = (agent, kind)
         block = self._streams.get(key)
         if block is None:
-            other = "thinking" if kind == "assistant" else "assistant"
-            self._close_stream((agent, other))
-            block = Thinking() if kind == "thinking" else Message("assistant")
+            for other in STREAM_KINDS:
+                if other != kind:
+                    self._close_stream((agent, other))
+            block = _OPEN_STREAM[kind]()
             self.transcript.add(block, agent=agent)
             self._streams[key] = block
         block.append(text)
@@ -586,7 +612,7 @@ class StcodeApp(App[None]):
         self._settle()
 
     def _end_streams(self, agent: str = "") -> None:
-        for kind in ("assistant", "thinking"):
+        for kind in STREAM_KINDS:
             self._close_stream((agent, kind))
 
     def _close_stream(self, key: tuple[str, str]) -> None:
@@ -709,6 +735,8 @@ class StcodeApp(App[None]):
                 self._answer_approval(message.token, message.value == "approve")
             case labels.CARD_QUESTION:
                 self._answer_question(message.token, message.value)
+            case labels.CARD_SKILLS:
+                self.prompt.insert_token("/", labels.skill_command(message.value))
         self._close_card()
 
     @on(Prompt.Changed)
@@ -737,19 +765,38 @@ class StcodeApp(App[None]):
                 self._close_card()
             return
         symbol, query = trigger
-        available = (
-            labels.commands_for(daemonless=self._daemonless)
-            if symbol == "/"
-            else labels.file_rows(self._files)
-        )
-        rows = filter_rows(available, query)
         kind = labels.CARD_COMMANDS if symbol == "/" else labels.CARD_FILES
-        if symbol == "@" and not self._files:
+        if symbol == "@" and self._files is None:
+            # First `@` of the session: the listing runs in a thread, and the card that
+            # opens now is empty. `_files_loaded` refills it when the thread returns —
+            # without that, the first `@` showed nothing and only the second one worked,
+            # which reads as a broken key rather than a slow one.
             self._load_files()
+        rows, selectable = self._token_rows(symbol, query)
         if card is not None and card.kind == kind:
+            card.selectable = selectable
             card.show(rows)
             return
-        self._show_card(Card(kind, rows, footer=labels.CARD_FOOTER_CHOOSE))
+        self._show_card(
+            Card(kind, rows, footer=labels.CARD_FOOTER_CHOOSE, selectable=selectable)
+        )
+
+    def _token_rows(self, symbol: str, query: str) -> tuple[list[tuple[str, str]], bool]:
+        """The rows for a `/` or `@` card, and whether any of them can be chosen.
+
+        A card with nothing to offer still opens, carrying one row that says why. Not
+        selectable, because "listing the workspace…" is a sentence and inserting it into
+        the prompt as a path is not what pressing enter meant.
+        """
+        if symbol == "/":
+            skills = [str(skill.get("name", "")) for skill in self._info.get("skills", [])]
+            available = labels.commands_for(daemonless=self._daemonless, skills=skills)
+            return filter_rows(available, query), True
+        if self._files is None:
+            return [(labels.FILES_LOADING, "")], False
+        if not self._files:
+            return [(labels.NO_FILES_HERE, "")], False
+        return filter_rows(labels.file_rows(self._files), query), True
 
     # ---------------------------------------------------------------- approvals
 
@@ -831,19 +878,34 @@ class StcodeApp(App[None]):
 
     # ------------------------------------------------------------------- files
 
-    @work(thread=True, group="files")
+    @work(thread=True, group="files", exclusive=True)
     def _load_files(self) -> None:
         """List the workspace once, in a thread.
+
+        Exclusive: every keystroke while the listing is in flight asks again, and one
+        `git ls-files` per character typed is a thread pool doing the same work six
+        times to produce the same answer.
 
         `git ls-files` when the workspace is a repo — it already knows what is ignored,
         and reimplementing `.gitignore` to build a mention list would be a second
         opinion about which files exist. A plain walk otherwise.
         """
         root = Path(str(self._info.get("cwd", "") or self._cwd))
-        if not root.is_dir():
-            self._files = []  # The workspace is on the daemon's machine.
+        # An empty list, not None: "listed, and there is nothing" is a different answer
+        # from "not listed yet", and only one of them is worth saying out loud.
+        found = _list_files(root) if root.is_dir() else []
+        self.call_from_thread(self._files_loaded, found)
+
+    def _files_loaded(self, found: list[str]) -> None:
+        """Adopt the listing, and refill the card that opened before it existed."""
+        self._files = found
+        card = self.cards.current
+        if card is None or card.kind != labels.CARD_FILES:
             return
-        self._files = _list_files(root)
+        trigger = token_trigger(self.prompt.text, self.prompt.cursor_offset)
+        rows, selectable = self._token_rows("@", trigger[1] if trigger else "")
+        card.selectable = selectable
+        card.show(rows)
 
     # ---------------------------------------------------------------- settings
 
@@ -1048,6 +1110,22 @@ class StcodeApp(App[None]):
         effective = getattr(self, "_effective", {})
         return str(effective.get("effort") or self.config.defaults.reasoning_effort)
 
+    def _skill_names(self) -> dict[str, str]:
+        """What this session's daemon found, as `typed -> as the registry spells it`.
+
+        The daemon's machine is the one that knows — in `--daemonless` the skills are
+        not on this one. Both spellings are kept because `/` commands are matched
+        case-insensitively and the registry looks skills up exactly: sending the
+        lowercased token would mean a skill named `PDF` could be offered and then not
+        found.
+        """
+        found: dict[str, str] = {}
+        for skill in self._info.get("skills", []):
+            name = str(skill.get("name", ""))
+            if name:
+                found.setdefault(name.lower(), name)
+        return found
+
     def _has_credential(self) -> bool:
         provider = self.config.providers.get(self.config.defaults.provider, ProviderConfig())
         return bool(resolve_secret(provider.api_key_env, provider.api_key))
@@ -1187,14 +1265,20 @@ class StcodeApp(App[None]):
                     Card(
                         labels.CARD_SKILLS,
                         labels.skill_rows(skills) or [(labels.NO_SKILLS, "")],
-                        footer=labels.CARD_FOOTER_CLOSE,
-                        selectable=False,
+                        footer=labels.CARD_FOOTER_CHOOSE if skills else labels.CARD_FOOTER_CLOSE,
+                        # Choosing one writes `/name` into the input rather than running
+                        # it: a skill usually needs a sentence after it saying what to
+                        # do, and a card that fired on enter would leave nowhere to put
+                        # it. The name is the part that is tedious to type correctly.
+                        selectable=bool(skills),
                     )
                 )
             case "token" | "tokens":
                 self._show_tokens()
             case "help":
                 self._help_card()
+            case _ if name in self._skill_names():
+                self._send(labels.skill_request(self._skill_names()[name], argument))
             case _:
                 self._error(labels.unknown_command(name))
 
