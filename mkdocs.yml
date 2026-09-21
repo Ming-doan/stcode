@@ -116,6 +116,8 @@ nav:
       - 0001 Tool search: decisions/0001-tool-search.md
       - 0002 File and image input: decisions/0002-file-and-image-input.md
       - 0003 What the TUI owns: decisions/0003-what-the-tui-owns.md
+      - 0004 What a remote client may change: decisions/0004-what-a-remote-client-may-change.md
+      - 0005 An agent is a config file: decisions/0005-an-agent-is-a-config-file.md
   - Contributing:
       - How a change is made: contributing/workflow.md
       - Testing: contributing/testing.md

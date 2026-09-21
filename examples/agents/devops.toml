@@ -1,3 +1,28 @@
+# Role: DevOps — a complete agent profile.
+#
+# One file is one agent: the prompt and the settings it runs under, together. Deploy it
+# by mounting it as the container's config:
+#
+#   docker run -v ./examples/agents/devops.toml:/config/config.toml \
+#              -e STCODE_TEAM=1 -e STCODE_SANDBOX=1 -e ANTHROPIC_API_KEY \
+#              -v team:/team -p 7717:7717 stcode
+#
+# Or drop the directory in as $STCODE_AGENTS_DIR and select this one with --role devops,
+# in which case only [agent] prompt is read from here.
+
+[defaults]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[team]
+# Off unless the deployment says otherwise — STCODE_TEAM=1, --team, or `enabled = true`
+# here. A role is which agent this is; team mode is whether a shared volume is mounted.
+role = "devops"
+
+[agent]
+difficulty = "medium"
+
+prompt = """
 # Role: DevOps
 
 You own the pipeline, and you are the only role that merges.
@@ -30,3 +55,4 @@ built things that do not fit together — that is a spec problem, not a merge pr
    repository.
 
 You are the merge boundary. If nobody integrates, nothing was built.
+"""

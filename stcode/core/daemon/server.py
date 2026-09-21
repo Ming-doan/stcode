@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import socket as socketlib
 from pathlib import Path
 from types import TracebackType
@@ -34,17 +35,24 @@ from stcode import __version__
 from stcode.core.agent import Agent
 from stcode.core.common import trace
 from stcode.core.common.paths import default_config_path
-from stcode.core.configs import GatewayConfig
-from stcode.core.daemon.autonomy import AutonomyRefused, guard_autonomy
+from stcode.core.configs import (
+    GatewayConfig,
+    apply_provider_settings,
+    redacted,
+    save_config,
+)
+from stcode.core.daemon.autonomy import AutonomyRefused, guard_autonomy, in_container
 from stcode.core.daemon.protocol import (
     STREAM_LIMIT,
     Answer,
     Approval,
     Attach,
     ClientMessage,
+    ConfigReply,
     Create,
     Detach,
     ErrorMessage,
+    GetConfig,
     History,
     Info,
     Interrupt,
@@ -52,6 +60,7 @@ from stcode.core.daemon.protocol import (
     Push,
     Sessions,
     SessionList,
+    SetConfig,
     SetMeta,
     SetMode,
     decode,
@@ -69,6 +78,11 @@ SHUTDOWN_TIMEOUT = 5.0
 """How long shutdown waits for the listening socket to drain. Bounded, because a
 shutdown that can hang is one you learn to `kill -9` instead of trusting."""
 
+CLIENT_LIMIT_REFUSED = "this daemon already has a client attached ({count}/{limit})"
+"""What the *newcomer* is told. The incumbent is never dropped to make room: a
+connection that is already attached may be parked on an approval, and evicting it turns
+a stray `stcode --daemonless` into a way to strand somebody else's turn."""
+
 
 class Daemon:
     """A socket, a session registry, and the connections watching them."""
@@ -79,11 +93,19 @@ class Daemon:
         *,
         has_approver: bool = False,
         gateway: LLMGateway | None = None,
+        config_path: Path | None = None,
     ) -> None:
         """`has_approver` is False for everything stcode ships — `autonomy.py` says why
         an attached human is not one under `full-auto`. `gateway` is for tests and for
-        embedding; left None, the daemon builds and owns one."""
+        embedding; left None, the daemon builds and owns one.
+
+        `config_path` is the file `set_config` writes and `info` reports. It defaults to
+        where the config *was read from*, and only then to the conventional location: a
+        container started with `STCODE_CONFIG=/config/backend-dev.toml` must not tell
+        its clients about a file it never opened.
+        """
         self.config = config
+        self.config_path = config_path or config.source_path or default_config_path()
         self.has_approver = has_approver
         self.sessions: dict[str, SessionRunner] = {}
         self._connections: set["_Connection"] = set()
@@ -100,6 +122,20 @@ class Daemon:
         if settings.transport == "unix":
             return str(socket_path(settings.socket))
         return f"{settings.host}:{settings.port}"
+
+    @property
+    def max_clients(self) -> int:
+        """Connections allowed at once, resolved. `0` is unlimited.
+
+        Unset means **1 in a container, unlimited on the host**. The asymmetry is the
+        point: two terminals watching one session on your laptop is what the fan-out is
+        for, while a container is one agent, one checkout, one merge boundary (rule 2),
+        and a second terminal steering that role crosses it by accident.
+        """
+        configured = self.config.daemon.max_clients
+        if configured is None:
+            return 1 if in_container() else 0
+        return max(0, configured)
 
     async def start(self) -> None:
         """Bind and begin accepting. Returns once the socket is listening.
@@ -205,6 +241,49 @@ class Daemon:
                 providers=config.providers, routing=config.routing, retry=config.retry
             )
 
+    def config_frame(self) -> ConfigReply:
+        """This daemon's config, redacted, plus where it lives on **this** machine.
+
+        The path is the field that makes `--daemonless` honest: a client showing
+        `~/.stcode/config.toml` while driving a container is describing the wrong disk.
+        """
+        return ConfigReply(
+            path=str(self.config_path),
+            config=redacted(self.config),
+            writable=_writable(self.config_path),
+        )
+
+    async def write_defaults(self, patch: dict[str, Any]) -> None:
+        """Fold a `[defaults]` patch into this daemon's config, save it, and reload.
+
+        Three steps and all three matter. The fold repoints any routing tier that was
+        tracking the old default model, so `/model` cannot leave a session routing a new
+        model name at the old vendor. The save is what makes the change survive a
+        container restart. The reload is what makes it true for the agent that is
+        already holding the gateway.
+
+        Only `[defaults]` arrives here — `CONFIGURABLE_DEFAULTS` is the filter, and the
+        reason is in its docstring.
+        """
+        if not patch:
+            return
+        mode = patch.get("approval_mode")
+        if mode is not None:
+            # `set_mode` is not the only door a mode arrives through, and neither is
+            # this one. The guard goes on every door.
+            guard_autonomy(mode, self.has_approver)
+
+        updated = apply_provider_settings(
+            self.config,
+            provider=str(patch.get("provider") or self.config.defaults.provider),
+            model=patch.get("model"),
+            approval_mode=mode,
+            reasoning_effort=patch.get("reasoning_effort"),
+        )
+        save_config(updated, self.config_path)
+        await self.reconfigure(updated)
+        log.info("config updated from a client: %s", ", ".join(sorted(patch)))
+
     async def create_session(
         self,
         *,
@@ -301,13 +380,29 @@ class Daemon:
     async def _handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        limit = self.max_clients
+        if limit and len(self._connections) >= limit:
+            # Refused with a sentence, not a socket that shuts without a word: the
+            # client has to have something to print. → `CLIENT_LIMIT_REFUSED`
+            message = CLIENT_LIMIT_REFUSED.format(count=len(self._connections), limit=limit)
+            log.warning("refused %s — %s", _peer(writer), message)
+            with contextlib.suppress(ConnectionError, OSError):
+                writer.write(encode(ErrorMessage(message=message)))
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+            return
+
         connection = _Connection(self, reader, writer)
         self._connections.add(connection)
+        peer = _peer(writer)
+        log.info("client connected: %s (%d/%s)", peer, len(self._connections), limit or "∞")
         try:
             await connection.run()
         finally:
             self._connections.discard(connection)
             await connection.aclose()
+            log.info("client disconnected: %s", peer)
 
 
 class _Connection:
@@ -414,10 +509,25 @@ class _Connection:
                     runner.inform(
                         version=__version__,
                         daemon=self._daemon.address,
-                        config_path=str(default_config_path()),
+                        # The file this daemon actually read, not the conventional
+                        # location — a container's is wherever STCODE_CONFIG pointed.
+                        config_path=str(self._daemon.config_path),
                         session_dir=str(self._daemon.config.session.dir),
                     )
                 )
+            case GetConfig():
+                self.send(self._daemon.config_frame())
+            case SetConfig():
+                try:
+                    await self._daemon.write_defaults(message.patch())
+                except AutonomyRefused as refusal:
+                    # Rule 5 has no back door, and a config file is not one either.
+                    self.send(ErrorMessage(message=str(refusal)))
+                except OSError as exc:
+                    self.send(ErrorMessage(message=f"could not write the config: {exc}"))
+                # Either way, say what the config now *is*: a client must never be left
+                # showing a change that was refused.
+                self.send(self._daemon.config_frame())
             case SetMode():
                 runner = self._runner(message.session)
                 # `create` is not the only door a mode arrives through, so the guard
@@ -478,8 +588,25 @@ class _Connection:
 # ---- unix socket housekeeping ---------------------------------------------------
 
 
+def _peer(writer: asyncio.StreamWriter) -> str:
+    """Who is on the other end, for the log. A unix socket has no peer name worth
+    printing, so it says so rather than printing an empty tuple."""
+    peer = writer.get_extra_info("peername")
+    if isinstance(peer, tuple) and len(peer) >= 2:
+        return f"{peer[0]}:{peer[1]}"
+    return str(peer) if peer else "unix socket"
+
+
 def socket_path(value: str) -> Path:
     return Path(value).expanduser()
+
+
+def _writable(path: Path) -> bool:
+    """Whether `set_config` would land. A read-only mount is the common case in a
+    container, and a client that knows can grey the fields out instead of offering an
+    edit that fails."""
+    probe = path if path.exists() else path.parent
+    return os.access(probe, os.W_OK)
 
 
 def _clear_stale_socket(path: Path) -> None:

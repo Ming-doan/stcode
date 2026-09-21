@@ -58,3 +58,42 @@ max_attempts = 3
 base_delay = 1.0
 max_delay = 20.0
 jitter = true
+
+# Limits on one turn. `prompt` (or `prompt_file`) is what makes this file a whole *agent
+# profile*: the prompt lives beside the settings it runs under, so deploying an agent is
+# one mount — `-v ./agents/backend-dev.toml:/config/config.toml`.
+# → docs/teams/roles.md
+[agent]
+max_turns = 40
+difficulty = "high"
+# tools = ["read", "grep", "glob", "ls"]   # an allow-list, replacing the default set
+# exclude_tools = ["web_search"]           # subtracted from whatever is left
+# prompt = """
+# # Role: backend developer
+#
+# ## You own
+# `src/api/` — the HTTP surface and the logic behind it.
+# """
+# prompt_file = "backend-dev.md"   # relative to this file. Set one or the other.
+
+# Where transcripts live. `./.stcode/sessions` keeps them with the project.
+[session]
+dir = "~/.stcode/sessions"
+keep = 100
+
+# Where the daemon listens. `unix` on your own machine, `tcp` inside a container.
+[daemon]
+transport = "unix"
+socket = "~/.stcode/daemon.sock"
+# host = "0.0.0.0"       # when transport = "tcp"
+# port = 7717
+# max_clients = 0        # connections at once. Unset = 1 in a container, unlimited on
+#                        # the host. 0 is unlimited everywhere.
+
+# Team mode is OFF until `enabled` is true (or STCODE_TEAM=1, or --team). A role says
+# which agent this is; team mode says a shared volume is mounted. Two facts, two keys.
+# [team]
+# enabled    = true
+# role       = "backend-dev"
+# shared_dir = "/team"
+# remote     = "/team/repo.git"   # a bare repo on the volume: no credential, no network

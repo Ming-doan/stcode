@@ -9,8 +9,9 @@ that spends its turn discovering it may not work.
 `subagent=True` appends the briefing a `task` child needs; `Harness` derives it from
 `depth`, so a spawned agent cannot be handed the wrong one.
 
-A **role** is the third input, and it is not shipped here: `load_role` reads markdown
-from `.stcode/agents/` or `~/.stcode/agents/`. Only the mode prompts are code.
+A **role** is the third input, and it is not shipped here: an agent profile is a
+`config.toml` under `.stcode/agents/` or `~/.stcode/agents/`, and `load_agent_prompt`
+reads its `[agent] prompt`. Only the mode prompts are code.
 
 Fixed sections first, then the session's variable state — see `sections.py` on caching.
 `extra` comes from the *caller*; nothing here is writable from inside a turn.
@@ -19,6 +20,7 @@ Fixed sections first, then the session's variable state — see `sections.py` on
 from __future__ import annotations
 
 import os
+import tomllib
 from pathlib import Path
 from typing import Literal, Sequence
 
@@ -45,7 +47,14 @@ PromptMode = Literal["plan", "execute"]
 
 AGENTS_DIRNAME = "agents"
 """Where an agent profile lives, under the project's `.stcode/` or the user's config
-directory. One markdown file per role, named by the role."""
+directory. **One `config.toml` per agent**, named by the role."""
+
+AGENT_PROFILE_SUFFIX = ".toml"
+"""A profile is an ordinary config file. That is the whole point: an agent is a prompt
+*and* the settings it runs under, and while those were a markdown file and a TOML file
+every deployment had to mount two things and keep them in step. One file is one mount —
+`-v ./agents/backend-dev.toml:/config/config.toml` — and there is no second format to
+validate."""
 
 AGENTS_DIR_ENV = "STCODE_AGENTS_DIR"
 """Points the search at one directory and nothing else. What a container mounts."""
@@ -68,35 +77,114 @@ def agents_dirs(cwd: str | Path | None = None) -> list[Path]:
     return [root / ".stcode" / AGENTS_DIRNAME, config_dir() / AGENTS_DIRNAME]
 
 
-def available_roles(cwd: str | Path | None = None) -> list[str]:
-    """Every role installed on this machine, nearest directory first."""
+def resolve_prompt(prompt: str, prompt_file: str, source: Path | None = None) -> str:
+    """An `[agent]` prompt from the two keys that can carry it.
+
+    One function, because two callers ask the same question about the same pair of
+    keys: `configs.resolve_agent_prompt` for the config in hand, and
+    `load_agent_prompt` for a profile found by name. A second implementation would be a
+    second set of rules about which key wins.
+
+    `prompt_file` is relative to `source` — the file the keys were read from — so a
+    directory of profiles moves as a unit. Naming both keys is a `ValueError`: a
+    precedence rule here would be one more thing to remember on the day a container
+    comes up with the wrong prompt.
+    """
+    where = f" in {source}" if source else ""
+    if prompt.strip() and prompt_file.strip():
+        raise ValueError(
+            f"[agent] prompt and [agent] prompt_file are both set{where} — an agent "
+            "profile carries one prompt, inline or in a file."
+        )
+    if prompt.strip():
+        return prompt.strip()
+    if not prompt_file.strip():
+        return ""
+    target = Path(prompt_file).expanduser()
+    if not target.is_absolute():
+        target = (source.parent if source else Path.cwd()) / target
+    try:
+        return target.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        # Loud, like an unknown role: a prompt file that did not mount is an agent that
+        # owns nothing, and it looks exactly like one that did until it starts working.
+        raise FileNotFoundError(
+            f"[agent] prompt_file{where} points at {target}, which cannot be read ({exc})."
+        ) from exc
+
+
+def available_agents(cwd: str | Path | None = None) -> list[str]:
+    """Every agent profile installed on this machine, nearest directory first."""
     names: list[str] = []
     for directory in agents_dirs(cwd):
         if not directory.is_dir():
             continue
-        names += [path.stem for path in directory.glob("*.md") if path.stem not in names]
+        names += [
+            path.stem
+            for path in directory.glob(f"*{AGENT_PROFILE_SUFFIX}")
+            if path.stem not in names
+        ]
     return sorted(names)
 
 
-def load_role(name: str, cwd: str | Path | None = None) -> str:
-    """A role's markdown, or "" when the session has no role.
+def find_agent_profile(name: str, cwd: str | Path | None = None) -> Path:
+    """Where `name`'s profile is, or raise saying what is installed.
 
     An unknown name raises: a container started with a typo'd role, or with the agents
     volume unmounted, should refuse loudly rather than run an agent that owns nothing.
+    There is deliberately no bundled fallback — a silent one would mean that container
+    starts anyway, as somebody else's backend dev.
     """
-    if not name:
-        return ""
     searched = agents_dirs(cwd)
     for directory in searched:
-        path = directory / f"{name}.md"
+        path = directory / f"{name}{AGENT_PROFILE_SUFFIX}"
         if path.is_file():
-            return path.read_text(encoding="utf-8").strip()
-    known = ", ".join(available_roles(cwd)) or "(none installed)"
+            return path
+    known = ", ".join(available_agents(cwd)) or "(none installed)"
     raise FileNotFoundError(
-        f"No role named {name!r} in {' or '.join(str(path) for path in searched)}. "
+        f"No agent named {name!r} in {' or '.join(str(path) for path in searched)}. "
         f"Available: {known}. Copy one from examples/agents/, or set "
         f"{AGENTS_DIR_ENV} to where yours live."
     )
+
+
+def load_agent_prompt(name: str, cwd: str | Path | None = None) -> str:
+    """The `[agent] prompt` of `name`'s profile, or "" when the session has no role.
+
+    **Only the prompt.** A profile found by name contributes the thing that makes it
+    that agent; it does not get a second opinion about the model, the socket or the
+    session directory — those come from the config that was actually loaded. Two files
+    both claiming to configure the daemon is a support question about which one won.
+
+    Mounted *as* the config (`STCODE_CONFIG=/config/backend-dev.toml`) the whole file
+    applies, and this lookup never runs: `resolve_agent_prompt` reads the prompt
+    straight off the config in hand.
+
+    `tomllib` directly rather than `core/configs`, which imports this package — the
+    prompt is a string in a TOML file, and reaching back up for a validated model to
+    get it would be rule 7 in miniature.
+    """
+    if not name:
+        return ""
+    path = find_agent_profile(name, cwd)
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"{path} is not valid TOML: {exc}") from exc
+
+    agent = data.get("agent") or {}
+    body = resolve_prompt(
+        str(agent.get("prompt", "") or ""), str(agent.get("prompt_file", "") or ""), path
+    )
+    if not body:
+        # A profile with no prompt is a mount that half-happened. Loud, for the same
+        # reason an unknown name is.
+        raise ValueError(
+            f"{path} has no [agent] prompt — an agent profile without a prompt is an "
+            "agent that owns nothing."
+        )
+    return body
 
 _APPROVAL_NOTES: dict[ApprovalMode, str] = {
     "plan": "Writes and commands are switched off. Research and propose only.",
@@ -139,7 +227,7 @@ def build_system_prompt(
         approval_mode: What the agent may do unattended; also decides the note shown.
         tool_names: Tools advertised this turn.
         skill_catalogue: Output of `SkillRegistry.catalogue()`.
-        role: The role's markdown body, from `load_role`. Team mode only.
+        role: The agent's prompt body, already resolved. Team mode only.
         teammates: Other roles with an inbox on the shared volume.
         mcp_catalogue: Output of `MCPManager.catalogue()` — server and tool names only.
         mcp_directory: Where the generated stubs live.
@@ -198,9 +286,12 @@ __all__ = [
     "AGENTS_DIR_ENV",
     "SUBAGENT",
     "PromptMode",
+    "AGENT_PROFILE_SUFFIX",
     "agents_dirs",
-    "available_roles",
+    "available_agents",
     "build_system_prompt",
-    "load_role",
+    "find_agent_profile",
+    "load_agent_prompt",
+    "resolve_prompt",
     "mode_for",
 ]

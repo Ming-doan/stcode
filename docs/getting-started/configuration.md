@@ -77,7 +77,8 @@ uv run stcode --transport tcp --host 10.0.0.4 --port 7717
 | `--cwd` | the directory the agent works in |
 | `--mode` | `[defaults] approval_mode` |
 | `--model` | `[defaults] model` |
-| `--role` | `[team] role` — and so turns team mode on |
+| `--role` | `[team] role` — which agent this is, and so which profile supplies the prompt |
+| `--team` / `--no-team` | `[team] enabled`. Team mode is **off** unless this, `STCODE_TEAM=1`, or the config says otherwise |
 | `--config` | which file to load |
 | `--transport` `--socket` `--host` `--port` | `[daemon]` |
 

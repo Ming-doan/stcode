@@ -45,8 +45,9 @@ uv run stcode config         # where config lives and what it selects
 ```
 
 Useful flags: `--cwd`, `--mode` (`plan` | `suggest` | `auto-edit` | `full-auto`),
-`--model`, `--role` (team mode), `--config`, and `--transport` / `--socket` / `--host` /
-`--port` to point at a daemon for this run without editing the config file.
+`--model`, `--role` (which agent profile supplies the prompt), `--team` (team mode, off
+by default), `--config`, and `--transport` / `--socket` / `--host` / `--port` to point at
+a daemon for this run without editing the config file.
 
 ### In the UI
 

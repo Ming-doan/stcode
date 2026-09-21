@@ -18,12 +18,14 @@ from typing import Any, Callable
 
 from conftest import asynctest
 from fakes import RecordingGateway, calls_tool, says
-from textual.widgets import OptionList
+from textual.widgets import Button, Input, OptionList
 
 from stcode.cli import labels
 from stcode.cli.app import StcodeApp
 from stcode.cli.cards import Card
+from stcode.cli.connect import ConnectScreen
 from stcode.cli.modals import TrustScreen
+from stcode.cli.settings import SettingsScreen
 from stcode.cli.prefs import UiPrefs, save_prefs
 from stcode.cli.prompt import Prompt
 from stcode.cli.transcript import (
@@ -35,7 +37,7 @@ from stcode.cli.transcript import (
     ShellOutput,
     ToolCall,
 )
-from stcode.core.configs import GatewayConfig, save_config
+from stcode.core.configs import GatewayConfig, load_config, save_config
 from stcode.core.daemon import Daemon
 from stcode.core.providers.types import MessageStop, ToolCallEnd, Usage
 
@@ -725,6 +727,136 @@ async def test_two_parallel_approvals_are_both_answerable(
 
             await pilot.press("n")
             assert await until(lambda: len(gateway.calls) >= 2), "the turn stayed parked"
+
+
+@asynctest
+async def test_backspace_does_not_dismiss_an_approval(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """The hang: backspace closed the card and the turn waited forever.
+
+    By the time an approval is on screen its request has left the queue, so closing the
+    card left the session parked on an answer with nowhere to come from — a hung agent
+    with a working keyboard. The keystroke was usually backspace on an already-empty
+    input, aimed at a character that was not there.
+    """
+    gateway = RecordingGateway(
+        [calls_tool("c1", "bash", command="rm -rf build"), says("fine, not doing that")]
+    )
+    async with Harnessed(tmp_path, workspace, gateway, approval_mode="suggest") as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            await pilot.press("g", "o", "enter")
+            assert await until(lambda: card_of(app) is not None)
+            assert card_of(app).kind == labels.CARD_APPROVE  # type: ignore[union-attr]
+
+            for key in ("backspace", "backspace", "escape"):
+                await pilot.press(key)
+                await pilot.pause()
+                card = card_of(app)
+                assert card is not None and card.kind == labels.CARD_APPROVE, (
+                    f"{key} dismissed the approval and parked the turn"
+                )
+
+            # And the only way out still works.
+            await pilot.press("n")
+            assert await until(lambda: card_of(app) is None)
+            assert await until(lambda: len(gateway.calls) >= 2), "the turn stayed parked"
+
+
+@asynctest
+async def test_backspace_still_closes_a_card_that_is_only_offering(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """The rule is "asking, not offering" — a picker must not become sticky too."""
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            await pilot.press("slash")
+            await pilot.pause()
+            assert card_of(app) is not None
+            await pilot.press("backspace")
+            await pilot.pause()
+            assert card_of(app) is None
+
+
+# ---- --daemonless: the settings belong to the daemon -------------------------------
+
+
+async def attached_elsewhere(app: StcodeApp, pilot: Any) -> None:
+    """Drive the connect screen, which `--daemonless` opens instead of probing.
+
+    The address it offers is already the right one — it comes from this run's config —
+    so pressing enter on the focused Connect button is the whole interaction.
+    """
+    assert await until(lambda: isinstance(app.screen, ConnectScreen)), "no connect screen"
+    await pilot.press("enter")
+    await connected(app)
+
+
+@asynctest
+async def test_daemonless_shows_the_daemons_config_not_the_local_one(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """The agent is on the daemon's machine, so its settings are the ones that matter.
+
+    Reading the local file in this shape meant the status line, `/model` and the routing
+    tiers all described a laptop that was not running anything.
+    """
+    env = Harnessed(tmp_path, workspace, RecordingGateway([]))
+    env.daemon.config.defaults.model = "fake-remote"
+    env.daemon.config_path = tmp_path / "daemon-config.toml"
+    save_config(env.daemon.config, env.daemon.config_path)
+
+    async with env:
+        app = env.app(daemonless=True)
+        async with app.run_test() as pilot:
+            await attached_elsewhere(app, pilot)
+            assert await until(lambda: app._remote_config)
+
+            assert app.config.defaults.model == "fake-remote"
+            assert app._remote_config_path == str(env.daemon.config_path)
+            # And the local file, which describes a different machine, is untouched.
+            assert load_config(env.config_path).defaults.model == "fake-large"
+
+
+@asynctest
+async def test_daemonless_model_writes_the_daemons_config_file(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """`/model` has to outlive the session and the container restart, or it is a setting
+    you retype every morning. `set_meta` reaches the running session; only the write to
+    the daemon's own `config.toml` survives."""
+    env = Harnessed(tmp_path, workspace, RecordingGateway([]))
+    env.daemon.config_path = tmp_path / "daemon-config.toml"
+    save_config(env.daemon.config, env.daemon.config_path)
+
+    async with env:
+        app = env.app(daemonless=True)
+        async with app.run_test() as pilot:
+            await attached_elsewhere(app, pilot)
+            assert await until(lambda: app._remote_config)
+
+            app._run_command("/model")
+            assert await until(lambda: isinstance(app.screen, SettingsScreen))
+            await pilot.pause()  # the screen is up; its fields mount on the next tick
+            screen = app.screen
+            # The credential fields are the daemon operator's, and say so by being
+            # disabled rather than by silently not saving.
+            assert screen.query_one("#api-key", Input).disabled
+            assert screen.query_one("#routing-high", Input).disabled
+
+            screen.query_one("#model", Input).value = "fake-chosen"
+            screen.query_one("#save", Button).press()
+            await pilot.pause()
+
+            assert await until(
+                lambda: load_config(env.daemon.config_path).defaults.model == "fake-chosen"
+            ), "the daemon's config file never changed"
+            # The local one still describes this machine, and nothing else.
+            assert load_config(env.config_path).defaults.model == "fake-large"
 
 
 # ---- ! ----------------------------------------------------------------------------

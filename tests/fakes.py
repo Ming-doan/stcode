@@ -260,6 +260,9 @@ class RecordingGateway:
         self.gate: asyncio.Event | None = None
         """Set to hold a turn open, so a test can detach or interrupt mid-run."""
 
+        self.reconfigured: list[dict[str, Any]] = []
+        """Every `reconfigure` this double was handed, newest last."""
+
     async def stream(
         self,
         messages: list[Message],
@@ -289,6 +292,12 @@ class RecordingGateway:
 
     async def aclose(self) -> None:
         self.closed = True
+
+    async def reconfigure(self, **settings: Any) -> None:
+        """Swallowed, and recorded. `Daemon.reconfigure` calls it whenever a client
+        changes the config — a double that did not have it turned "the daemon reloaded"
+        into an `AttributeError` reaching the client as a protocol error."""
+        self.reconfigured.append(settings)
 
     @property
     def last(self) -> GatewayCall:

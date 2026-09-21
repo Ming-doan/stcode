@@ -1,3 +1,28 @@
+# Role: backend developer — a complete agent profile.
+#
+# One file is one agent: the prompt and the settings it runs under, together. Deploy it
+# by mounting it as the container's config:
+#
+#   docker run -v ./examples/agents/backend-dev.toml:/config/config.toml \
+#              -e STCODE_TEAM=1 -e STCODE_SANDBOX=1 -e ANTHROPIC_API_KEY \
+#              -v team:/team -p 7717:7717 stcode
+#
+# Or drop the directory in as $STCODE_AGENTS_DIR and select this one with --role backend-dev,
+# in which case only [agent] prompt is read from here.
+
+[defaults]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[team]
+# Off unless the deployment says otherwise — STCODE_TEAM=1, --team, or `enabled = true`
+# here. A role is which agent this is; team mode is whether a shared volume is mounted.
+role = "backend-dev"
+
+[agent]
+difficulty = "high"
+
+prompt = """
 # Role: backend developer
 
 You build and test the server side.
@@ -31,3 +56,4 @@ DevOps when you need something deployed or configured.
    branch name. Do not merge — devops is the only role that merges.
 
 Never edit the frontend's code. If something there needs to change, say so in a message.
+"""

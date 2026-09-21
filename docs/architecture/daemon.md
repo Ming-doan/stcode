@@ -63,6 +63,8 @@ Client → Daemon
 {"type":"set_mode","mode":"auto-edit"}
 {"type":"set_meta","model":"claude-opus-5","reasoning_effort":"high"}
 {"type":"info"}                                     → skills, MCP servers, paths
+{"type":"get_config"}                               → this daemon's config, keys redacted
+{"type":"set_config","defaults":{"model":"claude-opus-5"}}  → writes its config.toml
 {"type":"approval","execution_id":"ab12","approved":true}
 {"type":"answer","execution_id":"cd34","text":"Postgres"}
 
@@ -74,6 +76,7 @@ Daemon → Client
 {"type":"question","execution_id":"cd34","question":"…","options":[…]}
 {"type":"history","records":[…]}                    # replay on re-attach, raw records
 {"type":"info","skills":[…],"mcp":[…],"config_path":"…"}
+{"type":"config","path":"…","config":{…},"writable":true}  # answer to get/set_config
 {"type":"progress","text":"…"}                      # advisory; nothing is recorded
 {"type":"text_delta","text":"…","agent":"api-scout"} # a sub-agent's, same frame
 {"type":"turn_finished","usage":{…}}                # the full four-field Usage
@@ -170,9 +173,58 @@ What it deliberately does not do is restart anything. `[daemon]` and `[session]`
 describe a socket that is already bound and a directory transcripts are already being
 written to; changing either is a restart, not a reload.
 
-It is also only ever called by a client that **started this daemon** — the TUI in its
-default shape. A `--daemonless` terminal does not get to replace the credentials a
-container was started with; the daemon reads its own config file, on its own machine.
+It is also called for a client that **started this daemon** — the TUI in its default
+shape, handing over a key typed into the setup screen — and by `set_config`, which is the
+same reload reached from a terminal somewhere else.
+
+## `get_config` / `set_config` — the remote half of `/model`
+
+A `--daemonless` terminal shows settings that belong to the daemon's machine, so it has
+to ask for them rather than read its own file. Two messages:
+
+| | |
+| --- | --- |
+| `get_config` | the whole `GatewayConfig` as the daemon holds it, plus the path it was loaded from. Every `api_key` is replaced with `"***"` before it goes on the wire |
+| `set_config` | a patch, and **only `[defaults]`**: `provider`, `model`, `reasoning_effort`, `approval_mode`. Anything else in the frame is ignored |
+
+`set_config` does three things, in order, and reports the result with the same `config`
+frame `get_config` answers with:
+
+1. folds the patch into `[defaults]`, and repoints any routing tier that was tracking
+   the old default model — the same rule `apply_provider_settings` uses locally, so
+   `/model` does not leave the session routing a new model name at the old vendor;
+2. `save_config()` to the daemon's own path, which is what makes the change survive a
+   container restart;
+3. `reconfigure()`, so the gateway the running agent is already holding gets the new
+   routing without a reconnect.
+
+**Why `[defaults]` and nothing else.** The socket is the access control, and it is one
+boundary, not a graduated one: a client that can drive an agent with your privileges can
+already do most things. But a key, a `base_url` or a concurrency cap is not a property
+of the conversation — it is how the operator provisioned the container, and it is
+usually an environment variable rather than a value in the file at all. Letting a
+terminal rewrite those means a `/model` on the wrong tab silently repoints a fleet at a
+different endpoint. So they travel one way only: the daemon shows them, redacted, and
+does not accept them back.
+
+`guard_autonomy` runs on an `approval_mode` arriving this way, exactly as it does on
+`set_mode`. A config file is not a door around rule 5.
+
+## One client, in a container
+
+`[daemon] max_clients` caps concurrent connections. Left unset it is **1 inside a
+container and unlimited on the host** — `in_container()` decides, the same function rule
+5 already trusts.
+
+The asymmetry is the point. Two terminals watching one session on your laptop is a
+feature and the fan-out exists for it. A container is the other case: one container is
+one agent is one checkout is one merge boundary (rule 2), and a second terminal steering
+the same role is that boundary being crossed by accident rather than by design.
+
+The newcomer is refused, never the incumbent. A connection that is already attached may
+be mid-approval, and dropping it to make room turns a stray `stcode --daemonless` into a
+way to strand somebody else's turn. The refusal is an `error` frame and then a close, so
+the client has something to print rather than a socket that shut without a word.
 
 ## `full-auto` and the container rule
 

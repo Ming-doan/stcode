@@ -33,11 +33,13 @@ from stcode.core.daemon.protocol import (
     Attach,
     Create,
     Detach,
+    GetConfig,
     Info,
     Interrupt,
     ProtocolError,
     Push,
     Sessions,
+    SetConfig,
     SetMeta,
     SetMode,
     decode,
@@ -267,6 +269,40 @@ class DaemonClient:
     async def info(self, session_id: str = "") -> dict[str, Any]:
         """Skills, MCP servers, tools and paths — as the **daemon's** machine sees them."""
         return await self._request(Info(session=session_id), "info")
+
+    async def get_config(self) -> dict[str, Any]:
+        """The daemon's own `config.toml`: `path`, `config`, `writable`.
+
+        Literal keys come back as `"***"`. In `--daemonless` this is the config the UI
+        shows — the local file describes a different machine's agent.
+        """
+        return await self._request(GetConfig(), "config")
+
+    async def set_config(
+        self,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        approval_mode: ApprovalMode | None = None,
+    ) -> dict[str, Any]:
+        """Write `[defaults]` to the daemon's config file and reload its gateway.
+
+        The persistent half of `/model`, where `set_meta` is the per-session half: this
+        one survives a restart, and only these four keys are accepted. Credentials,
+        `base_url` and routing belong to whoever deployed the daemon.
+        """
+        patch = {
+            key: value
+            for key, value in (
+                ("provider", provider),
+                ("model", model),
+                ("reasoning_effort", reasoning_effort),
+                ("approval_mode", approval_mode),
+            )
+            if value
+        }
+        return await self._request(SetConfig(defaults=patch), "config")
 
     async def _fire(self, message: Any) -> None:
         self._send(message)

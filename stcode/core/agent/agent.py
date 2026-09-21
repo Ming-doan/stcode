@@ -42,6 +42,7 @@ from stcode.core.agent.supervisor import Supervisor
 from stcode.core.common import trace
 from stcode.core.harness import Harness
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
+from stcode.core.harness.prompts import resolve_prompt
 from stcode.core.harness.tools.base import ApprovalFn, AskFn, EventFn, ProgressFn, Tool
 from stcode.core.providers.gateway import Difficulty, LLMGateway
 from stcode.core.providers.types import (
@@ -129,11 +130,26 @@ class Agent:
             providers=config.providers, routing=config.routing, retry=config.retry
         )
         # `role` names the prompt section and the session `meta` record. It does not by
-        # itself turn on team mode — `[team] role` is a container declaring that a shared
-        # volume is mounted, and a solo session naming a role should not go looking.
+        # itself turn on team mode — `[team] enabled` (or `STCODE_TEAM`, or `--team`) is
+        # a deployment declaring that a shared volume is mounted, and a solo session
+        # naming a role should not go looking for an inbox that is not there.
         team = getattr(config, "team", None)
         role = role or (team.role if team else "")
-        joins_team = bool(team and team.role)
+        joins_team = bool(team and team.enabled)
+        if joins_team and not role:
+            # Loud, like an unknown role: team mode with nobody to be is a mailbox with
+            # no owner, and every message to it would be addressed to "".
+            raise ValueError(
+                "[team] enabled is on but no role is set. Name one in [team] role, "
+                "with --role, or with STCODE_ROLE — a team member has to be somebody."
+            )
+
+        # The config's own prompt, when it is an agent profile. Resolved here so a
+        # mounted profile never has to be found by name.
+        harness_kwargs.setdefault(
+            "agent_prompt",
+            resolve_prompt(config.agent.prompt, config.agent.prompt_file, config.source_path),
+        )
 
         # `setdefault`, not a keyword: a caller passing `load_mcp=False` meant it, and
         # passing both would be a duplicate-argument TypeError.

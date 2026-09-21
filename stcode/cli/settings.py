@@ -14,6 +14,11 @@ behaviour the screen already had — so nobody has to fill them in to keep what 
 `Requests at once` is the other thing that belongs next to a base URL rather than in a
 file: it is a fact about the endpoint you just typed. → `ProviderConfig.max_concurrent`
 
+`remote=True` is the `--daemonless` shape: these are the **daemon's** settings, and only
+`[defaults]` travels back. The credential, endpoint and routing fields are shown
+disabled rather than hidden — "this daemon has no key set" is a thing you need to be
+able to read, and a field that silently would not save is worse than one that says so.
+
 It never writes to disk. It dismisses with a new `GatewayConfig` (or `None` if the user
 backed out) and lets the app own persistence.
 """
@@ -121,10 +126,25 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
     }
     """
 
-    def __init__(self, config: GatewayConfig, *, first_run: bool = False) -> None:
+    REMOTE_FIELDS = frozenset(
+        {"api-key", "base-url", "max-concurrent", *(f"routing-{d}" for d in DIFFICULTIES)}
+    )
+    """Disabled when these settings belong to a daemon somewhere else. Everything not
+    listed — provider, model, difficulty — is what `set_config` accepts."""
+
+    def __init__(
+        self, config: GatewayConfig, *, first_run: bool = False, remote: bool = False
+    ) -> None:
         super().__init__()
         self._config = config
         self._first_run = first_run
+        self._remote = remote
+        """These are the daemon's settings, not this machine's. → the module docstring."""
+
+        if remote:
+            # The key field is disabled in this shape, and a disabled field is not a
+            # place to leave the cursor.
+            self.AUTO_FOCUS = "#model"
 
     def compose(self) -> ComposeResult:
         provider = self._current_provider()
@@ -135,10 +155,12 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
                 labels.SETTINGS_TITLE_FIRST_RUN if self._first_run else labels.SETTINGS_TITLE,
                 id="settings-title",
             )
-            yield Static(
-                labels.SETTINGS_INTRO_FIRST_RUN if self._first_run else labels.SETTINGS_INTRO,
-                id="settings-intro",
-            )
+            intro = labels.SETTINGS_INTRO
+            if self._first_run:
+                intro = labels.SETTINGS_INTRO_FIRST_RUN
+            elif self._remote:
+                intro = labels.SETTINGS_INTRO_REMOTE
+            yield Static(intro, id="settings-intro")
 
             with VerticalScroll(id="settings-body"):
                 yield Label(labels.FIELD_PROVIDER, classes="field-label")
@@ -151,6 +173,7 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
                     password=True,
                     placeholder=labels.key_placeholder(provider, stored),
                     id="api-key",
+                    disabled=self._disabled("api-key"),
                 )
                 yield Static(
                     labels.key_hint(provider, stored), id="key-hint", classes="field-hint"
@@ -161,6 +184,7 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
                     value=stored.base_url or "",
                     placeholder=labels.BASE_URL_PLACEHOLDER,
                     id="base-url",
+                    disabled=self._disabled("base-url"),
                 )
 
                 yield Label(labels.FIELD_MAX_CONCURRENT, classes="field-label")
@@ -168,6 +192,7 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
                     value=str(stored.max_concurrent or ""),
                     placeholder=labels.MAX_CONCURRENT_PLACEHOLDER,
                     id="max-concurrent",
+                    disabled=self._disabled("max-concurrent"),
                 )
                 yield Static(labels.MAX_CONCURRENT_HINT, classes="field-hint")
 
@@ -195,6 +220,7 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
                         value=route.model if route else "",
                         placeholder=labels.routing_placeholder(provider, difficulty),
                         id=f"routing-{difficulty}",
+                        disabled=self._disabled(f"routing-{difficulty}"),
                     )
 
             with Horizontal(id="settings-buttons"):
@@ -203,8 +229,18 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
                 )
                 yield Button(labels.BUTTON_SAVE, variant="primary", id="save")
 
-    def on_mount(self) -> None:
-        self.query_one("#api-key", Input).focus()
+    def _disabled(self, field: str) -> bool:
+        """Whether this field is the daemon operator's rather than the user's.
+
+        Decided in `compose` rather than patched in `on_mount`: a screen's `on_mount`
+        can run before the widgets it composed exist, and a disable applied afterwards
+        is a field that was briefly editable.
+        """
+        return self._remote and field in self.REMOTE_FIELDS
+
+    # Textual focuses this once the screen's children exist. `on_mount` fires before
+    # they do, so focusing there raised `NoMatches` on the first field of the screen.
+    AUTO_FOCUS = "#api-key"
 
     def _current_provider(self) -> str:
         provider = self._config.defaults.provider
@@ -217,6 +253,15 @@ class SettingsScreen(ModalScreen[GatewayConfig | None]):
 
         key_input = self.query_one("#api-key", Input)
         key_input.value = ""
+        if self._remote:
+            # Only the provider and model travel; leave the rest showing what the
+            # daemon has rather than clearing fields nobody here can save.
+            key_input.placeholder = labels.key_placeholder(provider, stored)
+            self.query_one("#key-hint", Static).update(labels.key_hint(provider, stored))
+            model_input = self.query_one("#model", Input)
+            model_input.value = ""
+            model_input.placeholder = labels.model_placeholder(provider)
+            return
         key_input.placeholder = labels.key_placeholder(provider, stored)
         self.query_one("#key-hint", Static).update(labels.key_hint(provider, stored))
 

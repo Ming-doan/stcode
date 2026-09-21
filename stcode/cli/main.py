@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Sequence
 
 import typer
 
 from stcode import __version__
 from stcode.core.configs import (
+    GatewayConfig,
     apply_cli_overrides,
     config_exists,
     default_config_path,
@@ -88,8 +89,17 @@ def main(
         typer.Option(
             "--role",
             envvar="STCODE_ROLE",
-            help="Team role for this run, e.g. backend-dev. Turns on team mode: the "
-            "shared volume, the role prompt, and send_message.",
+            help="Which agent this is, e.g. backend-dev. Selects the profile, and "
+            "therefore the prompt. Does not by itself turn team mode on.",
+        ),
+    ] = None,
+    team: Annotated[
+        bool | None,
+        typer.Option(
+            "--team/--no-team",
+            envvar="STCODE_TEAM",
+            help="Turn team mode on: the shared volume, the inbox and send_message. "
+            "Off unless this, STCODE_TEAM, or [team] enabled says otherwise.",
         ),
     ] = None,
     transport: Annotated[
@@ -128,6 +138,7 @@ def main(
         "approval_mode": _mode(mode),
         "model": model,
         "role": role,
+        "team": team,
     }
 
     if headless:
@@ -166,18 +177,94 @@ def _mode(value: str | None) -> ApprovalMode | None:
     return resolved
 
 
+def startup_report(
+    settings: "GatewayConfig",
+    *,
+    address: str,
+    max_clients: int,
+    config_path: Path,
+    created: Sequence[Path] = (),
+    agents: Sequence[str] = (),
+    contained: bool = False,
+) -> list[str]:
+    """The block `--headless` prints, one line per fact.
+
+    A container's daemon has no screen, so start-up is the only place it can say what it
+    became — and every line here answers a question you would otherwise `docker exec` to
+    ask. Two earn their place beyond that:
+
+    * **`created`** names what this start-up *made*. A config scaffolded because a mount
+      silently did not happen looks exactly like a config that was mounted, and it is
+      the most expensive thing on this list to discover late.
+    * **`container`** is what decides whether `full-auto` may start at all (rule 5), so
+      it is reported rather than assumed.
+
+    A list of strings rather than prints, because the interesting part is *what* it
+    says, and a function that writes to stdout can only be tested by capturing it.
+    """
+    defaults = settings.defaults
+    lines = [
+        f"stcode {__version__} — headless daemon",
+        f"  listening   {settings.daemon.transport} {address}"
+        f"   ({max_clients} client{'' if max_clients == 1 else 's'} max)"
+        if max_clients
+        else f"  listening   {settings.daemon.transport} {address}   (no client limit)",
+        f"  workspace   {Path.cwd()}",
+        f"  mode        {defaults.approval_mode}",
+        f"  model       {defaults.model or '(not set)'} ({defaults.provider})",
+        f"  config      {config_path}",
+        f"  sessions    {Path(settings.session.dir).expanduser()}",
+    ]
+    if agents:
+        lines.append(f"  agents      {', '.join(agents)}")
+    if settings.team.enabled:
+        lines.append(f"  team        {settings.team.role or '(no role!)'} on {settings.team.shared_dir}")
+    else:
+        lines.append("  team        off")
+    lines.append(f"  container   {'yes' if contained else 'no'}")
+    for path in created:
+        lines.append(f"  created     {path}")
+    return lines
+
+
 def _serve(config: Path | None, overrides: dict[str, Any]) -> None:
     """`--headless`: the daemon and nothing else."""
     import asyncio
+    import logging
 
     from stcode.core.daemon import AutonomyRefused, Daemon
+    from stcode.core.daemon.autonomy import in_container
+    from stcode.core.harness.prompts import available_agents
 
-    settings = apply_cli_overrides(load_config(config, create_if_missing=True), **overrides)
+    # INFO in this shape and nowhere else. A UI has a transcript to say what happened;
+    # a daemon has stdout, and `docker logs` is how anybody reads it. Without this every
+    # `log.info` the daemon already writes — sessions created, clients connecting — went
+    # to a logger with no handler.
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
+    path = config or default_config_path()
+    existed = config_exists(path)
+    settings = apply_cli_overrides(load_config(path, create_if_missing=True), **overrides)
+
+    created: list[Path] = [] if existed else [path]
+    sessions = Path(settings.session.dir).expanduser()
+    if not sessions.exists():
+        created.append(sessions)
 
     async def serve() -> None:
-        daemon = Daemon(settings)
+        daemon = Daemon(settings, config_path=path)
         await daemon.start()
-        typer.echo(f"stcode daemon listening on {daemon.address}  (ctrl-c to stop)")
+        for line in startup_report(
+            settings,
+            address=daemon.address,
+            max_clients=daemon.max_clients,
+            config_path=path,
+            created=created,
+            agents=available_agents(),
+            contained=in_container(),
+        ):
+            typer.echo(line)
+        typer.echo("ready — ctrl-c to stop")
         try:
             await daemon.serve_forever()
         finally:

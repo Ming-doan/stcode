@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import tomli_w
 from pydantic import BaseModel, Field
@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 # would be a cycle.
 from stcode.core.common.paths import config_dir, config_exists, default_config_path
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
+from stcode.core.harness.prompts import resolve_prompt
 from stcode.core.providers import Difficulty, ProviderConfig, RetryConfig, RouteConfig, default_model_for
 from stcode.core.providers.types import ReasoningEffort
 from stcode.core.session import DEFAULT_SESSION_DIR
@@ -68,6 +69,12 @@ class AgentConfig(BaseModel):
     replacing the default, and a subtraction from whatever is left. Applied after the
     agent is fully assembled, so `task`, `send_message` and MCP tools can be named too;
     a name that matches no tool refuses to start.
+
+    `prompt` / `prompt_file` are what make one config file a whole **agent profile**: the
+    prompt lives beside the settings it runs under instead of in a second file the
+    deployment has to keep in step. `prompt_file` is resolved relative to the config it
+    was read from, so a directory of profiles moves as a unit. Setting both is an error
+    rather than a precedence rule somebody has to remember.
     """
 
     max_turns: int = 40
@@ -77,6 +84,8 @@ class AgentConfig(BaseModel):
     difficulty: Difficulty = "high"
     tools: list[str] = Field(default_factory=list)
     exclude_tools: list[str] = Field(default_factory=list)
+    prompt: str = ""
+    prompt_file: str = ""
 
 
 class SessionConfig(BaseModel):
@@ -99,18 +108,40 @@ class DaemonConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 7717
 
+    max_clients: int | None = None
+    """How many clients may be connected at once. `0` is unlimited.
+
+    Left unset it is **1 inside a container and unlimited on the host**, which is the
+    asymmetry that matters: two terminals watching one session on your own machine is a
+    feature the fan-out exists for, while a container is one agent, one checkout, one
+    merge boundary (rule 2) — and a second terminal steering that role is the boundary
+    being crossed by accident. `Daemon.max_clients` resolves it; `in_container()` is the
+    same function rule 5 already trusts.
+    """
+
 
 class TeamConfig(BaseModel):
     """Team mode: one container, one agent, one role, one shared volume.
 
-    Off unless `role` is set. `role` must match a markdown file in `.stcode/agents/`
-    or `~/.stcode/agents/` (or `STCODE_AGENTS_DIR`) — a typo, or an unmounted volume,
+    Off unless `enabled` is set. `role` names the agent; with no `[agent] prompt` in
+    this file it must match a `<role>.toml` profile in `.stcode/agents/` or
+    `~/.stcode/agents/` (or `STCODE_AGENTS_DIR`) — a typo, or an unmounted volume,
     refuses to start rather than running an agent that owns nothing.
 
     The origin is a **bare repository on the shared volume**, `/team/repo.git`: no
     credentials, no network, every role clones and pushes branches, exactly one merges.
     For pull requests instead, point `remote` at a real URL — one line here and one
     sentence in the role prompts.
+    """
+
+    enabled: bool = False
+    """The switch, and it is off. `STCODE_TEAM=1` and `--team` are the other two ways.
+
+    Separate from `role` because they are two facts. A role says *which agent this is*
+    and is useful on its own — it selects the profile, and therefore the prompt, in a
+    perfectly ordinary solo session. Team mode says *a shared volume is mounted*. While
+    naming a role implied both, a profile copied to a laptop started polling an inbox
+    that was not there and refused to start.
     """
 
     role: str = ""
@@ -193,6 +224,15 @@ class GatewayConfig(BaseModel):
     team: TeamConfig = Field(default_factory=TeamConfig)
     trace: TraceConfig = Field(default_factory=TraceConfig)
 
+    source_path: Path | None = Field(default=None, exclude=True)
+    """The file this was read from, when it was read from one.
+
+    `exclude=True`, so it never round-trips into the TOML it describes. It exists
+    because `[agent] prompt_file` is resolved relative to the config that named it —
+    a profile directory has to be able to move as a unit — and a config object that
+    does not know where it came from cannot do that.
+    """
+
 
 DEFAULT_CONFIG_TOML = """\
 # stcode config. Prefer keeping API keys in the environment: set `api_key_env` to the
@@ -253,10 +293,12 @@ difficulty = "high"
 dir = "~/.stcode/sessions"
 keep = 100
 
-# Team mode. Empty role = solo; anything else must match ~/.stcode/agents/<role>.md
+# Team mode is OFF unless `enabled` is true (or STCODE_TEAM=1, or --team). `role` names
+# the agent: with no [agent] prompt above, it must match ~/.stcode/agents/<role>.toml
 # (copy a starting point from examples/agents/).
 # The origin is a bare repo on the shared volume — no credentials, no network.
 # [team]
+# enabled    = true
 # role       = "backend-dev"
 # shared_dir = "/team"
 # remote     = "/team/repo.git"
@@ -285,8 +327,10 @@ expose = "code"
 [daemon]
 transport = "unix"
 socket = "~/.stcode/daemon.sock"
-# host = "0.0.0.0"   # when transport = "tcp"
+# host = "0.0.0.0"       # when transport = "tcp"
 # port = 7717
+# max_clients = 0        # connections at once. Unset = 1 in a container, unlimited on
+#                        # the host. 0 is unlimited everywhere.
 """
 
 SAVED_CONFIG_HEADER = """\
@@ -332,7 +376,11 @@ def load_config(path: Path | None = None, *, create_if_missing: bool = False) ->
         )
     with path.open("rb") as f:
         data = tomllib.load(f)
-    return GatewayConfig.model_validate(data)
+    config = GatewayConfig.model_validate(data)
+    # Remembered, not resolved here: `[agent] prompt_file` names a path relative to
+    # *this* file, and only something holding the config can say what that was.
+    config.source_path = path
+    return config
 
 
 def save_config(config: GatewayConfig, path: Path | None = None) -> Path:
@@ -371,6 +419,7 @@ def apply_cli_overrides(
     approval_mode: ApprovalMode | None = None,
     model: str | None = None,
     role: str | None = None,
+    team: bool | None = None,
 ) -> GatewayConfig:
     """Fold command-line overrides into a loaded config, for this run only.
 
@@ -397,10 +446,49 @@ def apply_cli_overrides(
     if model:
         config.defaults.model = model
     if role is not None:
-        # Setting a role turns team mode on, so `--role` is how one image serves every
-        # role without a config file per container.
+        # The role selects the agent profile, and therefore the prompt. It does **not**
+        # turn team mode on: that is `--team` / `STCODE_TEAM`, below, because "which
+        # agent am I" and "is a shared volume mounted" are two different facts and
+        # conflating them started inbox polling on machines with no inbox.
         config.team.role = role
+    if team is not None:
+        config.team.enabled = team
     return config
+
+
+REDACTED = "***"
+"""What replaces a literal `api_key` on the wire. A daemon shows a client what it is
+configured with; it does not hand over the credential to do it."""
+
+
+def redacted(config: GatewayConfig) -> dict[str, Any]:
+    """`config` as JSON, with every literal key replaced by `REDACTED`.
+
+    What `get_config` sends. `api_key_env` is left alone on purpose — the *name* of an
+    environment variable is the thing you need in order to diagnose "why is this daemon
+    unauthenticated", and it is not itself the secret.
+    """
+    data = config.model_dump(mode="json", exclude_none=True)
+    for section in ("providers", "routing"):
+        for entry in data.get(section, {}).values():
+            if entry.get("api_key"):
+                entry["api_key"] = REDACTED
+    return data
+
+
+def resolve_agent_prompt(config: GatewayConfig) -> str:
+    """This config's own `[agent]` prompt — inline, or from `prompt_file`.
+
+    An **agent profile** is one config file carrying both the prompt and the settings it
+    runs under, so deploying N agents is N mounts of one path rather than two mounts
+    that have to be kept in step.
+
+    `prompt_file` is relative to the config it was named in (`source_path`), falling
+    back to the current directory for a config built in memory. Naming both is a
+    `ValueError`: a precedence rule here would be one more thing to remember on the day
+    a container comes up with the wrong prompt.
+    """
+    return resolve_prompt(config.agent.prompt, config.agent.prompt_file, config.source_path)
 
 
 def apply_provider_settings(

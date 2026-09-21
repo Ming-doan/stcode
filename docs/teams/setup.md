@@ -25,33 +25,49 @@ sharing one mounted volume.
 Each container clones `/team/repo.git` into its own `/workspace`, works there, and
 pushes a branch. Exactly one role merges.
 
-## One image, every role
+## One image, one config file per agent
 
 ```bash
 docker build -t stcode .
 ```
 
-The role is chosen at run time, so adding a fifth role is a file, not a release.
+An agent is **one `config.toml`**, prompt included ([why](roles.md)). Deploying a team
+is mounting the right one into each container — adding a fifth agent is a file, not a
+release:
 
 ```bash
 docker run -d --name ba \
-  -e STCODE_SANDBOX=1 -e ANTHROPIC_API_KEY \
+  -e STCODE_SANDBOX=1 -e STCODE_TEAM=1 -e ANTHROPIC_API_KEY \
   -v team-volume:/team \
-  -v "$HOME/.stcode/agents:/agents:ro" \
-  -e STCODE_AGENTS_DIR=/agents \
-  stcode --headless --transport tcp --host 0.0.0.0 --port 7717 \
-         --role ba --mode full-auto
+  -v "$PWD/examples/agents/ba.toml:/config/config.toml:ro" \
+  stcode --headless --transport tcp --host 0.0.0.0 --port 7717 --mode full-auto
 ```
 
-Repeat with `--role backend-dev`, `--role frontend-dev`, `--role devops`.
+Repeat with `backend-dev.toml`, `frontend-dev.toml`, `devops.toml`. Each file already
+carries its own `[team] role`, its prompt, and whatever model that agent should run at —
+a support role on a cheap tier is a line in its own profile rather than a flag you have
+to remember at `docker run`.
 
-`STCODE_SANDBOX=1` is what makes `--mode full-auto` legal. Without it the daemon
-refuses to start, with no override flag. → [Approval modes](../guide/approval-modes.md)
+Mounting a directory of profiles and choosing by name works too, for a host running
+several agents off one config:
+
+```bash
+  -v "$PWD/examples/agents:/agents:ro" -e STCODE_AGENTS_DIR=/agents
+  … --role ba
+```
+
+Two environment variables carry the rest:
+
+| | |
+| --- | --- |
+| `STCODE_SANDBOX=1` | what makes `--mode full-auto` legal. Without it the daemon refuses to start, with no override flag. → [Approval modes](../guide/approval-modes.md) |
+| `STCODE_TEAM=1` | turns team mode **on**. It is off by default, so a profile that names a role does not go looking for a `/team` volume on a laptop that has none |
 
 ## The origin is a bare repo on the volume
 
 ```toml
 [team]
+enabled    = true
 role       = "backend-dev"
 shared_dir = "/team"
 remote     = "/team/repo.git"
@@ -78,14 +94,23 @@ Attach to whichever container you want to talk to:
 uv run stcode --daemonless --transport tcp --host <container-ip> --port 7717
 ```
 
+Attaching also gives you the daemon's own settings: `/model` in this shape reads and
+writes the **container's** `config.toml`, not your laptop's.
+→ [`--daemonless`](../guide/shapes.md#it-uses-the-daemons-config-not-yours)
+
+A containerised daemon takes **one client at a time**. Two terminals steering one role is
+the merge boundary being crossed by accident; the second connection is refused and told
+so. → [One client, in a container](../guide/shapes.md#one-client-at-a-time-in-a-container)
+
 There is **no lead or orchestrator agent**. You dispatch, per role. The BA is the usual
-entry point purely by convention, written into `ba.md` — a `lead` would be one more
-markdown file, not a new mechanism.
+entry point purely by convention, written into `ba.toml` — a `lead` would be one more
+profile, not a new mechanism.
 
 ## Waking on a message
 
 ```toml
 [team]
+enabled         = true
 wake_on_message = true
 poll_interval   = 1.0
 ```

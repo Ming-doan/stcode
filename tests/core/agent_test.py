@@ -296,7 +296,9 @@ def test_create_wires_config_through_to_harness_and_session(tmp_path: Path, run:
 
     agents = tmp_path / "work" / ".stcode" / "agents"
     agents.mkdir(parents=True)
-    (agents / "backend-dev.md").write_text("# Role: backend dev\n\n## You own\nthe API.")
+    (agents / "backend-dev.toml").write_text(
+        '[agent]\nprompt = """\n# Role: backend dev\n\n## You own\nthe API.\n"""\n'
+    )
 
     config = GatewayConfig.model_validate(
         {
@@ -516,7 +518,9 @@ def test_sub_agents_get_no_supervisor(tmp_path: Path, run: Any) -> None:
 
     agents = tmp_path / "work" / ".stcode" / "agents"
     agents.mkdir(parents=True)
-    (agents / "backend-dev.md").write_text("# Role: backend dev\n\n## You own\nthe API.")
+    (agents / "backend-dev.toml").write_text(
+        '[agent]\nprompt = """\n# Role: backend dev\n\n## You own\nthe API.\n"""\n'
+    )
 
     config = GatewayConfig.model_validate(
         {

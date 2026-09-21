@@ -14,12 +14,16 @@ import pytest
 
 from stcode.core.configs import (
     DEFAULT_CONFIG_TOML,
+    REDACTED,
     GatewayConfig,
     apply_cli_overrides,
     apply_provider_settings,
     load_config,
+    redacted,
+    resolve_agent_prompt,
     save_config,
 )
+from stcode.core.providers import ProviderConfig, RouteConfig
 
 
 def test_the_shipped_default_config_parses() -> None:
@@ -137,3 +141,100 @@ def test_a_chosen_effort_is_remembered(tmp_path: Path) -> None:
     )
     save_config(config, path)
     assert load_config(path).defaults.reasoning_effort == "high"
+
+
+# ---- agent profiles, and the team switch -------------------------------------------
+
+
+def test_a_profile_carries_its_prompt_and_survives_a_round_trip(tmp_path: Path) -> None:
+    """One file is one agent — that is the whole reason a prompt lives in the config.
+
+    A prompt is the one value here with newlines and quotes in it, so a round trip
+    through `tomli_w` is worth asserting rather than assuming.
+    """
+    path = tmp_path / "backend-dev.toml"
+    config = GatewayConfig()
+    config.agent.prompt = '# Role: backend dev\n\n## You own\n`src/api/`, and "nothing else".'
+    config.team.role = "backend-dev"
+    save_config(config, path)
+
+    loaded = load_config(path)
+    assert loaded.agent.prompt == config.agent.prompt
+    assert resolve_agent_prompt(loaded) == config.agent.prompt
+    assert loaded.source_path == path
+
+
+def test_a_prompt_file_is_relative_to_the_config_that_named_it(tmp_path: Path) -> None:
+    """So a directory of profiles moves as a unit — which is how they get mounted."""
+    profiles = tmp_path / "agents"
+    profiles.mkdir()
+    (profiles / "backend-dev.md").write_text("# Role: backend dev\n\nYou own the API.")
+    path = profiles / "backend-dev.toml"
+    path.write_text('[agent]\nprompt_file = "backend-dev.md"\n')
+
+    assert resolve_agent_prompt(load_config(path)) == "# Role: backend dev\n\nYou own the API."
+
+
+def test_naming_both_prompts_refuses(tmp_path: Path) -> None:
+    config = GatewayConfig()
+    config.agent.prompt = "inline"
+    config.agent.prompt_file = "elsewhere.md"
+    with pytest.raises(ValueError, match="one prompt"):
+        resolve_agent_prompt(config)
+
+
+def test_a_missing_prompt_file_refuses_loudly(tmp_path: Path) -> None:
+    """A prompt file that did not mount is an agent that owns nothing, and it looks
+    exactly like one that did until it starts working."""
+    path = tmp_path / "backend-dev.toml"
+    path.write_text('[agent]\nprompt_file = "gone.md"\n')
+    with pytest.raises(FileNotFoundError, match="cannot be read"):
+        resolve_agent_prompt(load_config(path))
+
+
+def test_the_source_path_is_never_written_back(tmp_path: Path) -> None:
+    """It describes the file; writing it into the file would be a key that grows on
+    every save and means nothing to anybody reading it."""
+    path = tmp_path / "config.toml"
+    save_config(load_config(path, create_if_missing=True), path)
+    assert "source_path" not in path.read_text()
+
+
+def test_team_mode_is_off_by_default_and_a_role_does_not_turn_it_on() -> None:
+    """Two facts, not one. A role says which agent this is; team mode says a shared
+    volume is mounted — and a profile copied to a laptop used to mean both."""
+    assert GatewayConfig().team.enabled is False
+
+    live = apply_cli_overrides(GatewayConfig(), role="backend-dev")
+    assert live.team.role == "backend-dev"
+    assert live.team.enabled is False, "--role turned team mode on"
+
+    assert apply_cli_overrides(GatewayConfig(), team=True).team.enabled is True
+
+
+def test_a_client_never_sees_a_literal_key() -> None:
+    """`get_config` shows a daemon's settings; it does not hand over the credential.
+
+    The env var *name* stays, because it is what diagnoses an unauthenticated daemon
+    and it is not itself the secret.
+    """
+    config = GatewayConfig()
+    config.providers["anthropic"] = ProviderConfig(
+        api_key="sk-secret", api_key_env="ANTHROPIC_API_KEY"
+    )
+    config.routing["high"] = RouteConfig(
+        provider="anthropic", model="claude-opus-5", api_key="sk-tier"
+    )
+
+    data = redacted(config)
+    assert data["providers"]["anthropic"]["api_key"] == REDACTED
+    assert data["providers"]["anthropic"]["api_key_env"] == "ANTHROPIC_API_KEY"
+    assert data["routing"]["high"]["api_key"] == REDACTED
+    # And the original is untouched — this is a view, not an edit.
+    assert config.providers["anthropic"].api_key == "sk-secret"
+
+
+def test_the_client_limit_is_unset_by_default() -> None:
+    """Unset means "1 in a container, unlimited on the host", which `Daemon` resolves.
+    A number here would have to be wrong on one of the two."""
+    assert GatewayConfig().daemon.max_clients is None

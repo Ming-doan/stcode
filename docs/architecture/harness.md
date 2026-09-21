@@ -226,23 +226,70 @@ cost of every turn.
 `subagent=True` is derived from `depth`, never passed in: a harness from `for_subagent()`
 is a sub-agent by construction, and a caller allowed to say otherwise will get it wrong.
 
-## Roles are files on disk, not package data
+## An agent profile is one `config.toml`
+
+An agent is a prompt *and* the settings it runs under, and splitting those across two
+files meant every deployment had to keep two mounts in step. One file holds both:
+
+```toml
+# agents/backend-dev.toml
+[defaults]
+provider = "anthropic"
+model    = "claude-sonnet-5"
+
+[team]
+role = "backend-dev"
+
+[agent]
+difficulty = "medium"
+prompt = """
+# Role: backend developer
+
+## You own
+`src/api/` and `src/services/` — the HTTP surface and the logic behind it.
+...
+"""
+```
+
+It is an ordinary config file, so there is nothing new to learn and nothing new to
+validate: `GatewayConfig` already describes every section in it. `[agent] prompt` is the
+only addition, with `[agent] prompt_file` for a prompt long enough to want its own file —
+resolved relative to the config, so a mounted directory moves as a unit.
+
+**Deploying N agents is N mounts of one path.** The profile *is* the container's config:
+
+```bash
+docker run -v ./agents/backend-dev.toml:/config/config.toml … stcode
+```
+
+No agents directory, no role lookup, nothing to keep in step. The container's config
+file says which agent it is, and `STCODE_CONFIG` already pointed at it.
+
+### Looking one up by name
+
+The other half is for a machine that has several profiles and picks one per run —
+`stcode --role backend-dev`, or `[team] role` in a shared config:
 
 ```
-.stcode/agents/<role>.md          # this project's
-~/.stcode/agents/<role>.md        # this machine's
-$STCODE_AGENTS_DIR/<role>.md      # one directory and nothing else — what a container mounts
+.stcode/agents/<name>.toml          # this project's
+~/.stcode/agents/<name>.toml        # this machine's
+$STCODE_AGENTS_DIR/<name>.toml      # one directory and nothing else
 ```
 
-Searched in that order by `load_role()`. An unknown name **raises**, with the list of
-what is installed: a container started with a typo'd role, or with its agents volume
-unmounted, must refuse rather than run an agent that owns nothing. There is deliberately
-no bundled fallback — a silent one would mean that container starts anyway, as somebody
-else's backend dev.
+Searched in that order by `load_agent()`, and **only the `[agent]` prompt is read from
+it** — a profile found by name contributes a prompt, not a second opinion about the
+model or the socket. Those come from the config that is actually loaded. The alternative
+is two files that both claim to configure the daemon, and a support question about which
+one won.
 
-The repository ships four to copy in `examples/agents/`. A role states what it owns,
-whose output it reads, and who it reports to; the body is passed into the prompt
-unchanged, because a role is data and rewriting it here would make it code again.
+An unknown name **raises**, with the list of what is installed: a container started with
+a typo'd role, or with its agents volume unmounted, must refuse rather than run an agent
+that owns nothing. There is deliberately no bundled fallback — a silent one would mean
+that container starts anyway, as somebody else's backend dev.
+
+The repository ships four to copy in `examples/agents/`. A profile states what it owns,
+whose output it reads, and who it reports to; the prompt is passed through unchanged,
+because it is data and rewriting it here would make it code again.
 
 ## Skills
 

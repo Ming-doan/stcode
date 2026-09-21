@@ -288,6 +288,18 @@ class StcodeApp(App[None]):
         # should stop it.
         self._daemon: Daemon | None = None
         self._session_id = ""
+        self._remote_config = False
+        """Whether `self.config` describes the **daemon's** machine rather than this one.
+
+        True once a `--daemonless` connection has answered `get_config`. It decides two
+        things that would otherwise be wrong in this shape: which config the settings
+        screen edits, and where a `/model` is written — the local file describes a
+        different agent, and writing the daemon's values into it would be this terminal
+        remembering somebody else's deployment as its own.
+        """
+
+        self._remote_config_path = ""
+        self._remote_writable = True
         self._info: dict[str, Any] = {}
         self._files: list[str] | None = None
         """Every path `@` can offer, or None while the workspace has not been listed.
@@ -404,6 +416,10 @@ class StcodeApp(App[None]):
 
         self._client = client
         self._note(labels.daemon_connected(self._daemon_address(), embedded))
+        # Before `create`, not after: the mode and model this client is about to send
+        # must be the daemon's own, or the first session it opens is configured from a
+        # config file describing a different machine.
+        await self._adopt_remote_config(client)
         try:
             if self._resume:
                 # `attach` resumes from disk when the daemon is not holding it, so one
@@ -486,6 +502,37 @@ class StcodeApp(App[None]):
         if settings.transport == "unix":
             return settings.socket
         return f"{settings.host}:{settings.port}"
+
+    async def _adopt_remote_config(self, client: DaemonClient) -> None:
+        """In `--daemonless`, take the daemon's config as this UI's config.
+
+        The settings on screen belong to the machine the agent is on. Reading the local
+        file in this shape meant the status line, `/model` and the routing tiers all
+        described a laptop that was not running anything.
+
+        Flags are folded back on top afterwards, for the same reason they always are:
+        `--model` on this command line is a decision about this run, and it outranks
+        what the daemon happens to have stored.
+
+        Best effort. An older daemon does not know `get_config`, and a terminal that
+        refused to attach to one would be a worse client than one that shows what it
+        has — so a failure leaves the local config in place and says nothing.
+        """
+        if not self._daemonless:
+            return
+        try:
+            reply = await client.get_config()
+            remote = GatewayConfig.model_validate(reply.get("config", {}))
+        except Exception:  # noqa: BLE001 — see the docstring: this is allowed to fail
+            return
+        self._remote_config = True
+        self._remote_config_path = str(reply.get("path", ""))
+        self._remote_writable = bool(reply.get("writable", True))
+        self.config = apply_cli_overrides(remote, **self._overrides)
+        self._refresh_status()
+        self._note(labels.remote_config(self._remote_config_path))
+        if not self._remote_writable:
+            self._warn(labels.REMOTE_CONFIG_READONLY)
 
     @work(group="info")
     async def _load_info(self) -> None:
@@ -675,7 +722,9 @@ class StcodeApp(App[None]):
             Card(
                 labels.CARD_HELP,
                 labels.help_rows(
-                    config=str(self._config_path),
+                    # The daemon's, when that is the one on screen: a path pointing at
+                    # this laptop while the agent is in a container is a wrong answer.
+                    config=self._remote_config_path or str(self._config_path),
                     prefs=str(self._prefs_path),
                     session=str(self._info.get("session_path", "")),
                     daemon=str(self._info.get("daemon", "")),
@@ -693,6 +742,10 @@ class StcodeApp(App[None]):
 
     @on(Prompt.CardClose)
     def _card_close(self) -> None:
+        card = self.cards.current
+        if card is not None and not card.dismissable:
+            # An approval or a question keeps the floor until it is answered. → `Card`
+            return
         self._close_card()
 
     @on(Prompt.CardHotkey)
@@ -712,7 +765,7 @@ class StcodeApp(App[None]):
             self._answer_question(card.token, self.prompt.clear_text().strip())
             self._close_card()
             return
-        if not card.choose():
+        if not card.choose() and card.dismissable:
             self._close_card()
 
     @on(Card.Chosen)
@@ -848,6 +901,7 @@ class StcodeApp(App[None]):
                 body=summary,
                 footer=labels.CARD_FOOTER_APPROVE,
                 token=str(frame.get("execution_id", "")),
+                dismissable=False,
             ),
             hotkeys={"y": "approve", "n": "deny"},
         )
@@ -863,6 +917,7 @@ class StcodeApp(App[None]):
                 footer=labels.CARD_FOOTER_QUESTION,
                 token=str(frame.get("execution_id", "")),
                 selectable=bool(options),
+                dismissable=False,
             )
         )
 
@@ -917,6 +972,15 @@ class StcodeApp(App[None]):
                 if first_run:
                     self._warn(labels.SETUP_SKIPPED)
                 return
+            if self._remote_config:
+                # The file these settings came from is on the daemon's machine, so the
+                # local one is left alone. `_apply_settings` sends the half that travels.
+                self.config = apply_cli_overrides(config, **self._overrides)
+                self._refresh_status()
+                if not self.config.defaults.model:
+                    self._warn(labels.NO_MODEL_ERROR)
+                self._apply_settings()
+                return
             self._stored = config
             save_config(self._stored, self._config_path)
             # Saved first, then flags back on top: what the user typed belongs in the
@@ -933,7 +997,9 @@ class StcodeApp(App[None]):
                 # credentials reach it only through a new connection.
                 self._start()
 
-        self.push_screen(SettingsScreen(self.config, first_run=first_run), saved)
+        self.push_screen(
+            SettingsScreen(self.config, first_run=first_run, remote=self._remote_config), saved
+        )
 
     @work(group="answers")
     async def _apply_settings(self) -> None:
@@ -956,7 +1022,15 @@ class StcodeApp(App[None]):
         """
         if self._daemon is not None:
             await self._daemon.reconfigure(self.config)
-        elif self._daemonless:
+        elif self._remote_config and self._client is not None:
+            # `[defaults]` travels and is written to the daemon's own file; the rest of
+            # that config belongs to whoever deployed it. → `REMOTE_CONFIG_UNCHANGED`
+            defaults = self.config.defaults
+            await self._client.set_config(
+                provider=defaults.provider,
+                model=defaults.model,
+                reasoning_effort=defaults.reasoning_effort or None,
+            )
             self._note(labels.REMOTE_CONFIG_UNCHANGED)
         if self._client is not None and self._session_id:
             await self._client.set_meta(
@@ -991,7 +1065,12 @@ class StcodeApp(App[None]):
             self._session_id = session_id
         mode = str(frame.get("approval_mode", ""))
         if mode and mode != self.config.defaults.approval_mode:
-            self._amend(approval_mode=mode)
+            if self._remote_config:
+                # It came *from* the daemon's config; sending it back would be this
+                # client reporting the daemon's own answer to it as a change.
+                self.config.defaults.approval_mode = mode  # type: ignore[assignment]
+            else:
+                self._amend(approval_mode=mode)
             self._note(labels.mode_changed(mode))  # type: ignore[arg-type]
         self._effective = {
             "model": str(frame.get("model", "")),
@@ -1011,15 +1090,24 @@ class StcodeApp(App[None]):
             save_config(self._stored, self._config_path)
 
     def _amend(self, **fields: Any) -> None:
-        """Record a change the *user* made, in both the live config and the stored one.
+        """Record a change the *user* made, in the live config and in the file that owns it.
 
-        The split exists to keep command-line flags out of the file; a choice made in
-        the UI is the opposite case and belongs in both. Flags still win for this run —
-        they are reapplied on top — so `--mode plan` is not undone by a `/mode` that the
-        daemon then refuses.
+        Two files can own it, and which one is the whole point of `_remote_config`:
+
+        * **Normally** the stored config on this machine. Kept apart from `self.config`
+          to keep command-line flags out of the file; a choice made in the UI is the
+          opposite case and belongs in both. Flags still win for this run — they are
+          reapplied on top — so `--mode plan` is not undone by a `/mode`.
+        * **In `--daemonless`** the daemon's own `config.toml`, over the socket. Writing
+          it here instead would leave the container with the old model and this terminal
+          remembering a deployment that is not its own.
         """
         for name, value in fields.items():
             setattr(self.config.defaults, name, value)
+        if self._remote_config:
+            self._push_config(**fields)
+            return
+        for name, value in fields.items():
             setattr(self._stored.defaults, name, value)
         self._persist()
 
@@ -1032,6 +1120,20 @@ class StcodeApp(App[None]):
         """Tell the live session, so `/mode` means something before the next session."""
         if self._client is not None and self._session_id:
             await self._client.set_mode(mode)
+
+    @work(group="answers")
+    async def _push_config(self, **fields: Any) -> None:
+        """Write `[defaults]` to the daemon's config file — the persistent half of `/model`.
+
+        `set_meta` is the other half and they are not interchangeable: that one reaches
+        the session that is running, this one survives the container restart.
+        """
+        if self._client is None:
+            return
+        try:
+            await self._client.set_config(**fields)
+        except Exception as exc:  # noqa: BLE001 — a refused write has to be readable
+            self._error(labels.daemon_failed(exc))
 
     @work(group="answers")
     async def _push_meta(self, **fields: Any) -> None:

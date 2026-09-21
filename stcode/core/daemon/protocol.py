@@ -152,9 +152,66 @@ class Info(BaseModel):
     session: str = ""
 
 
+class GetConfig(BaseModel):
+    """Ask for the daemon's own `config.toml`, as it is holding it.
+
+    A `--daemonless` terminal shows settings that belong to the daemon's machine, so it
+    has to ask rather than read its own file — the local one describes a different
+    agent. Literal `api_key`s are redacted on the way out.
+    """
+
+    type: Literal["get_config"] = "get_config"
+
+
+CONFIGURABLE_DEFAULTS = ("provider", "model", "reasoning_effort", "approval_mode")
+"""The only keys `set_config` accepts, and the reason it is safe to accept any.
+
+Everything else in the file — a key, a `base_url`, a routing tier, a concurrency cap —
+is how the *operator* provisioned this daemon, usually from an environment variable
+rather than from the file at all. A terminal that could rewrite those means one `/model`
+on the wrong tab silently repoints a fleet at a different endpoint. So they travel one
+way: shown, redacted, and not accepted back.
+"""
+
+
+class SetConfig(BaseModel):
+    """Write `[defaults]` to the daemon's config file and reload the gateway.
+
+    A patch, and a narrow one: anything outside `CONFIGURABLE_DEFAULTS` is dropped
+    rather than refused, because a client sending a whole config back is asking for the
+    four keys it is allowed to change and should not have to know which those are.
+
+    Answered with the same `config` frame `get_config` sends, so a client never shows a
+    change it only asked for.
+    """
+
+    type: Literal["set_config"] = "set_config"
+    defaults: dict[str, Any] = Field(default_factory=dict)
+
+    def patch(self) -> dict[str, Any]:
+        """Just the keys this message is allowed to change, and only those that are set."""
+        return {
+            key: value
+            for key, value in self.defaults.items()
+            if key in CONFIGURABLE_DEFAULTS and value not in (None, "")
+        }
+
+
 ClientMessage = Annotated[
     Union[
-        Create, Attach, Detach, Sessions, Push, Interrupt, Approval, Answer, SetMode, SetMeta, Info
+        Create,
+        Attach,
+        Detach,
+        Sessions,
+        Push,
+        Interrupt,
+        Approval,
+        Answer,
+        SetMode,
+        SetMeta,
+        Info,
+        GetConfig,
+        SetConfig,
     ],
     Field(discriminator="type"),
 ]
@@ -283,6 +340,24 @@ class InfoReply(BaseModel):
     """
 
 
+class ConfigReply(BaseModel):
+    """Answer to `get_config` and `set_config`: what this daemon is configured with.
+
+    `path` is where it lives **on the daemon's disk**, which is the field that makes the
+    difference visible in `--daemonless` — a client showing `~/.stcode/config.toml` while
+    driving a container is a client lying about which machine it is describing.
+
+    `writable` says whether `set_config` would land. False for a daemon whose config
+    file it cannot write, so a client can grey the fields out instead of offering an
+    edit that will fail.
+    """
+
+    type: Literal["config"] = "config"
+    path: str = ""
+    config: dict[str, Any] = Field(default_factory=dict)
+    writable: bool = True
+
+
 class Progress(BaseModel):
     """A line of progress from a long-running tool. Advisory: nothing is recorded."""
 
@@ -307,6 +382,7 @@ ServerMessage = Union[
     ApprovalRequested,
     QuestionAsked,
     InfoReply,
+    ConfigReply,
     Progress,
     ErrorMessage,
 ]
@@ -377,15 +453,18 @@ def event_frame(session: str, event: AgentEvent, *, agent: str = "") -> dict[str
 
 
 __all__ = [
+    "CONFIGURABLE_DEFAULTS",
     "STREAM_LIMIT",
     "Answer",
     "Approval",
     "ApprovalRequested",
     "Attach",
     "ClientMessage",
+    "ConfigReply",
     "Create",
     "Detach",
     "ErrorMessage",
+    "GetConfig",
     "History",
     "Info",
     "InfoReply",
@@ -398,6 +477,7 @@ __all__ = [
     "SessionList",
     "SessionOpened",
     "Sessions",
+    "SetConfig",
     "SetMeta",
     "SetMode",
     "decode",

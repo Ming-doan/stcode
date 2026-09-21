@@ -167,6 +167,10 @@ The input is a text area, not a single line.
 | ++escape++ | interrupt the turn in flight, or close the open card |
 | ++up++ / ++down++ | move through a card's options when one is open |
 
+++escape++ and ++backspace++ close a card that is *offering* you something. A card that
+is **asking** you something — an approval, a question — does not close. → [Approvals and
+questions](#approvals-and-questions)
+
 !!! note "Why ++ctrl+j++ and not ++shift+enter++"
 
     ++shift+enter++ and ++alt+enter++ only exist on the wire when your terminal speaks
@@ -203,8 +207,9 @@ and inserts nothing. **Typing it again inserts it** — `?` then `?` gives you a
 question mark, which is what you wanted the second time, and the card gets out of the way
 as soon as there is text.
 
-++backspace++ closes any of the three cards. For `/` and `@` it also does the obvious thing:
-delete back past the symbol and the token is no longer a token, so the card goes.
+++backspace++ on an empty input closes any of the three cards. For `/` and `@` it also
+does the obvious thing: delete back past the symbol and the token is no longer a token,
+so the card goes.
 
 Filtering matches the **name**, not the description. Typing `/mod` offers `/model` and
 `/mode` and not `/effort`, whose description happens to say "how hard the model should
@@ -425,8 +430,34 @@ Everything else is unchanged and still true:
 - **Whoever answers first decides.** If two terminals are watching, either can approve.
 - **A denial is a denial, not a failure.** The tool is told the user declined, and the
   model is expected to adapt rather than retry.
-- ++escape++ denies, and so does walking away — the default is deny, because ++enter++
-  on a dialog you have not read should not be how an `rm -rf` gets run.
+- **The safe answer is the default.** ++enter++ picks the highlighted row, and the
+  highlighted row is **deny** — a reflex on a card you have not read must not be how an
+  `rm -rf` gets run.
+
+### An asking card cannot be dismissed
+
+++escape++ and ++backspace++ do nothing while an approval or a question is up. Neither
+does closing it by any other route: there is none.
+
+This is not strictness for its own sake. A request that is on screen has already been
+taken out of the queue, and the turn behind it is parked on an answer that only this
+card can give. Dismissing it left the session waiting on a reply that no longer had
+anywhere to come from — a hung agent with a working keyboard — and the keystroke that
+did it was usually ++backspace++ on an already-empty input, aimed at a character that
+was not there.
+
+So an asking card keeps the floor until it is answered:
+
+| | |
+| --- | --- |
+| ++y++ / ++n++ | approve / deny, on an approval |
+| ++up++ / ++down++ then ++enter++ | pick a row |
+| type, then ++enter++ | answer a question in your own words |
+| ++escape++, ++backspace++ | nothing |
+
+Deny **is** the way out, and it costs one turn: the tool is told you declined and the
+model adapts. Walking away is still the same as denying — nothing runs until you say
+so — but it now leaves the request on screen, waiting, instead of silently gone.
 
 Questions (`ask_user_question`) come as the same card with up to four options and a free
 text field that stays open, because the tool's own docstring promises the model that the

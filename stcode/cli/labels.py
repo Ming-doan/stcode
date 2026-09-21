@@ -239,7 +239,10 @@ def help_rows(**paths: str) -> list[Row]:
 
 CARD_FOOTER_CHOOSE = "↑↓ then enter · esc to close"
 CARD_FOOTER_CLOSE = "backspace or esc to close"
-CARD_FOOTER_APPROVE = "y approve · n deny · esc denies"
+CARD_FOOTER_APPROVE = "y approve · n deny · it stays until you answer"
+"""No escape hatch listed, because there is not one. An approval card keeps the floor
+until it is answered — dismissing it parked the turn on a reply with nowhere to come
+from. → `cards.Card.dismissable`"""
 CARD_FOOTER_QUESTION = "↑↓ then enter, or just type your own answer"
 
 FILES_LOADING = "listing the workspace…"
@@ -511,15 +514,40 @@ def no_daemon_here(address: object) -> str:
 DAEMONLESS_CANCELLED = "Not connected. /connect to try another address."
 
 REMOTE_CONFIG_UNCHANGED = (
-    "provider and model sent — keys, base URL and routing stay as the remote daemon "
-    "has them"
+    "provider and model written to the daemon's config — keys, base URL and routing "
+    "stay as it has them"
 )
 """Said once after a `/model` save in `--daemonless`.
 
-The daemon reads its own config file, on its own machine. This terminal can choose which
-model a session uses, but it has no business replacing the credentials a container was
-started with — and a UI that quietly did nothing would be worse than one that says so.
+The four `[defaults]` keys are written to the daemon's own `config.toml`, so the choice
+outlives the session and the container restart. Everything else in that file is how the
+operator provisioned the daemon — usually from an environment variable rather than the
+file at all — and a terminal that could rewrite those means one `/model` on the wrong
+tab silently repoints a fleet. A UI that quietly did nothing would be worse than one
+that says which half landed.
 """
+
+
+def remote_config(path: str) -> str:
+    """Said once on attaching in `--daemonless`: whose settings are on screen.
+
+    The path is the point. A client showing `~/.stcode/config.toml` while driving a
+    container is describing the wrong disk, and the model in the status line is the
+    first thing anybody reads.
+    """
+    return f"using the daemon's config at {path}"
+
+
+REMOTE_CONFIG_READONLY = "the daemon's config is read-only here — /model still sets the session"
+"""When `set_config` would not land: a read-only mount is the ordinary case in a
+container. Better said up front than after a save that silently did half its job."""
+
+
+SETTINGS_INTRO_REMOTE = (
+    "This daemon's settings. Provider and model are written back to its config file; "
+    "keys, base URL and routing belong to whoever deployed it."
+)
+"""The settings screen in `--daemonless`, where the credential fields are read-only."""
 
 # ------------------------------------------------------------------------- approvals
 

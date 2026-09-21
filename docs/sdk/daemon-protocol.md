@@ -39,6 +39,8 @@ async with await DaemonClient.connect(config) as client:
 | `set_mode` | `mode` | reaches the **live** session, not just later ones |
 | `set_meta` | `model`, `provider`, `reasoning_effort` | appends a `meta` record; the agent reads it before the next model call |
 | `info` | — | skills, MCP servers, tool names, paths and this session's token totals, as the **daemon's** machine sees them |
+| `get_config` | — | the daemon's own `config.toml`, with every `api_key` redacted |
+| `set_config` | `defaults` | writes `[defaults]` to the daemon's config file and reconfigures the gateway. Only those four keys; everything else is ignored |
 
 `session` is optional on everything. A connection remembers the last session it created
 or attached to. The field exists because one connection may attach to several at once
@@ -54,6 +56,7 @@ and then has to say which it means.
 | `approval_request` | a tool is waiting on a human |
 | `question` | `ask_user_question` is waiting |
 | `info` | answer to `info`. `usage` on it is the session's totals, summed from its `usage` records — one per model call, which is what `turn_finished` cannot give you |
+| `config` | answer to `get_config` and `set_config`: `path`, the config itself, and `writable` |
 | `progress` | a line from a long-running tool. Advisory; nothing is recorded |
 | `error` | a protocol- or daemon-level failure |
 
@@ -82,6 +85,32 @@ This appends a `meta` record to the session. Nothing is rewritten — sessions a
 append-only — and the agent reads its own merged overrides before every model call, so
 the change lands on the next call rather than the next session.
 → [`meta` is a merged view](../architecture/session.md#meta-is-a-merged-view)
+
+## Reading and writing the daemon's config
+
+```python
+reply = await client.get_config()
+reply["path"]                        # "/config/config.toml", on the daemon's disk
+reply["config"]["defaults"]["model"] # what it will use for the next call
+reply["config"]["providers"]["anthropic"]["api_key"]   # "***", always
+
+await client.set_config(provider="anthropic", model="claude-opus-5")
+```
+
+`set_config` persists; `set_meta` does not. The difference is which question is being
+answered:
+
+| | `set_meta` | `set_config` |
+| --- | --- | --- |
+| Scope | this session | this daemon |
+| Lands as | a `meta` record in the transcript | `[defaults]` in `config.toml` |
+| Survives | the rest of the session | a restart |
+| Touches the gateway | no | yes — routing tiers are repointed and reloaded in place |
+
+The UI sends both for a `/model`, which is why the change is true for the turn you are
+in *and* for the next container start. Only `[defaults]` is accepted — credentials,
+`base_url` and routing are the operator's and travel one way.
+→ [why](../architecture/daemon.md#get_config-set_config-the-remote-half-of-model)
 
 ## Request–response over a stream
 

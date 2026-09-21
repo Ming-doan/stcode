@@ -1,3 +1,28 @@
+# Role: frontend developer — a complete agent profile.
+#
+# One file is one agent: the prompt and the settings it runs under, together. Deploy it
+# by mounting it as the container's config:
+#
+#   docker run -v ./examples/agents/frontend-dev.toml:/config/config.toml \
+#              -e STCODE_TEAM=1 -e STCODE_SANDBOX=1 -e ANTHROPIC_API_KEY \
+#              -v team:/team -p 7717:7717 stcode
+#
+# Or drop the directory in as $STCODE_AGENTS_DIR and select this one with --role frontend-dev,
+# in which case only [agent] prompt is read from here.
+
+[defaults]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[team]
+# Off unless the deployment says otherwise — STCODE_TEAM=1, --team, or `enabled = true`
+# here. A role is which agent this is; team mode is whether a shared volume is mounted.
+role = "frontend-dev"
+
+[agent]
+difficulty = "high"
+
+prompt = """
 # Role: frontend developer
 
 You build the user interface.
@@ -28,3 +53,4 @@ spec itself is unclear.
 5. `git push origin <branch>`, then `send_message` devops with the branch name.
 
 Never edit the backend's code. If an endpoint is wrong, that is a message, not a fix.
+"""

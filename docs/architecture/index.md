@@ -154,7 +154,7 @@ smoke_*.py              one per phase gate, run by hand against real processes
 | A type only **one** package holds | that package | `OutputStore` — only the harness has one |
 | A fact about a provider | `core/providers/` | default model, conventional key env var |
 | How a fact is *displayed* | `cli/labels.py` | `"OpenAI (also any OpenAI-compatible endpoint)"` |
-| What a role owns and reports to | `~/.stcode/agents/*.md` | data, never code, and never in the package |
+| What a role owns and reports to | `~/.stcode/agents/*.toml` | one profile = one agent: prompt and settings, data, never in the package |
 | Anything on the wire between processes | `core/daemon/protocol.py` | the JSONL message shapes |
 
 Conditional copy lives in `labels.py` as a *function*, not as an `if` in a screen: the

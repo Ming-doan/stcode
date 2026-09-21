@@ -199,7 +199,7 @@ def mcp_section(catalogue: str, directory: str) -> str:
 def role_section(body: str, teammates: Sequence[str] = ()) -> str:
     """This agent's role, plus who else there is to talk to.
 
-    The body is markdown from `.stcode/agents/<name>.md`, passed through unchanged: a role is
+    The body is `[agent] prompt` from an agent profile, passed through unchanged: a role is
     data, and rewriting it here would make it code again.
     """
     if not body.strip():

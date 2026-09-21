@@ -90,10 +90,17 @@ before the first token.
 | `difficulty` | `"high"` | the tier the main loop uses |
 | `tools` | `[]` | an allow-list **replacing** the default set. Empty means the default |
 | `exclude_tools` | `[]` | subtracted from whatever is left |
+| `prompt` | `""` | this agent's own prompt, inline. Sits high in the cached prefix |
+| `prompt_file` | `""` | the same thing in a file, resolved **relative to this config file** |
 
 Both tool lists are applied after the agent is fully assembled, so `task`, `send_message`
 and MCP tools can be named. A name matching no tool refuses to start, with the list of
 real ones.
+
+`prompt` and `prompt_file` are what make one config file a whole agent — see
+[agent profiles](harness.md#an-agent-profile-is-one-configtoml). Setting both is an
+error rather than a precedence rule to memorise. Leaving both empty and naming a
+`[team] role` looks the profile up by name in the agents directory instead.
 
 ### `[session]`
 
@@ -102,7 +109,14 @@ number of session files `prune` leaves behind.
 
 ### `[daemon]`
 
-`transport` (`unix` / `tcp`), `socket`, `host`, `port`. See [daemon.md](daemon.md).
+| Key | Default | |
+| --- | --- | --- |
+| `transport` | `"unix"` | `unix` on your machine, `tcp` in a container |
+| `socket` | `~/.stcode/daemon.sock` | `unix` only |
+| `host` / `port` | `127.0.0.1` / `7717` | `tcp` only |
+| `max_clients` | *unset* | concurrent connections. **Unset = 1 in a container, unlimited on the host**; `0` is unlimited everywhere |
+
+See [daemon.md](daemon.md#one-client-in-a-container).
 
 ### `[mcp]`
 
@@ -116,13 +130,30 @@ number of session files `prune` leaves behind.
 
 | Key | Default | |
 | --- | --- | --- |
-| `role` | `""` | **empty means solo.** Anything else must match a file in the agents directory |
+| `enabled` | `false` | **the switch.** Team mode is off until this is true |
+| `role` | `""` | which agent this is. With `enabled`, it must name a mailbox owner |
 | `shared_dir` | `/team` | the mounted volume |
 | `max_agents` | `6` | |
 | `wake_on_message` | `true` | start a turn when mail arrives and the agent is idle |
 | `poll_interval` | `1.0` | seconds between inbox checks |
 | `remote` | `/team/repo.git` | the bare origin. Point at a URL for real pull requests |
 | `ssh_key` | `""` | only needed if `remote` is a URL. Mounted read-only, never copied |
+
+`enabled` and `role` are two facts, and merging them was a mistake worth undoing. A role
+says *which agent this is* and is useful on its own — it selects the profile, and
+therefore the prompt, in a perfectly ordinary solo session. Team mode says *a shared
+volume is mounted*, and getting that wrong means an agent that refuses to start looking
+for an inbox that is not there. So naming a role no longer implies a team:
+
+```toml
+[team]
+enabled = true          # or STCODE_TEAM=1
+role    = "backend-dev"
+```
+
+Off by default, in both places. The failure this prevents is the quiet one: a config
+copied from a teammate, or a `--role` typed to pick up a prompt, used to turn on mailbox
+polling and a `/team` write scope on a laptop that has neither.
 
 ### `[trace]`
 
@@ -141,15 +172,17 @@ UI rewrites its config whenever a mode or an address changes, so a flag folded i
 same object would go to disk with it — and `--transport tcp`, used once to reach a
 container, would become the transport every later bare `stcode` binds.
 
-`--role` is also how one image serves every role without a config file per container.
+`--role` picks the agent profile. It does **not** turn team mode on — `--team`, or
+`STCODE_TEAM=1`, does that.
 
 ## Environment variables
 
 | | |
 | --- | --- |
 | `STCODE_CONFIG` | where the config file is |
-| `STCODE_AGENTS_DIR` | one directory of role profiles, and nothing else — what a container mounts |
-| `STCODE_ROLE` | the role, same as `[team] role` |
+| `STCODE_AGENTS_DIR` | one directory of agent profiles (`<name>.toml`), and nothing else — what a container mounts |
+| `STCODE_ROLE` | the role, same as `[team] role`. Selects a profile; does not turn team mode on |
+| `STCODE_TEAM=1` | turn team mode on, same as `[team] enabled` |
 | `STCODE_SANDBOX=1` | this is a contained environment; unlocks `full-auto` |
 | `STCODE_MCP_CONFIG` | an `.mcp.json` somewhere other than the workspace |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `TAVILY_API_KEY` | the conventional names |

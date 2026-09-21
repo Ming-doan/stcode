@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from stcode.core.harness import Harness, HarnessContext
-from stcode.core.harness.prompts import available_roles, load_role
+from stcode.core.harness.prompts import available_agents, load_agent_prompt
 from stcode.core.team import Mailbox, make_send_message_tool
 
 @pytest.fixture
@@ -138,43 +138,77 @@ def test_send_message_refuses_a_ref_that_does_not_exist(volume: Path, run: Any) 
 
 
 EXAMPLE_AGENTS = Path(__file__).resolve().parents[2] / "examples" / "agents"
-"""The roles the repository ships as a starting point. Not importable package data —
-that is the point of the test below."""
+"""The agent profiles the repository ships as a starting point. Not importable package
+data — that is the point of the test below."""
 
 
-def test_every_example_role_is_a_valid_role() -> None:
-    """A new role must be a new file and nothing else."""
-    roles = sorted(path.stem for path in EXAMPLE_AGENTS.glob("*.md"))
-    assert {"ba", "backend-dev", "frontend-dev", "devops"} <= set(roles)
-    for role in roles:
-        body = (EXAMPLE_AGENTS / f"{role}.md").read_text(encoding="utf-8")
+def _profile(directory: Path, name: str, prompt: str, **agent: object) -> Path:
+    """Write a minimal agent profile. What a deployment mounts, in three lines."""
+    directory.mkdir(parents=True, exist_ok=True)
+    keys = "".join(f"{key} = {value!r}\n" for key, value in agent.items())
+    path = directory / f"{name}.toml"
+    path.write_text(f'[agent]\n{keys}prompt = """\n{prompt}\n"""\n', encoding="utf-8")
+    return path
+
+
+def test_every_example_profile_is_a_valid_agent(monkeypatch: Any) -> None:
+    """A new agent must be a new file and nothing else.
+
+    Pointed at through `STCODE_AGENTS_DIR`, which is also how a container reaches them:
+    one directory and nothing else.
+    """
+    monkeypatch.setenv("STCODE_AGENTS_DIR", str(EXAMPLE_AGENTS))
+    names = sorted(path.stem for path in EXAMPLE_AGENTS.glob("*.toml"))
+    assert {"ba", "backend-dev", "frontend-dev", "devops"} <= set(names)
+    assert available_agents() == names
+    for name in names:
+        body = load_agent_prompt(name)
         assert body.startswith("# Role:")
         # Each one has to answer the three questions, or it is decoration.
         assert "## You own" in body and "## You read" in body and "## You report to" in body
 
 
-def test_roles_are_read_from_the_agents_directory(tmp_path: Path) -> None:
+def test_a_profile_is_read_from_the_agents_directory(tmp_path: Path) -> None:
     """Project `.stcode/agents/` first, then the user's config directory."""
+    _profile(tmp_path / ".stcode" / "agents", "tester", "# Role: tester\n\n## You own\nthe suite.")
+
+    assert "tester" in available_agents(tmp_path)
+    assert load_agent_prompt("tester", tmp_path).startswith("# Role: tester")
+
+
+def test_a_profile_can_keep_its_prompt_in_a_file(tmp_path: Path) -> None:
+    """`prompt_file` is relative to the profile, so a directory of agents moves whole."""
     agents = tmp_path / ".stcode" / "agents"
     agents.mkdir(parents=True)
-    (agents / "tester.md").write_text("# Role: tester\n\n## You own\nthe suite.")
+    (agents / "tester.md").write_text("# Role: tester\n\nYou run the suite.")
+    (agents / "tester.toml").write_text('[agent]\nprompt_file = "tester.md"\n')
 
-    assert "tester" in available_roles(tmp_path)
-    assert load_role("tester", tmp_path).startswith("# Role: tester")
+    assert load_agent_prompt("tester", tmp_path) == "# Role: tester\n\nYou run the suite."
 
 
-def test_an_unknown_role_refuses_loudly(tmp_path: Path) -> None:
+def test_a_profile_naming_both_prompts_refuses(tmp_path: Path) -> None:
+    """A precedence rule is one more thing to be wrong about at 3am."""
+    agents = tmp_path / ".stcode" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "tester.toml").write_text(
+        '[agent]\nprompt = "inline"\nprompt_file = "tester.md"\n'
+    )
+    with pytest.raises(ValueError, match="one prompt"):
+        load_agent_prompt("tester", tmp_path)
+
+
+def test_an_unknown_agent_refuses_loudly(tmp_path: Path) -> None:
     """A mount that did not happen must not degrade into a role-less agent."""
-    with pytest.raises(FileNotFoundError, match="No role named"):
-        load_role("backedn-dev", tmp_path)
+    with pytest.raises(FileNotFoundError, match="No agent named"):
+        load_agent_prompt("backedn-dev", tmp_path)
 
 
 def test_the_role_reaches_the_system_prompt(tmp_path: Path, run: Any) -> None:
+    import shutil
+
     agents = tmp_path / ".stcode" / "agents"
     agents.mkdir(parents=True)
-    (agents / "backend-dev.md").write_text(
-        (EXAMPLE_AGENTS / "backend-dev.md").read_text(encoding="utf-8")
-    )
+    shutil.copy(EXAMPLE_AGENTS / "backend-dev.toml", agents / "backend-dev.toml")
     harness = run(
         Harness.create(
             tmp_path, role="backend-dev", load_mcp=False, load_repl=False, load_skills=False
@@ -185,6 +219,73 @@ def test_the_role_reaches_the_system_prompt(tmp_path: Path, run: Any) -> None:
     assert "api-contract.md" in prompt
     # And a sub-agent works inside the same role — it does not become role-less.
     assert "api-contract.md" in harness.for_subagent("worker").system_prompt()
+
+
+def test_a_mounted_profile_needs_no_agents_directory(tmp_path: Path, run: Any) -> None:
+    """The deployment shape: the profile *is* the config, so nothing is looked up.
+
+    `-v ./agents/backend-dev.toml:/config/config.toml` is one mount, and the container
+    has no agents directory at all. A harness that still went looking would refuse to
+    start on exactly the deployment the profile format exists for.
+    """
+    harness = run(
+        Harness.create(
+            tmp_path,
+            role="backend-dev",
+            agent_prompt="# Role: backend developer\n\nYou own the API.",
+            load_mcp=False,
+            load_repl=False,
+            load_skills=False,
+        )
+    )
+    assert "You own the API." in harness.system_prompt()
+
+
+def test_team_mode_is_off_until_it_is_switched_on(tmp_path: Path, run: Any) -> None:
+    """Naming a role must not go looking for an inbox that is not mounted.
+
+    The failure this prevents: a profile copied to a laptop used to start polling
+    `/team` and refuse to run because the volume was not there.
+    """
+    from stcode.core.agent import Agent
+    from stcode.core.configs import GatewayConfig
+
+    config = GatewayConfig()
+    config.agent.prompt = "# Role: tester\n\nYou run the suite."
+    config.team.role = "tester"
+    config.team.shared_dir = str(tmp_path / "not-mounted")
+    config.supervisor.enabled = False
+    config.mcp.enabled = False
+
+    agent = run(Agent.create(config, cwd=tmp_path, gateway=_Scripted([])))  # type: ignore[arg-type]
+    try:
+        assert agent.mailbox is None, "a role alone turned team mode on"
+        assert "send_message" not in agent.harness.tool_names()
+        assert "You run the suite." in agent.harness.system_prompt()
+    finally:
+        run(agent.aclose())
+
+    # And with the switch thrown, it joins — the volume is created on the way in.
+    config.team.enabled = True
+    agent = run(Agent.create(config, cwd=tmp_path, gateway=_Scripted([])))  # type: ignore[arg-type]
+    try:
+        assert agent.mailbox is not None
+        assert "send_message" in agent.harness.tool_names()
+    finally:
+        run(agent.aclose())
+
+
+def test_team_mode_with_no_role_refuses(tmp_path: Path, run: Any) -> None:
+    """A mailbox with no owner would address every message to ""."""
+    from stcode.core.agent import Agent
+    from stcode.core.configs import GatewayConfig
+
+    config = GatewayConfig()
+    config.team.enabled = True
+    config.supervisor.enabled = False
+    config.mcp.enabled = False
+    with pytest.raises(ValueError, match="has to be somebody"):
+        run(Agent.create(config, cwd=tmp_path, gateway=_Scripted([])))  # type: ignore[arg-type]
 
 
 # ---- the agent side ------------------------------------------------------------

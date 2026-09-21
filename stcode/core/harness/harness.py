@@ -34,7 +34,12 @@ from stcode.core.harness.mcp import (
     load_mcp_config,
 )
 from stcode.core.harness.outputs import OutputStore
-from stcode.core.harness.prompts import PromptMode, build_system_prompt, load_role, mode_for
+from stcode.core.harness.prompts import (
+    PromptMode,
+    build_system_prompt,
+    load_agent_prompt,
+    mode_for,
+)
 from stcode.core.harness.skills import SkillRegistry
 from stcode.core.harness.tools import BUILTIN_TOOLS, MAIN_TOOLS, WORKER_TOOLS, ToolRegistry
 from stcode.core.harness.tools.base import (
@@ -96,8 +101,8 @@ class Harness:
         self.project_instructions = project_instructions
         self.extra_prompt = extra_prompt
         self.role = role
-        """The role's markdown body, already loaded. A string, not a name: `Harness`
-        should not know where roles live on disk."""
+        """The agent's prompt body, already resolved. A string, not a name: `Harness`
+        should not know where agent profiles live on disk."""
 
         self.teammates = list(teammates)
         self.mcp = mcp
@@ -137,6 +142,7 @@ class Harness:
         load_git: bool = True,
         load_repl: bool = True,
         role: str = "",
+        agent_prompt: str = "",
         mcp_expose: str = "code",
         mcp_config: str | Path | None = None,
         **kwargs: Any,
@@ -161,10 +167,13 @@ class Harness:
             # sessions never run one.
             context.repl = PyREPL(cwd=root, env=context.env)
 
-        # Raises on an unknown name: a container started with a typo'd role, or with
-        # its agents directory unmounted, should refuse rather than run an agent that
-        # owns nothing.
-        kwargs.setdefault("role", load_role(role, root))
+        # `agent_prompt` is the config's own `[agent] prompt` — an agent profile
+        # mounted as the config carries it, and then there is nothing to look up.
+        # Failing that, the role names a profile in the agents directory, and an
+        # unknown name raises: a container started with a typo'd role, or with its
+        # agents directory unmounted, should refuse rather than run an agent that owns
+        # nothing.
+        kwargs.setdefault("role", agent_prompt.strip() or load_agent_prompt(role, root))
         kwargs.setdefault("project_instructions", read_project_instructions(root))
         harness = cls(context, approval_mode=approval_mode, **kwargs)
 

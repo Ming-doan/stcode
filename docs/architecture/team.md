@@ -74,13 +74,24 @@ No locks, no CRDT, no merge.
 
 ## Roles
 
-One markdown file per role, in `~/.stcode/agents/` (or `.stcode/agents/`, or
-`$STCODE_AGENTS_DIR`). **Not in the package** — a role is a deployment fact, and a build
-that carried four of them made adding a fifth a release. Copy a starting point from
-`examples/agents/`: `ba`, `backend-dev`, `frontend-dev`, `devops`.
+**One `config.toml` per agent** — prompt in `[agent] prompt`, settings in the sections
+that were always there. Mounted at `/config/config.toml` it *is* the container's config,
+which makes deploying N agents N mounts of one path and nothing to keep in step. On a
+machine that holds several, they live in `~/.stcode/agents/` (or `.stcode/agents/`, or
+`$STCODE_AGENTS_DIR`) and `--role` picks one by name, contributing its prompt only.
+→ [agent profiles](harness.md#an-agent-profile-is-one-configtoml)
+
+**Not in the package** — a role is a deployment fact, and a build that carried four of
+them made adding a fifth a release. Copy a starting point from `examples/agents/`: `ba`,
+`backend-dev`, `frontend-dev`, `devops`.
 
 Each states what it owns, whose output it reads, and who it reports to. An unknown role
 name refuses to start, which is what you want when a volume failed to mount.
+
+**Team mode is off until it is switched on.** `[team] enabled`, or `STCODE_TEAM=1`;
+naming a role is not enough. A role and a team are two facts — one says which agent this
+is and is perfectly useful solo, the other says a shared volume is mounted — and merging
+them meant a profile copied to a laptop started polling an inbox that did not exist.
 
 A sub-agent (`task`) is still available inside a role container: a team splits the
 product, `task` splits one role's work inside its own checkout. Sub-agents do **not** get
@@ -107,10 +118,11 @@ no k8s manifests: how you bring up N containers is yours.
 
 | | |
 | --- | --- |
-| Mounts | `/team` (shared volume), `/workspace` (where the agent clones), config read-only, an agents directory |
-| Env | `STCODE_CONFIG`, `STCODE_SANDBOX=1` (unlocks `full-auto`), `STCODE_AGENTS_DIR`, provider keys |
+| Mounts | `/team` (shared volume), `/workspace` (where the agent clones), this agent's profile at `/config/config.toml` read-only |
+| Env | `STCODE_CONFIG`, `STCODE_SANDBOX=1` (unlocks `full-auto`), `STCODE_TEAM=1` (turns team mode on), provider keys |
 | Port | `[daemon] transport = "tcp"`, default 7717 |
-| Role | `[team] role`, or `--role` / `STCODE_ROLE` — must match a file in the agents directory |
+| Role | `[team] role` in the mounted profile, or `--role` / `STCODE_ROLE` with `STCODE_AGENTS_DIR` |
+| Clients | one at a time — `[daemon] max_clients` defaults to 1 in a container |
 | Credentials | none. The origin is a bare repo on the volume |
 
 ## Failure modes to design against

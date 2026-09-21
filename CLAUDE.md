@@ -137,7 +137,7 @@ We are not competing on polish. We are betting on the rows in the middle.
 | A framework owning the loop (LangChain, LangGraph, CrewAI, AutoGen) | The premise is programmatic control over context and the loop |
 | LLM-summarised tool output | Summarising loses information; eliding does not (rule 1) |
 | MCP definitions in the prompt | The 9,869 → 0 measurement |
-| A lead/orchestrator agent | You dispatch, per role. A `lead` would be one more markdown file |
+| A lead/orchestrator agent | You dispatch, per role. A `lead` would be one more agent profile |
 | Self-refining prompts | Rule 6, and Prime Agent's promoted cheating skill (§7) |
 | Notebook editing, multi-edit, image input | Deferred, not rejected |
 

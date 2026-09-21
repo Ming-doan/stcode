@@ -47,7 +47,7 @@ def test_a_harness_picks_up_role_skills_and_project_instructions(
     try:
         prompt = harness.system_prompt()
 
-        # .stcode/agents/backend-dev.md
+        # .stcode/agents/backend-dev.toml
         assert "Role: backend developer" in prompt
         assert "Message devops instead." in prompt
 

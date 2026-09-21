@@ -30,10 +30,10 @@ import pytest
 from conftest import asynctest
 from fakes import FakeAgent, RecordingGateway, calls_tool, says
 
-from stcode.core.configs import GatewayConfig
+from stcode.core.configs import REDACTED, GatewayConfig, load_config, save_config
 from stcode.core.daemon import Daemon, DaemonClient, SessionRunner
 from stcode.core.daemon.runner import session_usage
-from stcode.core.daemon.autonomy import AutonomyRefused, guard_autonomy
+from stcode.core.daemon.autonomy import SANDBOX_ENV, AutonomyRefused, guard_autonomy
 from stcode.core.daemon.protocol import (
     Approval,
     Create,
@@ -46,6 +46,7 @@ from stcode.core.daemon.protocol import (
 )
 from stcode.core.harness.tools.base import ApprovalRequest, Question
 from stcode.core.harness.approvals import ToolPermission
+from stcode.core.providers import ProviderConfig, RouteConfig
 from stcode.core.providers.types import Message, TextDelta, Usage
 from stcode.core.session import Session
 
@@ -463,6 +464,173 @@ async def test_two_clients_watch_one_session(sandbox: Path, tmp_path: Path) -> N
         assert "text_delta" in types_of(a) and "text_delta" in types_of(b)
         await first.aclose()
         await second.aclose()
+
+
+@asynctest
+async def test_a_contained_daemon_takes_one_client(
+    sandbox: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Rule 2 at the socket: one container is one agent is one merge boundary.
+
+    The newcomer is refused, never the incumbent — a connection already attached may be
+    parked on an approval, and evicting it would turn a stray `--daemonless` into a way
+    to strand somebody else's turn. So the refusal has to arrive as a readable frame on
+    the *second* connection while the first keeps working.
+    """
+    monkeypatch.setenv(SANDBOX_ENV, "1")
+    gateway = RecordingGateway([says("still here")])
+    async with Harnessed(config_for(tmp_path), gateway) as env:
+        assert env.daemon.max_clients == 1
+
+        first = await env.client()
+        info = await first.create(cwd=sandbox)
+
+        second = await env.client()
+        refusal = await second.next_event(2)
+        assert refusal["type"] == "error"
+        assert "already has a client" in refusal["message"]
+        await second.aclose()
+
+        # The incumbent is untouched: same session, still able to drive a turn.
+        await first.push("go")
+        frames = await collect(first, until="turn_finished")
+        assert "text_delta" in types_of(frames)
+        assert first.session_id == info["id"]
+        await first.aclose()
+
+
+@asynctest
+async def test_the_host_keeps_two_terminals_on_one_session(
+    sandbox: Path, tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The asymmetry is the point. Off the host the cap is a container's rule, not ours.
+
+    Without this, "one client" would quietly break the solo case the fan-out exists for.
+    """
+    monkeypatch.delenv(SANDBOX_ENV, raising=False)
+    monkeypatch.setattr("stcode.core.daemon.server.in_container", lambda: False)
+    async with Harnessed(config_for(tmp_path), RecordingGateway([])) as env:
+        assert env.daemon.max_clients == 0
+        first = await env.client()
+        info = await first.create(cwd=sandbox)
+        second = await env.client()
+        joined = await second.attach(info["id"], replay=False)
+        assert joined["id"] == info["id"]
+        await first.aclose()
+        await second.aclose()
+
+
+@asynctest
+async def test_an_explicit_max_clients_beats_the_container_default(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """`0` is unlimited everywhere — the escape hatch for anyone the default is wrong for."""
+    monkeypatch.setenv(SANDBOX_ENV, "1")
+    config = config_for(tmp_path)
+    config.daemon.max_clients = 0
+    async with Harnessed(config, RecordingGateway([])) as env:
+        assert env.daemon.max_clients == 0
+
+
+# ---- the daemon's own config ------------------------------------------------------
+
+
+@asynctest
+async def test_get_config_answers_with_the_daemons_file_and_hides_the_key(
+    tmp_path: Path,
+) -> None:
+    """What `--daemonless` reads instead of the local file, which describes another machine."""
+    config = config_for(tmp_path)
+    config.providers["anthropic"] = ProviderConfig(api_key="sk-secret", api_key_env="ANTHROPIC_API_KEY")
+    config.defaults.model = "claude-sonnet-5"
+    path = tmp_path / "daemon-config.toml"
+    save_config(config, path)
+
+    async with Harnessed(config, RecordingGateway([])) as env:
+        env.daemon.config_path = path
+        client = await env.client()
+        reply = await client.get_config()
+
+        assert reply["path"] == str(path)
+        assert reply["config"]["defaults"]["model"] == "claude-sonnet-5"
+        assert reply["config"]["providers"]["anthropic"]["api_key"] == REDACTED
+        # The env var *name* is not the secret, and it is what diagnoses an
+        # unauthenticated daemon.
+        assert reply["config"]["providers"]["anthropic"]["api_key_env"] == "ANTHROPIC_API_KEY"
+        await client.aclose()
+
+
+@asynctest
+async def test_set_config_writes_the_daemons_file_and_repoints_routing(
+    sandbox: Path, tmp_path: Path
+) -> None:
+    """The persistent half of `/model`, which `set_meta` is not.
+
+    Three things have to happen together or the change is a lie: the file on the
+    daemon's disk changes (so it survives a restart), the routing tier that was
+    tracking the old default follows (so the session does not route a new model name at
+    the old vendor), and the reply says what the config now *is*.
+    """
+    config = config_for(tmp_path)
+    config.defaults.provider = "anthropic"
+    config.defaults.model = "claude-sonnet-5"
+    config.routing["high"] = RouteConfig(provider="anthropic", model="claude-sonnet-5")
+    path = tmp_path / "daemon-config.toml"
+    save_config(config, path)
+
+    async with Harnessed(config, RecordingGateway([])) as env:
+        env.daemon.config_path = path
+        client = await env.client()
+        reply = await client.set_config(model="claude-opus-5")
+
+        assert reply["config"]["defaults"]["model"] == "claude-opus-5"
+        assert reply["config"]["routing"]["high"]["model"] == "claude-opus-5"
+
+        written = load_config(path)
+        assert written.defaults.model == "claude-opus-5"
+        assert written.routing["high"].model == "claude-opus-5"
+        assert env.daemon.config.defaults.model == "claude-opus-5"
+        await client.aclose()
+
+
+@asynctest
+async def test_set_config_accepts_only_the_four_defaults(tmp_path: Path) -> None:
+    """A terminal that could rewrite a key would repoint a fleet from the wrong tab."""
+    config = config_for(tmp_path)
+    config.providers["anthropic"] = ProviderConfig(api_key="sk-original")
+    path = tmp_path / "daemon-config.toml"
+    save_config(config, path)
+
+    async with Harnessed(config, RecordingGateway([])) as env:
+        env.daemon.config_path = path
+        client = await env.client()
+        # Sent by hand: the typed client has no way to express this, which is the point.
+        client._send(  # noqa: SLF001 — speaking the protocol is what is under test
+            {
+                "type": "set_config",
+                "defaults": {"model": "claude-opus-5", "api_key": "sk-stolen"},
+            }
+        )
+        reply = await client._request({"type": "get_config"}, "config")  # noqa: SLF001
+
+        assert reply["config"]["defaults"]["model"] == "claude-opus-5"
+        assert load_config(path).providers["anthropic"].api_key == "sk-original"
+        await client.aclose()
+
+
+@asynctest
+async def test_set_config_cannot_smuggle_full_auto_past_the_guard(tmp_path: Path) -> None:
+    """Rule 5 has no back door, and a config file is not one either."""
+    async with Harnessed(config_for(tmp_path), RecordingGateway([])) as env:
+        env.daemon.config_path = tmp_path / "daemon-config.toml"
+        save_config(env.daemon.config, env.daemon.config_path)
+        client = await env.client()
+        client._send({"type": "set_config", "defaults": {"approval_mode": "full-auto"}})  # noqa: SLF001
+        frame = await client.next_event(2)
+
+        assert frame["type"] == "error" and "container" in frame["message"]
+        assert env.daemon.config.defaults.approval_mode == "auto-edit"
+        await client.aclose()
 
 
 @asynctest

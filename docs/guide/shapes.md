@@ -50,9 +50,66 @@ No UI, no terminal control, just a socket. This is what a container's entrypoint
 uv run stcode --headless --transport tcp --host 0.0.0.0 --port 7717
 ```
 
-It prints the address it is listening on and then serves until killed. This is also the
-only shape in which `full-auto` can run unattended — and only inside a container. →
-[Approval modes](approval-modes.md)
+### What it prints
+
+A container's daemon has no screen, so its start-up is the only place it can say what it
+became. It prints a report, then logs every connection, then serves until killed:
+
+```
+stcode 0.1.0 — headless daemon
+  listening   tcp 0.0.0.0:7717   (1 client max)
+  workspace   /workspace
+  mode        suggest
+  model       claude-sonnet-5 (anthropic)
+  config      /config/config.toml
+  sessions    /root/.stcode/sessions
+  agents      /agents  (ba, backend-dev, devops, frontend-dev)
+  team        backend-dev on /team
+  container   yes (STCODE_SANDBOX)
+  created     /root/.stcode/sessions
+ready — ctrl-c to stop
+[info] client connected: 172.17.0.1:52418 (1/1)
+[info] session 01JC… created at /workspace
+[info] client disconnected: 172.17.0.1:52418
+```
+
+Everything in it answers a question you would otherwise have to exec into the container
+to ask. Two lines are worth calling out:
+
+- **`created`** lists the files and directories this start-up *made*. A config that was
+  scaffolded because the mount silently did not happen is the single most expensive
+  thing to discover late, and it looks identical to a config that was mounted — until
+  the daemon says which one it was.
+- **`container`** is [`in_container()`](../architecture/daemon.md) reporting itself,
+  because it is what decides whether `full-auto` is allowed to start at all.
+
+Logging is at `INFO` in this shape and nowhere else. A UI has a transcript; a daemon has
+stdout, and `docker logs` is how you read it.
+
+### One client at a time, in a container
+
+A daemon that detects a container accepts **one connection**. A second one is told so
+and closed; the attached client keeps the session.
+
+```
+$ stcode --daemonless --transport tcp --host 10.0.0.4 --port 7717
+this daemon already has a client attached (1/1)
+```
+
+The rule is narrow on purpose. On your own machine two terminals watching one session is
+a feature, and it stays. A container is the opposite case: one container is one agent is
+one checkout is one merge boundary, and a second terminal steering the same role from
+somewhere else is that boundary being crossed by accident.
+
+Set it yourself if the default is wrong for you:
+
+```toml
+[daemon]
+max_clients = 0   # unlimited; omit the key for "1 in a container, unlimited on the host"
+```
+
+This is also the only shape in which `full-auto` can run unattended — and only inside a
+container. → [Approval modes](approval-modes.md)
 
 ## `--daemonless` — the UI alone
 
@@ -62,6 +119,30 @@ which would be exactly the wrong thing to do silently when you meant to drive a
 container.
 
 `/connect` moves a running UI to a different daemon without restarting it.
+
+### It uses the daemon's config, not yours
+
+Once attached, this shape reads its settings **from the daemon**. The model, provider,
+routing tiers, approval mode and paths it shows are the ones in the container's
+`config.toml` — not the ones in `~/.stcode/config.toml` on your laptop, which describe a
+different machine's agent.
+
+`/model` writes back. It sets `[defaults]` in the *daemon's* config file and reconfigures
+the gateway in place, so the change outlives the session and the container restart:
+
+```
+/model                       # the card lists what the daemon can reach
+→ provider and model written to /config/config.toml on the daemon
+```
+
+**Only `[defaults]`.** API keys, `base_url`, routing tiers and concurrency caps are shown
+read-only and never sent. Those are the operator's, and a terminal that can rewrite the
+credentials of every daemon it can reach is a worse tool than one that cannot. Change
+them where the container is deployed.
+
+Your local `~/.stcode/config.toml` is left alone in this shape, apart from the daemon
+address `/connect` succeeded on — which is a fact about *your* terminal, so it is stored
+here.
 
 ## Attaching to an agent in a container
 

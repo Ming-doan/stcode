@@ -100,6 +100,7 @@ class Card(Vertical):
         token: str = "",
         highlighted: int = 0,
         selectable: bool = True,
+        dismissable: bool = True,
     ) -> None:
         super().__init__(classes="card")
         self.kind = kind
@@ -108,6 +109,19 @@ class Card(Vertical):
         approval or a question, empty for everything else."""
 
         self.selectable = selectable
+        self.dismissable = dismissable
+        """Whether ++escape++ and ++backspace++ may close this card.
+
+        False for the two that are **asking** rather than offering: an approval and a
+        question. By the time one is on screen its request has already left the queue,
+        and the turn behind it is parked on an answer only this card can give — so
+        dismissing it left the session waiting on a reply with nowhere to come from, a
+        hung agent with a working keyboard. The keystroke that did it was usually
+        ++backspace++ on an already-empty input, aimed at a character that was not there.
+
+        Deny is the way out, and it costs one turn: the tool is told the user declined.
+        """
+
         self._title = title or kind
         self._footer = footer
         self._body = body
