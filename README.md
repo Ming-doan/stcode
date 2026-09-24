@@ -14,7 +14,7 @@ contained.
 ## Quickstart
 
 ```bash
-uv sync                      # Python 3.12+
+uv sync                      # Python 3.10+
 uv run stcode                # first run opens a one-time setup screen
 ```
 
@@ -167,7 +167,7 @@ uv run pytest -m live                     # the two tests that call a real provi
 uv run --group docs mkdocs serve          # the documentation site
 ```
 
-Conventions: Python 3.12+, `uv` for everything, type hints mandatory in `core/`, tests
+Conventions: Python 3.10+, `uv` for everything, type hints mandatory in `core/`, tests
 in `tests/`, commit messages `area: what changed`. Every tool has a docstring because
 **the docstring is the prompt the model reads**.
 

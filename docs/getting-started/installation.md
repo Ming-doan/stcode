@@ -4,7 +4,7 @@
 
 | | |
 | --- | --- |
-| Python | 3.12 or newer |
+| Python | 3.10 or newer |
 | [uv](https://docs.astral.sh/uv/) | used for everything — running, locking, syncing |
 | Docker | only for [team mode](../teams/setup.md) |
 
@@ -14,8 +14,17 @@ system-wide. `fd` is used if present and skipped if not.
 
 ## Install
 
+From PyPI, as a standalone tool with its own environment:
+
 ```bash
-git clone https://github.com/minhdoan/stcode
+uv tool install stcode            # or: pipx install stcode
+stcode
+```
+
+From a checkout, to work on stcode itself:
+
+```bash
+git clone https://github.com/Ming-doan/stcode
 cd stcode
 uv sync
 uv run stcode
@@ -24,8 +33,9 @@ uv run stcode
 ### Optional extras
 
 ```bash
-uv sync --extra otel      # OpenTelemetry export — see Tracing
-uv sync --group docs      # build this documentation site
+uv tool install 'stcode[otel]'    # OpenTelemetry export — see Tracing
+uv sync --extra otel              # the same, in a checkout
+uv sync --group docs              # build this documentation site
 ```
 
 Tracing is an extra rather than a dependency on purpose: a coding session that is not

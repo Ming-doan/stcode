@@ -56,7 +56,7 @@ is `strict`, so a broken internal link or a page missing from `nav` fails the bu
 | [teams/](docs/teams/) | Setting a team up, roles, how one actually works |
 | [sdk/](docs/sdk/) | Embedding an agent, writing a tool, the daemon protocol |
 | [decisions/](docs/decisions/) | One page per question that could have gone another way |
-| [contributing/](docs/contributing/) | **How a change is made** (§6), and testing |
+| [contributing/](docs/contributing/) | **How a change is made** (§6), testing, releasing |
 
 **Architecture** — what a contributor reads before changing something.
 
@@ -220,7 +220,7 @@ Six steps, in order. Full version, with the reasoning for each, in
 
 ### The rest
 
-- Python 3.12+, `uv` for everything. `uv run pytest` before claiming anything works.
+- Python 3.10+ (CI runs 3.10–3.13; `core/common/compat.py` holds the only two backports), `uv` for everything. `uv run pytest` before claiming anything works.
 - Type hints mandatory in `core/`. `mypy --strict` on it — installed, and **not yet
   clean**: ~35 errors, mostly provider SDK stubs. Documented in
   [docs/contributing/testing.md](docs/contributing/testing.md) rather than claimed.

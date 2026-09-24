@@ -10,8 +10,8 @@ being a foot-gun: the daemon refuses to start in that mode anywhere its blast ra
 not contained.
 
 ```bash
-uv sync
-uv run stcode
+uv tool install stcode
+stcode
 ```
 
 ## Where to go
@@ -48,12 +48,6 @@ uv run stcode
 
     [Embedding an agent](sdk/embedding.md) ·
     [The daemon protocol](sdk/daemon-protocol.md)
-
-- **Changing it**
-
-    [Architecture](architecture/index.md) ·
-    [How a change is made](contributing/workflow.md) ·
-    [Decisions](decisions/index.md)
 
 </div>
 

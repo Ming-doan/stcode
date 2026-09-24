@@ -7,11 +7,16 @@
 #      forgotten gets noticed.
 #   2. `strict: true`. A broken internal link fails the build. Docs drift silently;
 #      this is the one kind of drift a machine can catch.
+#
+# The contributor pages (architecture, decisions, contributing) are built but kept out
+# of `nav`: user pages still link into them, but a reader browsing the site is not
+# walked through them. `not_in_nav` below is what lets strict mode accept that.
 
 site_name: stcode
 site_description: A coding agent that lives in a daemon, and a UI that is a client of it.
-site_url: https://example.invalid/stcode
-repo_url: https://github.com/minhdoan/stcode
+# Served under /docs/ — the landing page (landing/) owns the root. See .github/workflows/pages.yml.
+site_url: https://ming-doan.github.io/stcode/docs/
+repo_url: https://github.com/Ming-doan/stcode
 edit_uri: edit/main/docs/
 
 strict: true
@@ -99,25 +104,8 @@ nav:
       - Embedding an agent: sdk/embedding.md
       - Writing a tool: sdk/custom-tools.md
       - The daemon protocol: sdk/daemon-protocol.md
-  - Architecture:
-      - Overview: architecture/index.md
-      - The agent loop: architecture/agent-loop.md
-      - The harness: architecture/harness.md
-      - Providers: architecture/providers.md
-      - Sessions: architecture/session.md
-      - The daemon: architecture/daemon.md
-      - MCP as code: architecture/mcp.md
-      - The supervisor: architecture/supervisor.md
-      - Team mode: architecture/team.md
-      - Tracing: architecture/tracing.md
-      - Configuration reference: architecture/configuration.md
-  - Decisions:
-      - Index: decisions/index.md
-      - 0001 Tool search: decisions/0001-tool-search.md
-      - 0002 File and image input: decisions/0002-file-and-image-input.md
-      - 0003 What the TUI owns: decisions/0003-what-the-tui-owns.md
-      - 0004 What a remote client may change: decisions/0004-what-a-remote-client-may-change.md
-      - 0005 An agent is a config file: decisions/0005-an-agent-is-a-config-file.md
-  - Contributing:
-      - How a change is made: contributing/workflow.md
-      - Testing: contributing/testing.md
+
+not_in_nav: |
+  /architecture/
+  /decisions/
+  /contributing/

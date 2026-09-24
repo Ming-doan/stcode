@@ -136,7 +136,7 @@ one turn does it, and random suffixes would order them arbitrarily. Within a mil
 the random half increments, which also covers NTP stepping the clock backwards.
 
 `uuid.uuid7()` would give the sortability but is stdlib only from Python 3.14, and the
-project targets 3.12; a dependency to delete fifteen tested lines that also buy
+project targets 3.10; a dependency to delete fifteen tested lines that also buy
 in-millisecond ordering and a dash-free filename is not a trade worth making yet.
 
 ## Sub-agent sessions

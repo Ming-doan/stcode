@@ -1,0 +1,51 @@
+# The test suite on every supported Python, with coverage.
+#
+# Runs on a PR into `main`, so the matrix is visible before the merge, and is called
+# by publish.yml, so a release is gated on it. 3.14 runs but does not gate: it has not
+# been verified locally yet. Promote it by deleting its `experimental` flag.
+
+name: tests
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        experimental: [false]
+        include:
+          - python: "3.14"
+            experimental: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --locked
+      - name: pytest with coverage
+        run: uv run pytest --cov=stcode --cov-report=term --cov-report=xml
+      - name: Coverage summary
+        if: matrix.python == '3.12'
+        run: |
+          echo '### Coverage (python ${{ matrix.python }})' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          uv run coverage report --skip-covered --sort=cover | tail -25 >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: matrix.python == '3.12'
+        with:
+          name: coverage
+          path: coverage.xml

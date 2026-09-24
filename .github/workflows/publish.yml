@@ -1,0 +1,63 @@
+# Publish to PyPI when something is merged into `publish`.
+#
+# No API token lives in this repository. The `publish` job authenticates with PyPI
+# Trusted Publishing: GitHub mints a short-lived OIDC token for this workflow file, in
+# the `pypi` environment, and PyPI trusts exactly that pair. One-time setup:
+# docs/contributing/releasing.md.
+#
+# A version already on PyPI cannot be uploaded again, so bump `version` in
+# pyproject.toml before merging — the build job checks and fails early if you forgot.
+
+name: publish
+
+on:
+  push:
+    branches: [publish]
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/tests.yml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Refuse a version PyPI already has
+        run: |
+          version=$(uv version --short)
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/stcode/$version/json")
+          if [ "$status" = "200" ]; then
+            echo "::error::stcode $version is already on PyPI. Bump version in pyproject.toml."
+            exit 1
+          fi
+          echo "Publishing stcode $version"
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/stcode
+    permissions:
+      id-token: write   # Trusted Publishing; nothing else in this job may write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

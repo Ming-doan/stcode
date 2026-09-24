@@ -1,0 +1,703 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stcode — Beyond harness</title>
+<meta name="description" content="stcode is a coding agent that lives in a daemon; the UI is a client of it. Headless in a container, teams across containers, MCP as code, a supervisor that watches the trajectory.">
+<meta property="og:title" content="stcode — Beyond harness">
+<meta property="og:description" content="A coding agent that lives in a daemon, and a UI that is a client of it.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23171714'/%3E%3Cpath d='M9 11l5 5-5 5' stroke='%23fbff81' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M16 22h7' stroke='%23f6f6f3' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  /* Tokens follow langfuse.com: warm paper, thin structural lines, one yellow CTA. */
+  :root {
+    --bg: #f6f6f3;
+    --surface-1: #edede8;
+    --card: #fbfbf9;
+    --text: #1a1a17;
+    --text-2: #4a4a45;
+    --muted: #7a7a74;
+    --line: #cfcfc9;
+    --dash: #bebeb6;
+    --mark: #9d9d95;
+    --cta: #fbff81;
+    --cta-text: #1a1a17;
+    --cta-line: #b8b6a0;
+    --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --serif: "Instrument Serif", Georgia, serif;
+    --max: 1120px;
+    /* The TUI mock is always dark, like the terminal it imitates. */
+    --t-bg: #121210;
+    --t-fg: #e6e6de;
+    --t-dim: #8a8a80;
+    --t-line: #2e2e2a;
+    --t-green: #78b032;
+    --t-red: #e5484d;
+    --t-blue: #6ab8cc;
+    --t-orange: #e8935a;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171714;
+      --surface-1: #1e1e1b;
+      --card: #1b1b18;
+      --text: #efefe8;
+      --text-2: #b9b9b0;
+      --muted: #8a8a82;
+      --line: #2c2c29;
+      --dash: #3a3a35;
+      --mark: #5a5a54;
+      --cta-text: #171714;
+      --cta-line: #404039;
+      --t-bg: #0e0e0c;
+      color-scheme: dark;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+  a { color: inherit; }
+  code, pre, .mono { font-family: var(--mono); }
+
+  /* The frame: a centred column with visible side rules. */
+  .frame { max-width: var(--max); margin: 0 auto; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+  section, header.hero, footer { position: relative; border-top: 1px solid var(--line); }
+  header.hero { border-top: 0; }
+  .pad { padding: 72px 48px; }
+
+  /* Registration marks where the frame's lines cross: two 1px strokes, not a glyph. */
+  .xm::before, .xm::after {
+    content: ""; position: absolute; top: -8px; width: 15px; height: 15px; z-index: 2;
+    background:
+      linear-gradient(var(--mark), var(--mark)) center / 1px 100% no-repeat,
+      linear-gradient(var(--mark), var(--mark)) center / 100% 1px no-repeat;
+  }
+  .xm::before { left: -8px; } .xm::after { right: -8px; }
+
+  /* Nav */
+  nav.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  nav.top .frame { display: flex; align-items: center; gap: 28px; height: 60px; padding: 0 24px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; text-decoration: none; letter-spacing: -0.01em; }
+  .brand svg { width: 24px; height: 24px; }
+  .navlinks { display: flex; gap: 22px; margin-left: 8px; }
+  .navlinks a { text-decoration: none; color: var(--text-2); font-size: 14px; }
+  .navlinks a:hover { color: var(--text); }
+  .navright { margin-left: auto; display: flex; gap: 10px; }
+
+  .btn { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 16px; border-radius: 8px; font: 500 14px/1 var(--sans); text-decoration: none; white-space: nowrap; border: 1px solid var(--line); background: var(--card); color: var(--text); transition: transform .08s ease, background .15s ease; }
+  .btn:hover { background: var(--surface-1); }
+  .btn:active { transform: translateY(1px); }
+  .btn.primary { background: var(--cta); color: var(--cta-text); border-color: var(--cta-line); }
+  .btn.primary:hover { filter: brightness(0.97); }
+  .btn svg { width: 16px; height: 16px; }
+
+  .label { display: inline-block; font: 500 12px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 18px; }
+  .label::before { content: "[ "; } .label::after { content: " ]"; }
+
+  h1, h2, h3 { margin: 0; letter-spacing: -0.025em; font-weight: 600; }
+  h1 { font-size: clamp(52px, 8vw, 96px); line-height: 0.98; letter-spacing: -0.045em; }
+  h1 em, h2 em { font-family: var(--serif); font-style: italic; font-weight: 400; letter-spacing: -0.01em; }
+  h2 { font-size: clamp(28px, 3.6vw, 42px); line-height: 1.1; }
+  h3 { font-size: 18px; line-height: 1.3; letter-spacing: -0.01em; }
+  p.lede { font-size: 19px; color: var(--text-2); max-width: 520px; margin: 26px 0 0; }
+  p.lede b { color: var(--text); font-weight: 600; }
+  p.sub { color: var(--text-2); max-width: 640px; margin: 14px 0 0; }
+
+  /* Hero */
+  .hero-grid { display: grid; grid-template-columns: 0.9fr 1.1fr; }
+  /* Grid items default to min-width:auto, so a long line of mono would widen the page. */
+  .hero-grid > *, .team-grid > *, .stats > *, .cols3 > *, .bets > *, .rules > * { min-width: 0; }
+  .hero-copy { padding: 80px 44px 64px 48px; border-right: 1px solid var(--line); position: relative; }
+  .hero-demo { padding: 40px 32px; display: flex; align-items: center; position: relative;
+    background-image:
+      linear-gradient(var(--line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 32px 32px; background-position: -1px -1px; }
+  .hero-demo::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse 70% 65% at 50% 50%, transparent 40%, var(--bg) 100%); }
+  .hero-demo > * { position: relative; z-index: 1; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; font: 500 12px/1 var(--mono); color: var(--text-2); border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px 6px 8px; background: var(--card); text-decoration: none; margin-bottom: 30px; }
+  .pill b { background: var(--cta); color: var(--cta-text); border-radius: 999px; padding: 3px 7px; font-weight: 500; }
+  .cta-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+
+  /* Install: tabs over a command line */
+  .install { margin-top: 32px; max-width: 460px; }
+  .tabs { display: flex; gap: 0; border: 1px solid var(--line); border-bottom: 0; border-radius: 8px 8px 0 0; width: max-content; overflow: hidden; }
+  .tabs button { font: 500 12px/1 var(--mono); padding: 9px 14px; border: 0; border-right: 1px solid var(--line); background: var(--surface-1); color: var(--muted); cursor: pointer; }
+  .tabs button:last-child { border-right: 0; }
+  .tabs button[aria-selected="true"] { background: var(--card); color: var(--text); }
+  .cmd { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 0 8px 8px 8px; background: var(--card); font: 14px/1 var(--mono); }
+  .cmd code { flex: 1; padding: 14px; overflow-x: auto; white-space: nowrap; }
+  .cmd code::before { content: "$ "; color: var(--muted); }
+  .copy { border: 0; border-left: 1px dashed var(--dash); background: transparent; color: var(--muted); height: 44px; padding: 0 14px; cursor: pointer; font: 12px/1 var(--mono); }
+  .copy:hover { color: var(--text); }
+  .install .hint { font: 12px/1.5 var(--mono); color: var(--muted); margin-top: 10px; }
+
+  /* ---------- The TUI mock ---------- */
+  .tui { width: 100%; background: var(--t-bg); color: var(--t-fg); border-radius: 12px; border: 1px solid #00000040;
+    box-shadow: 0 1px 0 #ffffff12 inset, 0 40px 80px -40px #00000066; overflow: hidden; font: 12.5px/1.55 var(--mono); }
+  .tui-chrome { display: flex; align-items: center; gap: 7px; padding: 10px 14px; border-bottom: 1px solid var(--t-line); color: var(--t-dim); font-size: 11.5px; }
+  .tui-chrome i { width: 10px; height: 10px; border-radius: 50%; background: #ffffff22; }
+  .tui-chrome span { margin-left: 8px; }
+  .tui-chrome .live { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--t-green); }
+  .tui-chrome .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--t-green); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .tui-body { height: 430px; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; padding: 12px 14px 6px; gap: 9px; }
+  /* Older lines scroll off under a fade, as they would in a real terminal. */
+  .tui-body { -webkit-mask-image: linear-gradient(transparent 0, #000 56px); mask-image: linear-gradient(transparent 0, #000 56px); }
+  .tui-body > * { flex: none; }
+  .t-rule { display: flex; align-items: center; gap: 10px; color: var(--t-dim); font-style: italic; font-size: 11.5px; }
+  .t-rule::before, .t-rule::after { content: ""; flex: 1; height: 1px; background: var(--t-line); }
+  .t-you { background: color-mix(in srgb, var(--t-green) 13%, transparent); padding: 6px 10px; border-radius: 4px; }
+  .t-you b { color: var(--t-green); font-weight: 500; margin-right: 10px; }
+  .t-think { color: var(--t-dim); border-left: 1px solid var(--t-dim); padding-left: 10px; }
+  .t-box { position: relative; border: 1px solid var(--t-green); border-radius: 6px; padding: 8px 10px 6px; margin-top: 4px; }
+  .t-box .h { position: absolute; top: -0.8em; left: 8px; background: var(--t-bg); padding: 0 5px; color: var(--t-green); }
+  .t-box .a, .t-box .r { color: var(--t-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .t-box .r em { font-style: normal; color: var(--t-green); }
+  .t-box .r del { text-decoration: none; color: var(--t-red); }
+  .t-box.run { border-color: var(--t-line); } .t-box.run .h { color: var(--t-dim); }
+  .t-box.run .r { color: var(--t-dim); }
+  .spin::after { content: "⠋"; display: inline-block; margin-left: 6px; color: var(--t-fg); animation: spin 0.8s steps(8) infinite; }
+  @keyframes spin {
+    0% { content: "⠋"; } 12% { content: "⠙"; } 25% { content: "⠹"; } 37% { content: "⠸"; }
+    50% { content: "⠼"; } 62% { content: "⠴"; } 75% { content: "⠦"; } 87% { content: "⠧"; } }
+  .t-sub { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; }
+  .t-sub .g { color: var(--t-blue); border-right: 1px solid var(--t-blue); padding-right: 8px; }
+  .t-sub .t-box { margin-top: 10px; grid-column: 2; }
+  .t-say .cur { display: inline-block; width: 7px; height: 13px; background: var(--t-fg); vertical-align: -2px; margin-left: 1px; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .tui-input { border-top: 1px solid var(--t-line); padding: 10px 14px 4px; color: var(--t-dim); }
+  .tui-input b { color: var(--t-green); font-weight: 500; margin-right: 8px; }
+  .tui-status { padding: 2px 14px 10px; color: var(--t-dim); font-size: 11.5px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .tui-status span b { color: var(--t-fg); font-weight: 400; }
+  .tui-status .mode b { color: var(--t-orange); }
+  .step { display: none; }
+  .step.on { display: block; }
+  .t-sub.step.on { display: grid; }
+  .t-rule.step.on { display: flex; }
+
+  /* Strip of stats */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .stat { padding: 28px 32px; border-right: 1px solid var(--line); }
+  .stat:last-child { border-right: 0; }
+  .stat .n { font: 500 30px/1.1 var(--sans); letter-spacing: -0.03em; }
+  .stat .d { font-size: 13px; color: var(--muted); margin-top: 6px; }
+
+  /* Architecture drawing */
+  .diagram { margin-top: 44px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding: 12px; }
+  .diagram svg { display: block; width: 100%; height: auto; }
+  .diagram .tall { display: none; }
+  .d-line { stroke: var(--text-2); stroke-width: 1.2; fill: none; }
+  .d-dash { stroke: var(--mark); stroke-width: 1; fill: none; stroke-dasharray: 4 5; }
+  .d-flow { stroke: var(--text); stroke-width: 1.6; fill: none; stroke-dasharray: 2 14; stroke-linecap: round; animation: flow 1.4s linear infinite; }
+  .d-flow.rev { animation-direction: reverse; }
+  @keyframes flow { to { stroke-dashoffset: -32; } }
+  .d-box { fill: var(--bg); stroke: var(--text-2); stroke-width: 1.2; }
+  .d-core { fill: var(--cta); stroke: var(--cta-line); stroke-width: 1.2; }
+  .d-t { font: 500 14px var(--sans); fill: var(--text); }
+  .d-core-t { font: 600 15px var(--sans); fill: var(--cta-text); }
+  .d-m { font: 11.5px var(--mono); fill: var(--muted); }
+  .d-core-m { font: 11.5px var(--mono); fill: #4a4a2a; }
+  .d-lab { font: 11px var(--mono); fill: var(--muted); letter-spacing: .06em; }
+
+  .cols3 { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px dashed var(--dash); margin-top: 44px; }
+  .col { padding: 28px 28px 8px 0; }
+  .col + .col { padding-left: 28px; border-left: 1px dashed var(--dash); }
+  .col code.cmdl { display: inline-block; font-size: 13px; background: var(--surface-1); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin-bottom: 14px; }
+  .col p { color: var(--text-2); margin: 8px 0 0; font-size: 15px; }
+
+  /* Bets */
+  .bets { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); }
+  .bet { padding: 40px 48px 44px; border-bottom: 1px solid var(--line); }
+  .bet:nth-child(odd) { border-right: 1px solid var(--line); }
+  .bet:nth-last-child(-n+2) { border-bottom: 0; }
+  .bet .top { display: flex; align-items: center; justify-content: space-between; }
+  .bet .num { font: 500 12px/1 var(--mono); color: var(--muted); }
+  .bet .ico { width: 44px; height: 44px; }
+  .bet .ico * { stroke: var(--text-2); stroke-width: 1.3; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .bet .ico .hl { stroke: var(--text); fill: var(--cta); }
+  .bet h3 { margin-top: 14px; font-size: 22px; }
+  .bet p { color: var(--text-2); margin: 12px 0 0; font-size: 15px; }
+  .bet .metric { margin-top: 22px; display: inline-flex; align-items: baseline; gap: 10px; font: 13px/1.2 var(--mono); color: var(--muted); }
+  .bet .metric strong { font: 500 22px/1 var(--mono); color: var(--text); letter-spacing: -0.02em; }
+  .bet a.more { display: inline-block; margin-top: 18px; font: 13px/1 var(--mono); color: var(--text-2); text-decoration: none; border-bottom: 1px dashed var(--dash); padding-bottom: 3px; }
+  .bet a.more:hover { color: var(--text); }
+
+  /* Team */
+  .team-grid { display: grid; grid-template-columns: 1fr 1.1fr; gap: 48px; align-items: center; }
+  .tree { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; font: 13px/1.75 var(--mono); color: var(--text-2); overflow-x: auto; white-space: pre; }
+  .tree .h { color: var(--text); font-weight: 500; }
+  .tree .m { color: var(--muted); }
+  ul.checks { list-style: none; padding: 0; margin: 24px 0 0; }
+  ul.checks li { padding: 10px 0 10px 28px; border-top: 1px dashed var(--dash); position: relative; color: var(--text-2); font-size: 15px; }
+  ul.checks li:last-child { border-bottom: 1px dashed var(--dash); }
+  ul.checks li::before { content: ""; position: absolute; left: 4px; top: 21px; width: 12px; height: 1px; background: var(--text-2); }
+  ul.checks li::after { content: ""; position: absolute; left: 12px; top: 18px; width: 5px; height: 5px; border-top: 1px solid var(--text-2); border-right: 1px solid var(--text-2); transform: rotate(45deg); }
+  ul.checks b { color: var(--text); font-weight: 600; }
+
+  /* Comparison */
+  .table-wrap { margin-top: 36px; border: 1px solid var(--line); border-radius: 12px; overflow-x: auto; background: var(--card); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 620px; }
+  th, td { text-align: left; padding: 13px 18px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  th { font: 500 12px/1.2 var(--mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); background: var(--surface-1); }
+  td:first-child { color: var(--text-2); }
+  th.us, td.us { background: color-mix(in srgb, var(--cta) 16%, transparent); color: var(--text); font-weight: 500; }
+  .note { font-size: 14px; color: var(--muted); margin-top: 16px; }
+
+  /* Rules */
+  .rules { display: grid; grid-template-columns: repeat(2, 1fr); margin-top: 40px; border-top: 1px dashed var(--dash); }
+  .rule { display: grid; grid-template-columns: 40px 1fr; padding: 18px 20px 18px 0; border-bottom: 1px dashed var(--dash); }
+  .rule:nth-child(even) { padding-left: 24px; border-left: 1px dashed var(--dash); }
+  .rule .i { font: 500 13px/1.6 var(--mono); color: var(--muted); }
+  .rule p { margin: 0; font-size: 15px; color: var(--text-2); }
+  .rule p b { color: var(--text); font-weight: 600; }
+
+  .closing { text-align: center; padding: 96px 32px; background: radial-gradient(ellipse 60% 70% at 50% 100%, color-mix(in srgb, var(--cta) 26%, transparent), transparent 70%); }
+  .closing .cta-row { justify-content: center; }
+  .closing .install { margin-left: auto; margin-right: auto; text-align: left; }
+
+  footer .pad { padding: 28px 32px; display: flex; flex-wrap: wrap; gap: 16px 28px; align-items: center; font-size: 13px; color: var(--muted); }
+  footer a { text-decoration: none; } footer a:hover { color: var(--text); }
+  footer .sp { margin-left: auto; }
+
+  @media (max-width: 900px) {
+    .navlinks { display: none; }
+    .hero-grid, .team-grid { grid-template-columns: 1fr; }
+    .hero-copy { border-right: 0; border-bottom: 1px solid var(--line); padding: 56px 20px 44px; }
+    .hero-demo { padding: 28px 12px; }
+    .tui-body { height: 400px; }
+    .pad { padding: 56px 20px; }
+    .stats { grid-template-columns: 1fr 1fr; }
+    .stat { padding: 22px 20px; }
+    .stat .n { font-size: 24px; }
+    .stat:nth-child(2) { border-right: 0; }
+    .stat:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+    .diagram .wide { display: none; } .diagram .tall { display: block; }
+    .cols3 { grid-template-columns: 1fr; }
+    .col, .col + .col { padding: 22px 0 6px; border-left: 0; }
+    .col + .col { border-top: 1px dashed var(--dash); }
+    .bets { grid-template-columns: 1fr; }
+    .bet { padding: 32px 20px; border-right: 0 !important; border-bottom: 1px solid var(--line) !important; }
+    .bet:last-child { border-bottom: 0 !important; }
+    .rules { grid-template-columns: 1fr; }
+    .rule:nth-child(even) { padding-left: 0; border-left: 0; }
+    .team-grid { gap: 28px; }
+    .closing { padding: 72px 20px; }
+    footer .sp { margin-left: 0; }
+  }
+  @media (max-width: 520px) {
+    .navright .btn.gh span { display: none; }
+    nav.top .frame { padding: 0 16px; gap: 12px; }
+    .tui { font-size: 11.5px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .d-flow, .spin::after, .t-say .cur, .tui-chrome .live::before { animation: none; }
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="top">
+  <div class="frame">
+    <a class="brand" href="./">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="currentColor"/><path d="M9 11l5 5-5 5" stroke="#fbff81" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M16 22h7" stroke="var(--bg)" stroke-width="2.6" stroke-linecap="round"/></svg>
+      stcode
+    </a>
+    <div class="navlinks">
+      <a href="#shapes">Shapes</a>
+      <a href="#bets">Why it's different</a>
+      <a href="#team">Teams</a>
+      <a href="#compare">Compare</a>
+      <a href="docs/">Docs</a>
+    </div>
+    <div class="navright">
+      <a class="btn gh" href="https://github.com/Ming-doan/stcode" aria-label="GitHub">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span>GitHub</span>
+      </a>
+      <a class="btn primary" href="docs/getting-started/quickstart/">Get started</a>
+    </div>
+  </div>
+</nav>
+
+<div class="frame">
+
+  <header class="hero">
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <a class="pill" href="docs/teams/setup/"><b>new</b> Teams of agents across containers →</a>
+        <h1>Beyond<br><em>harness.</em></h1>
+        <p class="lede">A coding agent that <b>lives in a daemon</b> — the terminal UI is just a client of it. Close the window and the work keeps going. Move it into a container with one config key. Run a team of them, each in its own.</p>
+
+        <div class="install" data-install>
+          <div class="tabs" role="tablist" aria-label="Install with">
+            <button role="tab" aria-selected="true" data-tab="uv">uv tool</button>
+            <button role="tab" aria-selected="false" data-tab="uvx">uvx</button>
+            <button role="tab" aria-selected="false" data-tab="pip">pip</button>
+          </div>
+          <div class="cmd">
+            <code data-cmd>uv tool install stcode</code>
+            <button class="copy" type="button">copy</button>
+          </div>
+          <div class="hint" data-hint>Installs <code>stcode</code> on your PATH in its own environment.</div>
+        </div>
+
+        <div class="cta-row">
+          <a class="btn primary" href="docs/getting-started/quickstart/">Read the quickstart</a>
+          <a class="btn" href="docs/">Documentation</a>
+        </div>
+      </div>
+
+      <div class="hero-demo">
+        <div class="tui" aria-label="A mock stcode terminal UI: the agent greps, reads, delegates to a sub-agent, edits a file and runs the tests">
+          <div class="tui-chrome"><i></i><i></i><i></i><span>stcode — ~/w/shop</span><span class="live">running</span></div>
+          <div class="tui-body" id="tui">
+            <div class="t-rule step">session in ~/w/shop</div>
+            <div class="t-you step"><b>you</b>Add rate limiting to /v1/search — 60 req/min per API key</div>
+            <div class="t-think step">The middleware is probably under src/api. Grep before reading.</div>
+            <div class="t-box step"><span class="h">grep</span><div class="a">pattern=middleware path=src</div><div class="r">src/api/mw.py:12: def middleware(request):</div></div>
+            <div class="t-box step"><span class="h">read</span><div class="a">path=src/api/mw.py</div><div class="r">1  from fastapi import Request</div></div>
+            <div class="t-say step">I'll check how keys are resolved, and have a sub-agent find every search handler.</div>
+            <div class="t-sub step"><span class="g">api-scout</span><span>Three handlers, all behind mw.py.</span><div class="t-box"><span class="h">grep</span><div class="a">pattern="/v1/search"</div><div class="r">3 matches in src/api/</div></div></div>
+            <div class="t-box step"><span class="h">edit</span><div class="a">path=src/api/mw.py</div><div class="r"><em>+14</em> <del>−3</del>  TokenBucket(rate=60, per=60)</div></div>
+            <div class="t-box step" data-run><span class="h">bash</span><div class="a">command=uv run pytest tests/api -q</div><div class="r" data-done="38 passed in 2.41s">running…</div></div>
+            <div class="t-say step" data-stream="Done. /v1/search now allows 60 requests a minute per key and answers 429 with Retry-After past it; 38 tests pass."></div>
+          </div>
+          <div class="tui-input"><b>&gt;</b>Ask stcode…</div>
+          <div class="tui-status"><span>model <b>claude-opus-5</b></span><span>provider <b>anthropic</b></span><span class="mode">mode <b>auto-edit</b></span></div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <section class="xm">
+    <div class="stats">
+      <div class="stat"><div class="n mono">9,869 → 0</div><div class="d">chars of MCP definitions per turn, three servers</div></div>
+      <div class="stat"><div class="n">1 binary</div><div class="d">UI, daemon, or both — no implementation switch</div></div>
+      <div class="stat"><div class="n">0 tokens</div><div class="d">for the supervisor, until a heuristic fires</div></div>
+      <div class="stat"><div class="n">Apache-2.0</div><div class="d">open source, self-hosted, bring your own key</div></div>
+    </div>
+  </section>
+
+  <section id="shapes" class="pad xm">
+    <span class="label">One binary, three shapes</span>
+    <h2>Daemon first. <em>Everything else</em> follows.</h2>
+    <p class="sub">The agent is held by a long-lived daemon speaking JSONL over a socket. The TUI is one client; so is a UI on another machine, and so is your own code. Detach does not kill the agent, and a container is a transport setting, not a rewrite.</p>
+
+    <div class="diagram" role="img" aria-label="Diagram: clients — the local TUI, a remote --daemonless UI and the SDK — connect over JSONL to one daemon holding the agent and its session log, optionally inside a container">
+      <svg class="wide" viewBox="0 0 1000 300" aria-hidden="true">
+        <!-- container outline around the daemon -->
+        <rect x="560" y="28" width="410" height="244" rx="14" class="d-dash"/>
+        <text x="580" y="52" class="d-lab">CONTAINER · OPTIONAL</text>
+        <!-- clients -->
+        <rect x="30" y="34" width="220" height="62" rx="9" class="d-box"/>
+        <text x="50" y="62" class="d-t">stcode</text><text x="50" y="82" class="d-m">TUI · unix socket</text>
+        <rect x="30" y="119" width="220" height="62" rx="9" class="d-box"/>
+        <text x="50" y="147" class="d-t">stcode --daemonless</text><text x="50" y="167" class="d-m">UI elsewhere · tcp</text>
+        <rect x="30" y="204" width="220" height="62" rx="9" class="d-box"/>
+        <text x="50" y="232" class="d-t">your code</text><text x="50" y="252" class="d-m">SDK · daemon protocol</text>
+        <!-- wires -->
+        <path d="M250 65 C 400 65, 450 150, 610 150" class="d-line"/>
+        <path d="M250 150 L 610 150" class="d-line"/>
+        <path d="M250 235 C 400 235, 450 150, 610 150" class="d-line"/>
+        <path d="M250 65 C 400 65, 450 150, 610 150" class="d-flow"/>
+        <path d="M250 150 L 610 150" class="d-flow rev"/>
+        <path d="M250 235 C 400 235, 450 150, 610 150" class="d-flow"/>
+        <text x="372" y="138" class="d-lab">JSONL</text>
+        <!-- daemon -->
+        <rect x="610" y="96" width="214" height="108" rx="11" class="d-core"/>
+        <text x="632" y="132" class="d-core-t">daemon</text>
+        <text x="632" y="156" class="d-core-m">stcode --headless</text>
+        <text x="632" y="178" class="d-core-m">agent · tools · approvals</text>
+        <!-- session log -->
+        <path d="M824 150 L 860 150" class="d-line"/>
+        <rect x="860" y="112" width="100" height="76" rx="8" class="d-box"/>
+        <path d="M876 134 h58 M876 148 h68 M876 162 h44 M876 176 h58" class="d-dash" style="stroke-dasharray:none"/>
+        <text x="860" y="212" class="d-m">session.jsonl</text>
+      </svg>
+      <svg class="tall" viewBox="0 0 340 520" aria-hidden="true">
+        <rect x="10" y="10" width="100" height="70" rx="9" class="d-box"/>
+        <text x="22" y="40" class="d-t">stcode</text><text x="22" y="60" class="d-m">TUI</text>
+        <rect x="120" y="10" width="100" height="70" rx="9" class="d-box"/>
+        <text x="132" y="40" class="d-t">remote</text><text x="132" y="60" class="d-m">daemonless</text>
+        <rect x="230" y="10" width="100" height="70" rx="9" class="d-box"/>
+        <text x="242" y="40" class="d-t">your code</text><text x="242" y="60" class="d-m">SDK</text>
+        <path d="M60 80 C 60 170, 170 150, 170 240" class="d-line"/>
+        <path d="M170 80 L 170 240" class="d-line"/>
+        <path d="M280 80 C 280 170, 170 150, 170 240" class="d-line"/>
+        <path d="M60 80 C 60 170, 170 150, 170 240" class="d-flow"/>
+        <path d="M170 80 L 170 240" class="d-flow rev"/>
+        <path d="M280 80 C 280 170, 170 150, 170 240" class="d-flow"/>
+        <text x="18" y="150" class="d-lab">JSONL</text>
+        <rect x="20" y="206" width="300" height="300" rx="14" class="d-dash"/>
+        <text x="306" y="496" text-anchor="end" class="d-lab">CONTAINER · OPTIONAL</text>
+        <rect x="70" y="240" width="200" height="108" rx="11" class="d-core"/>
+        <text x="92" y="276" class="d-core-t">daemon</text>
+        <text x="92" y="300" class="d-core-m">stcode --headless</text>
+        <text x="92" y="322" class="d-core-m">agent · tools</text>
+        <path d="M170 348 L 170 380" class="d-line"/>
+        <rect x="120" y="380" width="100" height="76" rx="8" class="d-box"/>
+        <path d="M136 402 h58 M136 416 h68 M136 430 h44 M136 444 h58" class="d-dash" style="stroke-dasharray:none"/>
+        <text x="122" y="482" class="d-m">session.jsonl</text>
+      </svg>
+    </div>
+
+    <div class="cols3">
+      <div class="col">
+        <code class="cmdl">stcode</code>
+        <h3>On your machine</h3>
+        <p>The UI, plus a daemon started right here if none is listening. What you run day to day.</p>
+      </div>
+      <div class="col">
+        <code class="cmdl">stcode --headless</code>
+        <h3>In a container</h3>
+        <p>The daemon alone, over a unix socket or TCP. <code>full-auto</code> is only allowed where the blast radius is contained.</p>
+      </div>
+      <div class="col">
+        <code class="cmdl">stcode --daemonless</code>
+        <h3>From anywhere</h3>
+        <p>The UI alone, attached to a daemon elsewhere. It never quietly runs the work on your laptop; <code>/connect</code> moves it.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="bets" class="xm">
+    <div class="pad" style="padding-bottom:48px">
+      <span class="label">Four bets</span>
+      <h2>Each one is traceable to <em>a measurement.</em></h2>
+      <p class="sub">We are not competing on polish. These are the things other coding agents don't do.</p>
+    </div>
+    <div class="bets">
+      <div class="bet">
+        <div class="top"><span class="num">01</span>
+          <svg class="ico" viewBox="0 0 44 44" aria-hidden="true"><rect x="6" y="8" width="22" height="28" rx="3"/><path d="M11 16h12M11 21h9M11 26h11"/><path class="hl" d="M26 20l12 0 0 16-12 0z"/><path d="M30 26l-2 2 2 2M34 26l2 2-2 2"/></svg></div>
+        <h3>MCP tools are code, not tool definitions</h3>
+        <p>Other agents ship MCP schemas in the prompt prefix every turn, forever. stcode writes each tool to <code>.stcode/mcp_servers/&lt;server&gt;/&lt;tool&gt;.py</code> and lets the agent grep and import what it needs from a REPL.</p>
+        <div class="metric"><strong>9,869 → 0</strong> chars per turn</div><br>
+        <a class="more" href="docs/guide/mcp/">MCP servers →</a>
+      </div>
+      <div class="bet">
+        <div class="top"><span class="num">02</span>
+          <svg class="ico" viewBox="0 0 44 44" aria-hidden="true"><path d="M4 32 L12 24 L18 28 L26 14 L32 20 L40 10"/><circle class="hl" cx="26" cy="14" r="4"/><path d="M4 38h36"/></svg></div>
+        <h3>A supervisor watches the trajectory</h3>
+        <p>The session log already is the trajectory, so the supervisor is just a reader. Counting heuristics run for free — the same call three times, half the calls failing, no file written in N turns — and only a hit spends a cheap model call.</p>
+        <div class="metric"><strong>0</strong> tokens while things go well</div><br>
+        <a class="more" href="docs/getting-started/configuration/">Configure it →</a>
+      </div>
+      <div class="bet">
+        <div class="top"><span class="num">03</span>
+          <svg class="ico" viewBox="0 0 44 44" aria-hidden="true"><path d="M5 14h13l3 4h18v18H5z"/><path class="hl" d="M16 22h14v10H16z"/><path d="M16 22l7 5 7-5"/></svg></div>
+        <h3>Agent-to-agent messaging has no protocol</h3>
+        <p>Containers share a volume, so a message is a file. No registry, no routing table, no service discovery, no socket mesh. Messages carry paths, not payloads — so team cost does not grow with N².</p>
+        <div class="metric"><strong>1</strong> directory per role</div><br>
+        <a class="more" href="docs/teams/workflow/">How a team works →</a>
+      </div>
+      <div class="bet">
+        <div class="top"><span class="num">04</span>
+          <svg class="ico" viewBox="0 0 44 44" aria-hidden="true"><path d="M4 16l18-9 18 9v17l-18 9-18-9z"/><path d="M4 16l18 9 18-9M22 25v17"/><circle class="hl" cx="22" cy="17" r="4"/></svg></div>
+        <h3>Containerization is not a rewrite</h3>
+        <p>The daemon holds the agent; the TUI is one client of it. <code>transport = "tcp"</code> is configuration. And <code>full-auto</code> without an approver refuses to start outside a container — in code, with no override flag.</p>
+        <div class="metric"><strong>1</strong> config key to move it</div><br>
+        <a class="more" href="docs/guide/shapes/">The three shapes →</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="team" class="pad xm">
+    <div class="team-grid">
+      <div>
+        <span class="label">Team mode</span>
+        <h2>One agent, one role, <em>one container.</em></h2>
+        <p class="sub">A BA, a frontend dev, a backend dev and devops, each a daemon in its own container. They share a <code>/team</code> volume with a bare git repo on it. Each role clones and pushes a branch; devops merges. You dispatch per role — there is no lead agent.</p>
+        <ul class="checks">
+          <li><b>An agent is a config file.</b> Mount one <code>.toml</code> — prompt, model, tools — and that container is that role.</li>
+          <li><b>Attach and steer mid-run.</b> A message you send lands at the next tool boundary, not the next turn.</li>
+          <li><b>One role, one merge boundary.</b> If two agents need the same file, the roles are split wrong.</li>
+        </ul>
+      </div>
+      <div class="tree"><span class="h">/team</span>
+├── <span class="h">repo.git</span>              <span class="m"># bare repo — no creds, no network</span>
+├── <span class="h">inbox/</span>
+│   ├── ba/
+│   ├── backend-dev/
+│   │   └── 01JB8…json      <span class="m"># {"from":"ba","refs":["specs/orders.md"]}</span>
+│   ├── frontend-dev/
+│   └── devops/
+└── <span class="h">specs/</span>
+    └── orders.md         <span class="m"># the content lives here, not in the message</span>
+
+<span class="m">$ docker run -e STCODE_SANDBOX=1 -e STCODE_TEAM=1 \
+    -v team-volume:/team \
+    -v ./backend-dev.toml:/config/config.toml:ro \
+    stcode --headless --mode full-auto</span></div>
+    </div>
+  </section>
+
+  <section id="compare" class="pad xm">
+    <span class="label">Honest comparison</span>
+    <h2>Behind on polish. <em>Ahead</em> on the middle rows.</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th></th><th>Claude Code</th><th>Cline / Kilo</th><th class="us">stcode</th></tr></thead>
+        <tbody>
+          <tr><td>Tool quality (read / edit / grep / bash)</td><td>excellent</td><td>good</td><td class="us">comparable</td></tr>
+          <tr><td>MCP cost</td><td>tool defs per turn</td><td>tool defs per turn</td><td class="us">as code — 9.9k → 0 chars/turn</td></tr>
+          <tr><td>Runs headless in a container</td><td>partial</td><td>no</td><td class="us">core design</td></tr>
+          <tr><td>Multi-agent team across containers</td><td>no</td><td>no</td><td class="us">yes</td></tr>
+          <tr><td>Stagnation detection</td><td>no</td><td>no</td><td class="us">yes</td></tr>
+          <tr><td>OpenTelemetry export</td><td>no</td><td>no</td><td class="us">yes, off by default</td></tr>
+          <tr><td>Maturity, polish, ecosystem</td><td><b>far ahead</b></td><td>ahead</td><td class="us">behind, and will stay behind</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Team mode's ~20 evaluation tasks are written and not yet run. Multi-agent costs more tokens, not fewer; whether it earns them is still an open question, and we say so.</p>
+  </section>
+
+  <section class="pad xm">
+    <span class="label">Hard rules</span>
+    <h2>Each exists because <em>breaking it</em> failed once.</h2>
+    <div class="rules">
+      <div class="rule"><span class="i">01</span><p><b>Tool output is elided, never LLM-summarised.</b> The head says what ran, the tail says how it went, the full value stays reachable.</p></div>
+      <div class="rule"><span class="i">02</span><p><b>Sub-agents cannot spawn sub-agents.</b> Unbounded recursion with no budget is a fork bomb.</p></div>
+      <div class="rule"><span class="i">03</span><p><b>Sessions are append-only JSONL.</b> <code>cp session.jsonl</code> is the branching feature.</p></div>
+      <div class="rule"><span class="i">04</span><p><b><code>full-auto</code> without an approver runs only in a container.</b> The daemon refuses otherwise.</p></div>
+      <div class="rule"><span class="i">05</span><p><b>The agent never edits its own harness.</b> A self-refining agent once promoted cheating into a skill.</p></div>
+      <div class="rule"><span class="i">06</span><p><b>Every LLM call lands in the session as usage.</b> One place for cost, and the trace exports from it.</p></div>
+    </div>
+  </section>
+
+  <section class="closing xm">
+    <span class="label">Get started</span>
+    <h2>Install it. <em>Type.</em></h2>
+    <p class="sub" style="margin-left:auto;margin-right:auto">Python 3.10+. Bring an Anthropic, OpenAI or Gemini key — the first run asks for one.</p>
+    <div class="install" data-install>
+      <div class="tabs" role="tablist" aria-label="Install with">
+        <button role="tab" aria-selected="true" data-tab="uv">uv tool</button>
+        <button role="tab" aria-selected="false" data-tab="uvx">uvx</button>
+        <button role="tab" aria-selected="false" data-tab="pip">pip</button>
+      </div>
+      <div class="cmd">
+        <code data-cmd>uv tool install stcode</code>
+        <button class="copy" type="button">copy</button>
+      </div>
+      <div class="hint" data-hint>Installs <code>stcode</code> on your PATH in its own environment.</div>
+    </div>
+    <div class="cta-row">
+      <a class="btn primary" href="docs/getting-started/installation/">Installation guide</a>
+      <a class="btn" href="https://github.com/Ming-doan/stcode">Star on GitHub</a>
+    </div>
+  </section>
+
+  <footer class="xm">
+    <div class="pad">
+      <span class="mono">stcode</span>
+      <a href="docs/">Docs</a>
+      <a href="docs/sdk/embedding/">SDK</a>
+      <a href="docs/sdk/daemon-protocol/">Daemon protocol</a>
+      <a href="https://pypi.org/project/stcode/">PyPI</a>
+      <a href="https://github.com/Ming-doan/stcode">GitHub</a>
+      <span class="sp">Apache-2.0</span>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+  // Install tabs. Both boxes on the page move together.
+  var INSTALL = {
+    uv:  { cmd: "uv tool install stcode", hint: "Installs <code>stcode</code> on your PATH in its own environment." },
+    uvx: { cmd: "uvx stcode",             hint: "Runs the latest release without installing anything." },
+    pip: { cmd: "pip install stcode",     hint: "Into the active environment. Python 3.10+." }
+  };
+  function selectTab(name) {
+    document.querySelectorAll("[data-install]").forEach(function (box) {
+      box.querySelectorAll("[data-tab]").forEach(function (b) { b.setAttribute("aria-selected", String(b.dataset.tab === name)); });
+      box.querySelector("[data-cmd]").textContent = INSTALL[name].cmd;
+      box.querySelector("[data-hint]").innerHTML = INSTALL[name].hint;
+    });
+  }
+  document.querySelectorAll("[data-tab]").forEach(function (b) {
+    b.addEventListener("click", function () { selectTab(b.dataset.tab); });
+  });
+  document.querySelectorAll("[data-install] .copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var text = btn.parentNode.querySelector("[data-cmd]").textContent;
+      if (!navigator.clipboard) return;
+      navigator.clipboard.writeText(text).then(function () {
+        btn.textContent = "copied";
+        setTimeout(function () { btn.textContent = "copy"; }, 1400);
+      }, function () {});
+    });
+  });
+
+  // The TUI mock: reveal one transcript step at a time, run the bash call, stream the
+  // answer, hold, and start over. Reduced motion gets the finished transcript.
+  (function () {
+    var steps = Array.prototype.slice.call(document.querySelectorAll("#tui .step"));
+    var still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var timers = [];
+    function later(fn, ms) { timers.push(setTimeout(fn, ms)); }
+
+    function finish(step) {
+      if (step.hasAttribute("data-run")) {
+        step.classList.remove("run");
+        var r = step.querySelector("[data-done]");
+        r.classList.remove("spin");
+        r.innerHTML = "<em>" + r.dataset.done + "</em>";
+      }
+      if (step.dataset.stream) step.textContent = step.dataset.stream;
+    }
+    function reset() {
+      timers.forEach(clearTimeout); timers = [];
+      steps.forEach(function (s) {
+        s.classList.remove("on");
+        if (s.hasAttribute("data-run")) {
+          s.classList.add("run");
+          var r = s.querySelector("[data-done]");
+          r.textContent = "running"; r.classList.add("spin");
+        }
+        if (s.dataset.stream) s.textContent = "";
+      });
+    }
+
+    if (still) { steps.forEach(function (s) { s.classList.add("on"); finish(s); }); return; }
+
+    function play() {
+      reset();
+      var t = 400;
+      steps.forEach(function (s) {
+        later(function () { s.classList.add("on"); }, t);
+        if (s.hasAttribute("data-run")) {
+          t += 2200;
+          later(function () { finish(s); }, t);
+          t += 500;
+        } else if (s.dataset.stream) {
+          var text = s.dataset.stream, i = 0;
+          var cur = document.createElement("span"); cur.className = "cur";
+          later(function tick() {
+            i = Math.min(text.length, i + 2);
+            s.textContent = text.slice(0, i); s.appendChild(cur);
+            if (i < text.length) timers.push(setTimeout(tick, 28));
+          }, t + 100);
+          t += 100 + Math.ceil(text.length / 2) * 28 + 4200;
+        } else {
+          t += s.classList.contains("t-box") || s.classList.contains("t-sub") ? 900 : 650;
+        }
+      });
+      later(play, t);
+    }
+    play();
+  })();
+</script>
+</body>
+</html>
