@@ -28,7 +28,7 @@ from stcode.core.providers import ProviderConfig, RouteConfig
 
 def test_the_shipped_default_config_parses() -> None:
     """It is written by hand, in a string, and nothing else would notice a typo."""
-    import tomllib
+    from stcode.core.common.compat import tomllib
 
     GatewayConfig.model_validate(tomllib.loads(DEFAULT_CONFIG_TOML))
 

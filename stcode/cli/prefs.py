@@ -17,7 +17,7 @@ folders you trust.
 
 from __future__ import annotations
 
-import tomllib
+from stcode.core.common.compat import tomllib
 from pathlib import Path
 from typing import Literal
 

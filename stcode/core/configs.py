@@ -17,7 +17,7 @@ The env var wins when set. Files written here are chmod 0600 because of that lit
 
 from __future__ import annotations
 
-import tomllib
+from stcode.core.common.compat import tomllib
 from pathlib import Path
 from typing import Any, Literal
 

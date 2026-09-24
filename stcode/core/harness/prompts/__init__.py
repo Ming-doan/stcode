@@ -20,7 +20,7 @@ Fixed sections first, then the session's variable state — see `sections.py` on
 from __future__ import annotations
 
 import os
-import tomllib
+from stcode.core.common.compat import tomllib
 from pathlib import Path
 from typing import Literal, Sequence
 

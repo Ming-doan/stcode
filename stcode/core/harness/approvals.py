@@ -11,7 +11,7 @@ whether that class runs unattended under the current mode.
 
 from __future__ import annotations
 
-from enum import StrEnum
+from stcode.core.common.compat import StrEnum
 from typing import Literal
 
 ApprovalMode = Literal["plan", "suggest", "auto-edit", "full-auto"]

@@ -120,7 +120,7 @@ class Harnessed:
 
 def _merge(settings: GatewayConfig, path: Path) -> GatewayConfig:
     """The test config file, with the socket and session directory of this run."""
-    import tomllib
+    from stcode.core.common.compat import tomllib
 
     with path.open("rb") as handle:
         data = tomllib.load(handle)
