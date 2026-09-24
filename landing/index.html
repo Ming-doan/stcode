@@ -8,13 +8,14 @@
 <meta property="og:title" content="stcode — Beyond harness">
 <meta property="og:description" content="A coding agent that lives in a daemon, and a UI that is a client of it.">
 <meta property="og:type" content="website">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23171714'/%3E%3Cpath d='M9 11l5 5-5 5' stroke='%23fbff81' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M16 22h7' stroke='%23f6f6f3' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23171714'/%3E%3Cpath d='M9 11l5 5-5 5' stroke='%2378b032' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M16 22h7' stroke='%23f6f6f3' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
 <style>
   /* Tokens follow langfuse.com: warm paper, thin structural lines, one yellow CTA. */
   :root {
+    /* Surfaces & Typography */
     --bg: #f6f6f3;
     --surface-1: #edede8;
     --card: #fbfbf9;
@@ -24,14 +25,21 @@
     --line: #cfcfc9;
     --dash: #bebeb6;
     --mark: #9d9d95;
-    --cta: #fbff81;
-    --cta-text: #1a1a17;
-    --cta-line: #b8b6a0;
+
+    /* Primary Brand Tokens (Light Mode) */
+    --primary: #78b032;
+    --primary-hover: #6a9c2b;
+    --cta: #78b032;
+    --cta-text: #0e1605; /* High-contrast dark olive to pass WCAG on #78b032 */
+    --cta-line: #5c8824;
+
+    /* Fonts & Layout */
     --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     --serif: "Instrument Serif", Georgia, serif;
     --max: 1120px;
-    /* The TUI mock is always dark, like the terminal it imitates. */
+
+    /* Fixed Terminal/TUI Tokens */
     --t-bg: #121210;
     --t-fg: #e6e6de;
     --t-dim: #8a8a80;
@@ -40,8 +48,10 @@
     --t-red: #e5484d;
     --t-blue: #6ab8cc;
     --t-orange: #e8935a;
+
     color-scheme: light;
   }
+
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #171714;
@@ -53,8 +63,14 @@
       --line: #2c2c29;
       --dash: #3a3a35;
       --mark: #5a5a54;
-      --cta-text: #171714;
-      --cta-line: #404039;
+
+      /* Primary Brand Tokens (Dark Mode) */
+      --primary: #8cc445;      /* Lifted tint for glow & readable contrast on #171714 */
+      --primary-hover: #9cd455;
+      --cta: #8cc445;
+      --cta-text: #0e1605;      /* Crisp dark text over luminous button background */
+      --cta-line: #6c9c2e;
+
       --t-bg: #0e0e0c;
       color-scheme: dark;
     }
@@ -310,7 +326,7 @@
 <nav class="top">
   <div class="frame">
     <a class="brand" href="./">
-      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="currentColor"/><path d="M9 11l5 5-5 5" stroke="#fbff81" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M16 22h7" stroke="var(--bg)" stroke-width="2.6" stroke-linecap="round"/></svg>
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="currentColor"/><path d="M9 11l5 5-5 5" stroke="#78b032" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M16 22h7" stroke="var(--bg)" stroke-width="2.6" stroke-linecap="round"/></svg>
       stcode
     </a>
     <div class="navlinks">
