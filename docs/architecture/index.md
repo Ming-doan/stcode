@@ -13,7 +13,7 @@ arrows point.
 | [mcp.md](mcp.md) | MCP servers as *code* rather than as tool definitions |
 | [supervisor.md](supervisor.md) | Stagnation detection at (almost) zero token cost |
 | [team.md](team.md) | Containers, roles, the shared volume — and the evaluation set |
-| [tracing.md](tracing.md) | Exporting the trajectory as OpenTelemetry spans |
+| [tracing.md](tracing.md) | Exporting the trajectory via native HTTP APIs |
 | [configuration.md](configuration.md) | Every section of `config.toml`, and what reads it |
 
 ---
@@ -120,7 +120,7 @@ stcode/
       truncate.py       elide() and the 8192 cap
       ids.py            new_id() — the monotonic ULID, for sessions and messages
       paths.py          where config lives; needed on both sides of configs↔harness
-      trace.py          OpenTelemetry export, off by default
+      trace.py          HTTP tracing export, off by default
     providers/          adapters + gateway
     harness/            the tools, prompts and skills an agent works with
       tools/            base.py (@tool, Runtime), schema.py, registry.py, and the tools

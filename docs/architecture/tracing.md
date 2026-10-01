@@ -1,94 +1,47 @@
 # Tracing
 
-`core/common/trace.py`. The trajectory, in a shape an observability platform already
-understands. **Off by default.**
+`core/common/trace.py` exports the existing agent instrumentation using native HTTP
+JSON APIs. The session JSONL remains the trajectory; each usage record's `trace_id`
+links it to the exported trace. See [configuration and API limits](../guide/tracing.md).
 
-The session JSONL is the trajectory and stays the trajectory — there is no second logger.
-This is an *export*: the same turns, model calls and tool invocations, emitted as
-OpenTelemetry spans while they happen.
+## Design
 
-## Turning it on
+`configure(config.trace)` resolves the selected provider's URL and credentials from
+process environment variables, falling back to TOML values. It never reads `.env`.
+Configuration is process-wide and idempotent until shutdown. Missing Langfuse keys or
+invalid URLs warn and leave tracing off. Disabled tracing starts no worker.
 
-```bash
-uv sync --extra otel
-```
+A context variable tracks the current span and propagates parentage through asyncio
+tasks. IDs are random hex strings (32 characters for traces, 16 for spans). A turn is
+a root span; model and tool spans inherit its trace ID and session ID. Each span
+captures UTC start/end times, attributes and error status. Content is opt-in.
 
-```toml
-[trace]
-enabled  = true
-endpoint = "https://cloud.langfuse.com/api/public/otel/v1/traces"
-headers  = { Authorization = "Basic <base64 of public:secret>" }
-service_name = "stcode"
-content  = false
-```
+Completed spans enter a bounded queue. A background thread batches HTTP requests
+through the existing `httpx` dependency. It retries transport errors, HTTP 429 and
+5xx responses, with a bounded timeout and backoff. Langfuse's HTTP 207 per-event
+errors and Phoenix's queued count are checked rather than treating every 2xx as success.
+Failures warn without propagating to the agent. `flush()` waits for a queue barrier;
+`shutdown()` drains the queue and closes the HTTP client with a bounded wait.
+Async callers use `asyncio.to_thread` for these blocking lifecycle operations.
 
-Leave `endpoint` and `headers` empty to configure it the way every platform's own
-documentation does, through `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS`.
+## Wire mapping
 
-| Platform | Endpoint |
-| --- | --- |
-| Langfuse | `https://cloud.langfuse.com/api/public/otel/v1/traces` (Basic auth from the project keys; `us.` and `jp.` for other regions) |
-| LangSmith | `https://api.smith.langchain.com/otel/v1/traces` (`x-api-key`) |
-| Phoenix / Jaeger / a Collector | wherever it listens for OTLP-HTTP |
-
-Enabled without the extra installed, it logs one warning and stays off. A session that was
-about to do real work should not die because the tracer is missing.
-
-## The spans
-
-| Span | Kind | Key attributes |
+| Internal operation | Langfuse | Phoenix |
 | --- | --- | --- |
-| `agent.turn <name>` | internal | `gen_ai.agent.name`, `gen_ai.conversation.id` (the session id), `stcode.role`, `stcode.approval_mode` |
-| `chat <model>` | client | `gen_ai.operation.name=chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.request.max_tokens`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read_input_tokens`, `gen_ai.response.finish_reasons`, `stcode.difficulty` |
-| `execute_tool <name>` | internal | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `stcode.agent`, `stcode.tool.ok` |
+| Agent turn | trace-create plus root span-create | AGENT span |
+| Model call | generation-create, model, usageDetails | LLM span, llm.model_name, llm.token_count.* |
+| Tool call | span-create | TOOL span |
+| Other | span-create | CHAIN span |
 
-One trace is one turn. Model calls and tool calls nest inside it — including tools handed
-to `asyncio.gather`, because a task copies the current context when it is created.
+Langfuse events carry unique event IDs and ISO timestamps; observations carry
+traceId, parentObservationId, startTime and endTime. Root events carry sessionId.
+Phoenix sends `data` containing context, parent_id, span_kind, status_code,
+start_time/end_time and OpenInference attributes. No OTLP envelopes are emitted.
 
-**The names and attributes are the GenAI semantic convention, not ours.** A `chat <model>`
-span with `gen_ai.*` attributes shows up in Langfuse, LangSmith and Phoenix as a
-*generation*, with token counts and therefore cost. The same information under invented
-names shows up as an anonymous box.
+## Verification
 
-## Two decisions
-
-**OTLP, not a vendor SDK.** Every one of those platforms ingests OTLP over HTTP; picking
-one platform's client would pick the platform. The one dependency is the standard
-exporter.
-
-**`content` is a separate, louder switch.** The *shape* of a run — how many turns, which
-tools, how many tokens — is not sensitive. The prompts and file contents inside it usually
-are. Turning on tracing must not turn on sending your code to a third party.
-
-## Joining a span back to the transcript
-
-Every `usage` record carries the `trace_id` of the call that produced it, when tracing is
-on:
-
-```jsonl
-{"type":"usage","difficulty":"high","stop_reason":"tool_use","trace_id":"4bf92f…","input_tokens":12043,"output_tokens":881}
-```
-
-so a line in the JSONL and a span in Langfuse are the same moment, reachable from either
-end. With tracing off the field is absent and the session stands alone exactly as before.
-
-## Cost when it is off
-
-Nothing imports OpenTelemetry. `span()` yields a shared no-op recorder, `current_ids()`
-returns two empty strings, and `configure()` returns `False` without touching the
-filesystem or the network. The instrumented call sites are a `None` check each.
-
-## Using it from your own code
-
-```py
-from stcode.core.common import trace
-
-with trace.span("my.operation", attributes={"thing": "value"}) as recorder:
-    recorder.set(**{"gen_ai.usage.input_tokens": 1200})
-```
-
-`configure()` is idempotent and is called by `Agent.create`, so the first agent built in a
-process starts the exporter and every later one finds it running. `trace.shutdown()`
-flushes what the batch processor is holding; the daemon calls it last on the way out,
-because without it the final turn of a short run — the one you were watching — dies in a
-buffer.
+Contract tests inspect outgoing JSON and authentication, nested/concurrent parentage,
+content opt-in, errors, retries, shutdown, environment precedence and secret redaction.
+An agent integration test exercises the real gateway and tool path with a deterministic
+model double. Live smoke tests explicitly opt into credentials and send a small trace,
+then an actual agent request; record trace IDs for dashboard acceptance.

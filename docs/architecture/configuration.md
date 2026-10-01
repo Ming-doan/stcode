@@ -1,6 +1,6 @@
 # Configuration
 
-`core/configs.py` owns *how the file is structured* and what reads it — TOML, `.env`,
+`core/configs.py` owns *how the file is structured* and what reads it — TOML,
 every `[section]` model — and nothing else in the codebase parses TOML.
 
 *Where* it lives is `core/common/paths.py`. That split is not tidiness: `core/configs.py`
@@ -53,8 +53,8 @@ which is right for a hosted API. Set it to `1` for Ollama or llama.cpp: five par
 `task` calls are otherwise five simultaneous requests to a server holding one model on
 one GPU, and it drops the ones that waited too long. → [providers.md](providers.md)
 
-`.env` files are loaded most-specific first — `./.env`, then `~/.stcode/.env` — and real
-process environment variables beat both.
+Credentials come from TOML or process environment variables. The application never
+loads `.env` files. Nonempty environment variables take precedence.
 
 ## Every section
 
@@ -157,8 +157,8 @@ polling and a `/team` write scope on a laptop that has neither.
 
 ### `[trace]`
 
-`enabled`, `endpoint`, `headers`, `service_name`, `content`. Off by default; needs the
-`otel` extra. See [tracing.md](tracing.md).
+`enabled`, `provider` (`langfuse` or `phoenix`), `url`, `public_key`, `secret_key`,
+`api_key`, `project_name`, `service_name`, `content`. Off by default; native HTTP JSON. See [tracing.md](tracing.md).
 
 ## Command-line overrides
 
@@ -186,4 +186,5 @@ container, would become the transport every later bare `stcode` binds.
 | `STCODE_SANDBOX=1` | this is a contained environment; unlocks `full-auto` |
 | `STCODE_MCP_CONFIG` | an `.mcp.json` somewhere other than the workspace |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `TAVILY_API_KEY` | the conventional names |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | used when `[trace]` leaves them empty |
+| `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | Langfuse tracing URL and credentials |
+| `PHOENIX_COLLECTOR_ENDPOINT`, `PHOENIX_API_KEY`, `PHOENIX_PROJECT_NAME` | Phoenix tracing URL, key and project |

@@ -30,16 +30,13 @@ uv sync
 uv run stcode
 ```
 
-### Optional extras
+### Tracing
 
-```bash
-uv tool install 'stcode[otel]'    # OpenTelemetry export — see Tracing
-uv sync --extra otel              # the same, in a checkout
-uv sync --group docs              # build this documentation site
-```
+Tracing uses the included HTTP client; no extra installation is needed.
 
-Tracing is an extra rather than a dependency on purpose: a coding session that is not
-being watched should not pay for a tracer. → [Tracing](../guide/tracing.md)
+Tracing is off by default and starts its HTTP worker only when enabled. → [Tracing](../guide/tracing.md)
+
+Build the documentation with `uv sync --group docs` and `uv run mkdocs build`.
 
 ## Credentials
 

@@ -78,32 +78,3 @@ def test_tracing_is_a_no_op_until_configured() -> None:
     with trace.span("chat test", kind="client", attributes={"gen_ai.request.model": "x"}) as s:
         s.set(**{"gen_ai.usage.input_tokens": 12})
     assert trace.current_ids() == ("", "")
-
-
-def test_configure_without_the_extra_says_so_and_stays_off(monkeypatch, caplog) -> None:
-    """Enabling tracing without `stcode[otel]` must not take down a session that was
-    about to do real work."""
-    import builtins
-
-    from stcode.core.common import trace
-
-    real_import = builtins.__import__
-
-    def no_otel(name: str, *args, **kwargs):
-        if name.startswith("opentelemetry"):
-            raise ImportError(name)
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", no_otel)
-
-    class Settings:
-        enabled = True
-        endpoint = ""
-        headers: dict[str, str] = {}
-        service_name = "stcode"
-        content = False
-
-    with caplog.at_level("WARNING", logger="stcode.trace"):
-        assert trace.configure(Settings()) is False
-    assert "OpenTelemetry is not installed" in caplog.text
-    assert trace.enabled() is False

@@ -71,7 +71,7 @@ is `strict`, so a broken internal link or a page missing from `nav` fails the bu
 | [mcp.md](docs/architecture/mcp.md) | MCP servers as *code* rather than as tool definitions |
 | [supervisor.md](docs/architecture/supervisor.md) | Stagnation detection at (almost) zero token cost |
 | [team.md](docs/architecture/team.md) | Containers, roles, the shared volume, git integration — and the evaluation set |
-| [tracing.md](docs/architecture/tracing.md) | Exporting the trajectory as OpenTelemetry spans |
+| [tracing.md](docs/architecture/tracing.md) | Exporting the trajectory via native HTTP APIs |
 | [configuration.md](docs/architecture/configuration.md) | Every section of `config.toml`, and what reads it |
 | [README.md](README.md) | The repository's front door: install, run, the commands |
 
@@ -115,7 +115,7 @@ same JSONL framing. Transport (`unix` / `tcp`) is configuration, not architectur
 | Runs headless in a container | partial | no | core design |
 | Multi-agent team across containers | no | no | yes — but see §7 |
 | Stagnation detection | no | no | yes |
-| Observability export (OTel) | no | no | yes, off by default |
+| Observability export (HTTP) | no | no | yes, off by default |
 | Maturity, polish, ecosystem | **far ahead** | ahead | behind, and will stay behind |
 
 We are not competing on polish. We are betting on the rows in the middle.
@@ -183,7 +183,7 @@ Seven. Each exists because violating it produced a specific, known failure.
 | Search | `ripgrep` (pip wheel), `fd` (optional) | The wheel drops `rg` next to the interpreter, so `grep` works on a fresh checkout |
 | Tool schemas | `docstring-parser` | Signature + `Args:` → JSON Schema, described once |
 | MCP | `mcp` (official SDK) | We adapt it; we never reimplement the protocol |
-| Tracing | `opentelemetry-sdk` + OTLP-HTTP, **optional extra** | Vendor-neutral; Langfuse/LangSmith/Phoenix all ingest it |
+| Tracing | Native HTTP JSON with `httpx` | Langfuse and Phoenix; no tracing SDK |
 | Sandbox | Docker | Team mode; also what makes `full-auto` legal (rule 5) |
 | Packaging | `uv` | |
 

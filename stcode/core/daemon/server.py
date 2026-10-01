@@ -198,7 +198,7 @@ class Daemon:
         # Last, and only here: spans are batched, so without a flush the final turn of
         # a short run — the one you were watching — dies in a buffer. A no-op when
         # tracing was never switched on.
-        trace.shutdown()
+        await asyncio.to_thread(trace.shutdown)
 
     async def __aenter__(self) -> "Daemon":
         await self.start()

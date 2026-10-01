@@ -344,10 +344,16 @@ class Harness:
                 "stcode.agent": self.agent_name,
             },
         ) as recorder:
+            if trace.records_content():
+                recorder.set(stcode__input=arguments)
             result = await self.registry[name].invoke(
                 arguments, self.runtime(), tool_call_id=tool_call_id
             )
             recorder.set(**{"stcode.tool.ok": not result.is_error})
+            if trace.records_content():
+                recorder.set(stcode__output=result.content)
+            if result.is_error:
+                recorder.fail(RuntimeError(result.content))
             await self._share_output(result)
             return result
 

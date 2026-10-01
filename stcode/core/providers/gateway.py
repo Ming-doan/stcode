@@ -36,6 +36,8 @@ from stcode.core.providers.types import (
     MessageStop,
     ReasoningEffort,
     StreamEvent,
+    TextDelta,
+    ToolCallEnd,
     ToolDefinition,
 )
 
@@ -343,6 +345,13 @@ class LLMGateway:
         # `aclosing`, so abandoning a stream still releases this.
         async with self._limiter(provider_name):
             with trace.span(f"chat {model_name}", kind="client", attributes=attributes) as recorder:
+                capture = trace.records_content()
+                output: list[dict[str, Any]] = []
+                if capture:
+                    inputs = [message.model_dump(mode="json") for message in messages]
+                    if system:
+                        inputs.insert(0, {"role": "system", "content": system})
+                    recorder.set(**{"gen_ai.input.messages": inputs})
                 async for event in self._stream_with_retry(
                     provider_instance,
                     messages,
@@ -357,7 +366,11 @@ class LLMGateway:
                     stop=stop,
                     parallel_tool_calls=parallel_tool_calls,
                 ):
+                    if capture and isinstance(event, (TextDelta, ToolCallEnd)):
+                        output.append(event.model_dump(mode="json"))
                     yield event
+                if capture:
+                    recorder.set(**{"gen_ai.output.messages": output})
 
     async def _stream_with_retry(
         self,

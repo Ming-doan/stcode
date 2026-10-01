@@ -1,7 +1,7 @@
 """
 Config — locate, load, validate, save, and scaffold the stcode config.
 
-Owns *how the file* is structured and what reads it: TOML, `.env`, the `[section]`
+Owns *how the file* is structured and what reads it: TOML and the `[section]`
 models. `GatewayConfig` is that on-disk shape, composing `ProviderConfig`/`RouteConfig`/
 `RetryConfig` from `core/providers/gateway.py` rather than redefining them.
 
@@ -188,25 +188,15 @@ class MCPConfig(BaseModel):
 
 
 class TraceConfig(BaseModel):
-    """Export the trajectory as OpenTelemetry spans, for an observability platform.
-
-    Off by default, and the dependency is an extra (`uv sync --extra otel`): a coding
-    session that is not being watched should not pay for a tracer, and enabling it
-    without the extra installed warns rather than refusing to start.
-
-    OTLP over HTTP, with `gen_ai.*` semantic conventions, so Langfuse, LangSmith,
-    Phoenix or a plain Collector all read it — including the token counts, which those
-    platforms turn into cost. Leave `endpoint` and `headers` empty to configure it the
-    way every platform's own docs do, through `OTEL_EXPORTER_OTLP_ENDPOINT` and
-    `OTEL_EXPORTER_OTLP_HEADERS`.
-
-    `content` is the separate, louder switch: span *shapes* are not sensitive, prompts
-    and file contents usually are.
-    """
+    """Native HTTP observation provider. Values come from TOML or process environment."""
 
     enabled: bool = False
-    endpoint: str = ""
-    headers: dict[str, str] = Field(default_factory=dict)
+    provider: Literal["langfuse", "phoenix"] = "langfuse"
+    url: str = ""
+    public_key: str = ""
+    secret_key: str = ""
+    api_key: str = ""
+    project_name: str = "default"
     service_name: str = "stcode"
     content: bool = False
 
@@ -236,8 +226,7 @@ class GatewayConfig(BaseModel):
 
 DEFAULT_CONFIG_TOML = """\
 # stcode config. Prefer keeping API keys in the environment: set `api_key_env` to the
-# name of a variable and put the actual secret in your shell or a .env file (see
-# stcode/core/configs.py:load_dotenv_files for where those are picked up from). A
+# name of a variable and export the actual secret in your shell. No .env is loaded. A
 # literal `api_key` is also honoured — the setup screen writes one there, and the file
 # is chmod 0600 for that reason.
 
@@ -314,14 +303,12 @@ every = 8
 [mcp]
 expose = "code"
 
-# OpenTelemetry export, for Langfuse / LangSmith / Phoenix / a Collector. Needs the
-# `otel` extra: uv sync --extra otel. Leave endpoint and headers empty to use the
-# standard OTEL_EXPORTER_OTLP_* environment variables instead.
+# Native HTTP tracing. Set credentials in config or the process environment.
 # [trace]
-# enabled  = true
-# endpoint = "https://cloud.langfuse.com/api/public/otel/v1/traces"
-# headers  = { Authorization = "Basic <base64 of public:secret>" }
-# content  = false   # prompts and file contents stay out of spans unless this is true
+# enabled = true
+# provider = "langfuse"  # or "phoenix"
+# url = "https://cloud.langfuse.com"
+# content = false
 
 # Where the daemon listens. `unix` on your own machine, `tcp` inside a container.
 [daemon]
@@ -353,21 +340,10 @@ def ensure_config_exists(path: Path | None = None) -> Path:
     return path
 
 
-def load_dotenv_files() -> None:
-    """Load credentials from .env, most-specific first: `./.env`, then `~/.stcode/.env`.
-    First value found wins, and real process env vars beat both."""
-    from dotenv import load_dotenv
-
-    load_dotenv(Path.cwd() / ".env", override=False)
-    load_dotenv(config_dir() / ".env", override=False)
-
-
 def load_config(path: Path | None = None, *, create_if_missing: bool = False) -> GatewayConfig:
     path = path or default_config_path()
     if create_if_missing:
         path = ensure_config_exists(path)
-
-    load_dotenv_files()
 
     if not path.exists():
         raise FileNotFoundError(
@@ -473,6 +449,9 @@ def redacted(config: GatewayConfig) -> dict[str, Any]:
         for entry in data.get(section, {}).values():
             if entry.get("api_key"):
                 entry["api_key"] = REDACTED
+    for key in ("api_key", "secret_key", "public_key"):
+        if data["trace"].get(key):
+            data["trace"][key] = REDACTED
     return data
 
 

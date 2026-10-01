@@ -97,3 +97,15 @@ socket = "~/.stcode/daemon.sock"
 # role       = "backend-dev"
 # shared_dir = "/team"
 # remote     = "/team/repo.git"   # a bare repo on the volume: no credential, no network
+
+# Native HTTP tracing. Environment values override these TOML settings; .env is not loaded.
+# → docs/guide/tracing.md (includes Langfuse API deprecation limits)
+# [trace]
+# enabled = true
+# provider = "langfuse"       # or "phoenix"
+# url = "https://cloud.langfuse.com"  # Phoenix example: http://localhost:6006
+# public_key = "pk-lf-..."    # or LANGFUSE_PUBLIC_KEY
+# secret_key = "sk-lf-..."    # or LANGFUSE_SECRET_KEY
+# api_key = "..."            # Phoenix only; or PHOENIX_API_KEY
+# project_name = "default"   # existing Phoenix project; or PHOENIX_PROJECT_NAME
+# content = false            # true includes prompts, replies and tool contents

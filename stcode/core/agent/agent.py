@@ -367,11 +367,17 @@ class Agent:
                 "stcode.role": self.session.meta().get("role", ""),
                 "stcode.approval_mode": self.harness.approval_mode,
             },
-        ):
+        ) as recorder:
+            if trace.records_content():
+                recorder.set(stcode__input=text)
             # `aclosing`, like every other level: returning early from `run()` has to
             # reach the `finally` below, or the agent stays `busy` forever.
             async with aclosing(self._turn_body(text)) as body:
                 async for event in body:
+                    if isinstance(event, TurnFinished) and trace.records_content():
+                        recorder.set(stcode__output=event.text)
+                    elif isinstance(event, AgentFailed):
+                        recorder.fail(RuntimeError(event.message))
                     yield event
 
     async def _turn_body(self, text: str) -> AsyncGenerator[AgentEvent, None]:

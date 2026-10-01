@@ -1,213 +1,359 @@
+"""Export agent spans through Langfuse/Phoenix native HTTP APIs, without SDKs.
+
+Callers keep the small span/Recorder interface. Context variables preserve asyncio
+parentage; a bounded worker queue keeps HTTP I/O outside the agent loop.
 """
-Tracing — the session, in a shape an observability platform already understands.
-
-The session JSONL is the trajectory and stays the trajectory (rule 7: no second
-logger). This is an *export*, not a second record: the same turns, calls and tool
-invocations, emitted as OpenTelemetry spans while they happen.
-
-    trace.configure(config.trace)                   # once, at startup. Off by default.
-    with trace.span("chat claude-opus-5", kind="client", attributes={...}) as s:
-        ...
-        s.set(**{"gen_ai.usage.input_tokens": 1200})
-
-Three decisions worth keeping:
-
-* **OTLP, not a vendor SDK.** Langfuse, LangSmith, Phoenix and a plain Collector all
-  ingest OTLP/HTTP; picking one platform's client would pick the platform.
-* **`gen_ai.*` semantic conventions.** `chat <model>` spans with `gen_ai.request.model`
-  and `gen_ai.usage.*` show up as *generations*, with token and cost accounting, in
-  every one of those tools. Invented attribute names show up as neither.
-* **The dependency is optional and imported late.** With `[trace] enabled = false`,
-  which is the default, nothing here imports OpenTelemetry and every call is a few
-  branches. Asked to trace without `stcode[otel]` installed, it says so once and stays
-  off, rather than taking down a session that was about to do real work.
-"""
-
 from __future__ import annotations
 
 import contextlib
 import logging
+import os
+import queue
+import secrets
+import threading
+import time
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Iterator, Mapping, Protocol
+from urllib.parse import quote, urlsplit
+
+import httpx
 
 logger = logging.getLogger("stcode.trace")
-
 INSTRUMENTATION_NAME = "stcode"
-
-MISSING_DEPENDENCY = (
-    "[trace] is enabled but OpenTelemetry is not installed, so nothing will be "
-    "exported. Install it with `uv sync --extra otel`, or set [trace] enabled = false."
-)
-
-_tracer: Any = None
-_provider: Any = None
+_CONTENT_KEYS = {"stcode.input", "stcode.output", "gen_ai.input.messages", "gen_ai.output.messages"}
+_current: ContextVar[_Span | None] = ContextVar("stcode_span", default=None)
+_exporter: _Exporter | None = None
 _record_content = False
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 class Recorder(Protocol):
-    """What a `span()` block can do to the span it is inside."""
-
     def set(self, **attributes: Any) -> None: ...
-
     def fail(self, exc: BaseException) -> None: ...
 
 
 class _NoSpan:
-    """The recorder handed out when tracing is off. Every method is a branch away."""
-
-    __slots__ = ()
-
     def set(self, **attributes: Any) -> None:
-        return None
+        pass
 
     def fail(self, exc: BaseException) -> None:
-        return None
-
-
-class _RealSpan:
-    """Thin adapter over an OTel span, so callers never import OpenTelemetry."""
-
-    __slots__ = ("_span",)
-
-    def __init__(self, span: Any) -> None:
-        self._span = span
-
-    def set(self, **attributes: Any) -> None:
-        for key, value in attributes.items():
-            if value is None:
-                continue
-            # Dots, not underscores: `gen_ai.usage.input_tokens` cannot be spelled as a
-            # keyword argument, so callers pass it through `**{...}` and we undo the
-            # substitution the ones that can get away with underscores rely on.
-            self._span.set_attribute(key.replace("__", "."), value)
-
-    def fail(self, exc: BaseException) -> None:
-        from opentelemetry.trace import Status, StatusCode
-
-        self._span.record_exception(exc)
-        self._span.set_status(Status(StatusCode.ERROR, f"{type(exc).__name__}: {exc}"))
+        pass
 
 
 _NO_SPAN = _NoSpan()
 
 
+@dataclass
+class _Span:
+    name: str
+    trace_id: str
+    parent_id: str | None
+    content: bool
+    span_id: str = field(default_factory=lambda: secrets.token_hex(8))
+    start: str = field(default_factory=_now)
+    end: str = ""
+    attributes: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+
+    def set(self, **attributes: Any) -> None:
+        for key, value in attributes.items():
+            key = key.replace("__", ".")
+            if value is not None and (self.content or key not in _CONTENT_KEYS):
+                self.attributes[key] = value
+
+    def fail(self, exc: BaseException) -> None:
+        self.error = f"{type(exc).__name__}: {exc}" if self.content else type(exc).__name__
+
+    @property
+    def operation(self) -> str:
+        op = self.attributes.get("gen_ai.operation.name")
+        if op == "chat":
+            return "LLM"
+        if op == "execute_tool":
+            return "TOOL"
+        return "AGENT" if self.name.startswith("agent.turn ") else "CHAIN"
+
+
+def _langfuse(span: _Span) -> dict[str, Any]:
+    attrs = span.attributes
+    body: dict[str, Any] = {
+        "id": span.span_id, "traceId": span.trace_id, "name": span.name,
+        "startTime": span.start, "endTime": span.end,
+        "metadata": {k: v for k, v in attrs.items() if k not in _CONTENT_KEYS},
+    }
+    if span.parent_id:
+        body["parentObservationId"] = span.parent_id
+    if span.error:
+        body.update(level="ERROR", statusMessage=span.error)
+    for target, keys in (("input", ("stcode.input", "gen_ai.input.messages")),
+                         ("output", ("stcode.output", "gen_ai.output.messages"))):
+        for key in keys:
+            if key in attrs:
+                body[target] = attrs[key]
+                break
+    if span.operation == "LLM":
+        body["model"] = attrs.get("gen_ai.request.model")
+        body["usageDetails"] = {
+            target: attrs[source] for source, target in (
+                ("gen_ai.usage.input_tokens", "input"),
+                ("gen_ai.usage.output_tokens", "output"),
+            ) if source in attrs
+        }
+    return body
+
+
+def _phoenix(span: _Span) -> dict[str, Any]:
+    import json
+
+    attrs = {k: v for k, v in span.attributes.items() if k not in _CONTENT_KEYS}
+    mapping = {
+        "gen_ai.request.model": "llm.model_name",
+        "gen_ai.provider.name": "llm.provider",
+        "gen_ai.usage.input_tokens": "llm.token_count.prompt",
+        "gen_ai.usage.output_tokens": "llm.token_count.completion",
+        "gen_ai.usage.cache_read_input_tokens": "llm.token_count.prompt_details.cache_read",
+        "gen_ai.conversation.id": "session.id",
+        "gen_ai.tool.name": "tool.name",
+    }
+    for source, target in mapping.items():
+        if source in attrs:
+            attrs[target] = attrs[source]
+    for target, keys in (("input", ("stcode.input", "gen_ai.input.messages")),
+                         ("output", ("stcode.output", "gen_ai.output.messages"))):
+        for key in keys:
+            if key in span.attributes:
+                value = span.attributes[key]
+                attrs[f"{target}.value"] = value if isinstance(value, str) else json.dumps(value)
+                attrs[f"{target}.mime_type"] = "text/plain" if isinstance(value, str) else "application/json"
+                break
+    return {
+        "name": span.name, "context": {"trace_id": span.trace_id, "span_id": span.span_id},
+        "parent_id": span.parent_id, "span_kind": span.operation,
+        "start_time": span.start, "end_time": span.end,
+        "status_code": "ERROR" if span.error else "OK", "status_message": span.error,
+        "attributes": attrs,
+    }
+
+
+@dataclass
+class _Barrier:
+    ready: threading.Event = field(default_factory=threading.Event)
+    ok: bool = False
+
+
+class _Exporter:
+    def __init__(self, provider: str, url: str, headers: dict[str, str], service: str) -> None:
+        self.provider, self.url, self.headers, self.service = provider, url, headers, service
+        self.queue: queue.Queue[_Span | _Barrier] = queue.Queue(maxsize=2048)
+        self.stopping = threading.Event()
+        self.failed = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="stcode-trace", daemon=True)
+        self.thread.start()
+
+    def submit(self, span: _Span) -> None:
+        try:
+            self.queue.put_nowait(span)
+        except queue.Full:
+            self.failed.set()
+            logger.warning("Trace export queue full; span dropped")
+
+    def payload(self, spans: list[_Span]) -> dict[str, Any]:
+        if self.provider == "phoenix":
+            return {"data": [_phoenix(s) for s in spans]}
+        batch = []
+        for s in spans:
+            body = _langfuse(s)
+            if s.parent_id is None:
+                root: dict[str, Any] = {k: body[k] for k in ("name", "metadata", "input", "output") if k in body}
+                root.update(id=s.trace_id, timestamp=s.start)
+                if "gen_ai.conversation.id" in s.attributes:
+                    root["sessionId"] = s.attributes["gen_ai.conversation.id"]
+                batch.append({"id": secrets.token_hex(16), "timestamp": _now(),
+                              "type": "trace-create", "body": root})
+            batch.append({"id": secrets.token_hex(16), "timestamp": _now(),
+                          "type": "generation-create" if s.operation == "LLM" else "span-create",
+                          "body": body})
+        return {"batch": batch}
+
+    def _send(self, client: httpx.Client, spans: list[_Span]) -> None:
+        # Reuse event IDs on retries: Langfuse deduplicates ingestion events by ID.
+        payload = self.payload(spans)
+        for attempt in range(3):
+            try:
+                response = client.post(self.url, headers=self.headers, json=payload)
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt < 2:
+                        time.sleep(0.2 * 2 ** attempt)
+                        continue
+                response.raise_for_status()
+                result = response.json()
+                if self.provider == "langfuse":
+                    accepted = {entry["id"] for entry in result.get("successes", [])
+                                if 200 <= entry.get("status", 0) < 300}
+                    expected = {entry["id"] for entry in payload["batch"]}
+                    if result.get("errors") or accepted != expected:
+                        raise ValueError("ingestion rejected events")
+                elif result.get("total_queued") != len(spans):
+                    raise ValueError("ingestion did not queue all spans")
+                return
+            except httpx.TransportError:
+                if attempt < 2:
+                    time.sleep(0.2 * 2 ** attempt)
+                    continue
+                raise
+
+    def _run(self) -> None:
+        try:
+            with httpx.Client(timeout=10, follow_redirects=False) as client:
+                while not self.stopping.is_set() or not self.queue.empty():
+                    try:
+                        item = self.queue.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+                    if isinstance(item, _Barrier):
+                        item.ok = not self.failed.is_set()
+                        item.ready.set()
+                        continue
+                    spans = [item]
+                    barrier = None
+                    while len(spans) < 64:
+                        try:
+                            next_item = self.queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if isinstance(next_item, _Barrier):
+                            barrier = next_item
+                            break
+                        spans.append(next_item)
+                    try:
+                        self._send(client, spans)
+                    except Exception as exc:
+                        self.failed.set()
+                        # Response bodies, URLs and exception messages may contain secrets.
+                        logger.warning("%s trace export failed (%s)", self.provider, type(exc).__name__)
+                    if barrier is not None:
+                        barrier.ok = not self.failed.is_set()
+                        barrier.ready.set()
+        except Exception as exc:
+            self.failed.set()
+            logger.warning("Trace export worker stopped (%s)", type(exc).__name__)
+
+    def flush(self, timeout: float) -> bool:
+        barrier = _Barrier()
+        started = time.monotonic()
+        try:
+            self.queue.put(barrier, timeout=timeout)
+        except queue.Full:
+            return False
+        return barrier.ready.wait(max(0, timeout - (time.monotonic() - started))) and barrier.ok
+
+
 def configure(settings: Any) -> bool:
-    """Start exporting, or stay off. Idempotent — the second call is a no-op.
-
-    `settings` is anything with `enabled`, `endpoint`, `headers`, `service_name` and
-    `content`; `core/configs.py` owns the actual shape, and this module does not import
-    it. Returns whether tracing is now on.
-    """
-    global _tracer, _provider, _record_content
-
-    if _tracer is not None or not getattr(settings, "enabled", False):
-        return _tracer is not None
-
-    try:
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-        from opentelemetry.sdk.resources import Resource
-        from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    except ImportError:
-        logger.warning(MISSING_DEPENDENCY)
+    """Start one exporter. Environment values override TOML; never read .env files."""
+    global _exporter, _record_content
+    if _exporter is not None or not getattr(settings, "enabled", False):
+        return _exporter is not None
+    provider = getattr(settings, "provider", "langfuse")
+    headers = {}
+    if provider == "langfuse":
+        url = os.getenv("LANGFUSE_BASE_URL") or os.getenv("LANGFUSE_HOST") or settings.url or "https://cloud.langfuse.com"
+        public = os.getenv("LANGFUSE_PUBLIC_KEY") or settings.public_key
+        secret = os.getenv("LANGFUSE_SECRET_KEY") or settings.secret_key
+        if not public or not secret:
+            logger.warning("Langfuse trace credentials are missing; tracing disabled")
+            return False
+        import base64
+        headers["Authorization"] = "Basic " + base64.b64encode(f"{public}:{secret}".encode()).decode()
+        path = "/api/public/ingestion"
+    elif provider == "phoenix":
+        url = os.getenv("PHOENIX_COLLECTOR_ENDPOINT") or settings.url or "http://localhost:6006"
+        key = os.getenv("PHOENIX_API_KEY") or settings.api_key
+        project = os.getenv("PHOENIX_PROJECT_NAME") or settings.project_name or "default"
+        if any(c in project for c in "/?#"):
+            logger.warning("Invalid Phoenix trace project name; tracing disabled")
+            return False
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        path = f"/v1/projects/{quote(project, safe='')}/spans"
+    else:
+        logger.warning("Unknown trace provider; tracing disabled")
         return False
-
-    endpoint = getattr(settings, "endpoint", "") or None
-    headers = dict(getattr(settings, "headers", None) or {})
-    resource = Resource.create({"service.name": getattr(settings, "service_name", "stcode")})
-
-    # `endpoint=None` is not "no exporter": the exporter then reads
-    # OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS itself, which is how
-    # every platform's own documentation tells you to configure it.
-    exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers or None)
-    provider = TracerProvider(resource=resource)
-    provider.add_span_processor(BatchSpanProcessor(exporter))
-
-    _provider = provider
-    _tracer = provider.get_tracer(INSTRUMENTATION_NAME)
-    _record_content = bool(getattr(settings, "content", False))
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.query or parsed.fragment or parsed.username:
+            raise ValueError("invalid base URL")
+        if parsed.path.rstrip("/").endswith(("/v1/traces", "/api/public/ingestion")):
+            raise ValueError("expected application base URL")
+    except ValueError:
+        logger.warning("Invalid trace base URL; tracing disabled")
+        return False
+    _exporter = _Exporter(provider, url.rstrip("/") + path, headers, settings.service_name)
+    _record_content = bool(settings.content)
     return True
 
 
 def enabled() -> bool:
-    return _tracer is not None
+    return _exporter is not None
 
 
 def records_content() -> bool:
-    """Whether prompts and replies may go on a span.
-
-    Off by default, and a separate switch from `enabled`: the shape of a run is not
-    sensitive, the code in it usually is.
-    """
     return _record_content
 
 
 @contextlib.contextmanager
-def span(
-    name: str,
-    *,
-    kind: str = "internal",
-    attributes: Mapping[str, Any] | None = None,
-) -> Iterator[Recorder]:
-    """Record one operation. A no-op context manager when tracing is off.
-
-    Made *current* for the block, so anything started inside it nests underneath —
-    including work handed to `asyncio.gather`, which copies the context per task.
-    """
-    if _tracer is None:
+def span(name: str, *, kind: str = "internal", attributes: Mapping[str, Any] | None = None) -> Iterator[Recorder]:
+    """Record an operation, inheriting the current task's parent. Off is a no-op."""
+    exporter = _exporter
+    if exporter is None:
         yield _NO_SPAN
         return
-
-    from opentelemetry.trace import SpanKind
-
-    span_kind = getattr(SpanKind, kind.upper(), SpanKind.INTERNAL)
-    with _tracer.start_as_current_span(
-        name, kind=span_kind, attributes=dict(attributes or {})
-    ) as raw:
-        recorder = _RealSpan(raw)
-        try:
-            yield recorder
-        except BaseException as exc:
-            recorder.fail(exc)
-            raise
+    parent = _current.get()
+    recorder = _Span(name, parent.trace_id if parent else secrets.token_hex(16),
+                     parent.span_id if parent else None, _record_content)
+    recorder.set(**{"service.name": exporter.service})
+    if parent and "gen_ai.conversation.id" in parent.attributes:
+        recorder.set(**{"gen_ai.conversation.id": parent.attributes["gen_ai.conversation.id"]})
+    recorder.set(**dict(attributes or {}))
+    token = _current.set(recorder)
+    try:
+        yield recorder
+    except GeneratorExit:
+        # Agent.run closes its generator after a terminal event; this is normal.
+        raise
+    except BaseException as exc:
+        recorder.fail(exc)
+        raise
+    finally:
+        recorder.end = _now()
+        _current.reset(token)
+        exporter.submit(recorder)
 
 
 def current_ids() -> tuple[str, str]:
-    """`(trace_id, span_id)` as hex, or two empty strings.
-
-    What joins a session record to its span: the JSONL stays the trajectory, and this
-    is the line from a line in it to the same moment in Langfuse.
-    """
-    if _tracer is None:
-        return "", ""
-    from opentelemetry import trace as otel_trace
-
-    context = otel_trace.get_current_span().get_span_context()
-    if not context.is_valid:
-        return "", ""
-    return f"{context.trace_id:032x}", f"{context.span_id:016x}"
+    current = _current.get() if enabled() else None
+    return (current.trace_id, current.span_id) if current else ("", "")
 
 
-def shutdown() -> None:
-    """Flush whatever the batch processor is holding. Called on the way out.
-
-    Without it, the last turn of a short-lived run — exactly the one you were watching
-    — is still in a buffer when the process exits.
-    """
-    global _tracer, _provider
-    if _provider is not None:
-        with contextlib.suppress(Exception):
-            _provider.shutdown()
-    _tracer, _provider = None, None
+def flush(timeout: float = 30) -> bool:
+    """Wait for queued exports. False means a timeout or any export failure since configure."""
+    return _exporter.flush(timeout) if _exporter else True
 
 
-__all__ = [
-    "INSTRUMENTATION_NAME",
-    "MISSING_DEPENDENCY",
-    "Recorder",
-    "configure",
-    "current_ids",
-    "enabled",
-    "records_content",
-    "shutdown",
-    "span",
-]
+def shutdown(timeout: float = 30) -> None:
+    """Drain queued exports and close the client. Async callers should use to_thread."""
+    global _exporter, _record_content
+    exporter, _exporter = _exporter, None
+    _record_content = False
+    if exporter is not None:
+        exporter.stopping.set()
+        exporter.thread.join(timeout)
+        if exporter.thread.is_alive():
+            logger.warning("Trace export shutdown timed out; pending spans may be lost")
+
+
+__all__ = ["Recorder", "configure", "current_ids", "enabled", "records_content", "span", "flush", "shutdown"]

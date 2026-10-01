@@ -43,14 +43,6 @@ Documentation = "https://ming-doan.github.io/stcode/docs/"
 Source = "https://github.com/Ming-doan/stcode"
 Issues = "https://github.com/Ming-doan/stcode/issues"
 
-[project.optional-dependencies]
-# Tracing. Off by default and imported only when [trace] enabled = true, so a session
-# that is not being watched pays nothing for it.
-otel = [
-    "opentelemetry-sdk>=1.30.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.30.0",
-]
-
 [project.scripts]
 stcode = "stcode.cli.main:run_cli"
 
