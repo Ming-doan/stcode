@@ -1,6 +1,6 @@
 # Tracing
 
-`core/common/trace.py` exports the existing agent instrumentation using native HTTP
+`core/common/trace.py` exports the existing agent instrumentation using direct HTTP
 JSON APIs. The session JSONL remains the trajectory; each usage record's `trace_id`
 links it to the exported trace. See [configuration and API limits](../guide/tracing.md).
 
@@ -13,13 +13,15 @@ invalid URLs warn and leave tracing off. Disabled tracing starts no worker.
 
 A context variable tracks the current span and propagates parentage through asyncio
 tasks. IDs are random hex strings (32 characters for traces, 16 for spans). A turn is
-a root span; model and tool spans inherit its trace ID and session ID. Each span
+a root span; model and tool spans inherit its trace ID, trace name, session ID and turn metadata. Each span
 captures UTC start/end times, attributes and error status. Content is opt-in.
 
 Completed spans enter a bounded queue. A background thread batches HTTP requests
-through the existing `httpx` dependency. It retries transport errors, HTTP 429 and
-5xx responses, with a bounded timeout and backoff. Langfuse's HTTP 207 per-event
-errors and Phoenix's queued count are checked rather than treating every 2xx as success.
+through the existing `httpx` dependency. Langfuse retries connection failures and HTTP 429/502/503/504 responses with bounded
+backoff. Ambiguous transport failures are not replayed because v4 does not guarantee
+deduplication. Phoenix retains retries for transport errors and HTTP 429/5xx.
+Langfuse's OTLP partialSuccess.rejectedSpans and Phoenix's queued count are checked
+rather than treating every 2xx as success. Partial rejections are never retried.
 Failures warn without propagating to the agent. `flush()` waits for a queue barrier;
 `shutdown()` drains the queue and closes the HTTP client with a bounded wait.
 Async callers use `asyncio.to_thread` for these blocking lifecycle operations.
@@ -28,15 +30,22 @@ Async callers use `asyncio.to_thread` for these blocking lifecycle operations.
 
 | Internal operation | Langfuse | Phoenix |
 | --- | --- | --- |
-| Agent turn | trace-create plus root span-create | AGENT span |
-| Model call | generation-create, model, usageDetails | LLM span, llm.model_name, llm.token_count.* |
-| Tool call | span-create | TOOL span |
-| Other | span-create | CHAIN span |
+| Agent turn | OTLP span, type=agent | AGENT span |
+| Model call | OTLP span, type=generation, model, usage_details | LLM span, llm.model_name, llm.token_count.* |
+| Tool call | OTLP span, type=tool | TOOL span |
+| Other | OTLP span, type=chain | CHAIN span |
 
-Langfuse events carry unique event IDs and ISO timestamps; observations carry
-traceId, parentObservationId, startTime and endTime. Root events carry sessionId.
+Langfuse receives resourceSpans/scopeSpans with hex traceId/spanId/parentSpanId,
+Unix nanosecond timestamps encoded as decimal strings, typed OTLP attributes, and
+status. Requests use Basic authentication and x-langfuse-ingestion-version: 4.
+The service name is a resource attribute; scope.name is stcode. Langfuse-specific
+attributes map operation types, input/output, model, usage, session and filterable
+metadata. Structured content and usage are JSON strings inside OTLP stringValue.
+Each operation is exported when it ends; there is no separate trace-create event or
+synthetic root. The same completed span is never intentionally exported as an update.
+
 Phoenix sends `data` containing context, parent_id, span_kind, status_code,
-start_time/end_time and OpenInference attributes. No OTLP envelopes are emitted.
+start_time/end_time and OpenInference attributes.
 
 ## Verification
 
@@ -44,4 +53,5 @@ Contract tests inspect outgoing JSON and authentication, nested/concurrent paren
 content opt-in, errors, retries, shutdown, environment precedence and secret redaction.
 An agent integration test exercises the real gateway and tool path with a deterministic
 model double. Live smoke tests explicitly opt into credentials and send a small trace,
-then an actual agent request; record trace IDs for dashboard acceptance.
+then an actual agent request; Langfuse readback verifies exactly one root, parentage,
+content, model and token counts through Observations API v2.

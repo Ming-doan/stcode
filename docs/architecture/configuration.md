@@ -158,7 +158,7 @@ polling and a `/team` write scope on a laptop that has neither.
 ### `[trace]`
 
 `enabled`, `provider` (`langfuse` or `phoenix`), `url`, `public_key`, `secret_key`,
-`api_key`, `project_name`, `service_name`, `content`. Off by default; native HTTP JSON. See [tracing.md](tracing.md).
+`api_key`, `project_name`, `service_name`, `content`. Off by default; direct HTTP JSON. See [tracing.md](tracing.md).
 
 ## Command-line overrides
 

@@ -98,8 +98,8 @@ socket = "~/.stcode/daemon.sock"
 # shared_dir = "/team"
 # remote     = "/team/repo.git"   # a bare repo on the volume: no credential, no network
 
-# Native HTTP tracing. Environment values override these TOML settings; .env is not loaded.
-# → docs/guide/tracing.md (includes Langfuse API deprecation limits)
+# Direct HTTP tracing. Environment values override these TOML settings; .env is not loaded.
+# → docs/guide/tracing.md (Langfuse v4 OTLP/HTTP and Phoenix REST)
 # [trace]
 # enabled = true
 # provider = "langfuse"       # or "phoenix"

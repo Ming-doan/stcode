@@ -188,7 +188,7 @@ class MCPConfig(BaseModel):
 
 
 class TraceConfig(BaseModel):
-    """Native HTTP observation provider. Values come from TOML or process environment."""
+    """Direct HTTP observation provider. Values come from TOML or process environment."""
 
     enabled: bool = False
     provider: Literal["langfuse", "phoenix"] = "langfuse"
@@ -303,7 +303,7 @@ every = 8
 [mcp]
 expose = "code"
 
-# Native HTTP tracing. Set credentials in config or the process environment.
+# Direct HTTP tracing. Set credentials in config or the process environment.
 # [trace]
 # enabled = true
 # provider = "langfuse"  # or "phoenix"

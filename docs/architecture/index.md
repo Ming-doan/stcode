@@ -13,7 +13,7 @@ arrows point.
 | [mcp.md](mcp.md) | MCP servers as *code* rather than as tool definitions |
 | [supervisor.md](supervisor.md) | Stagnation detection at (almost) zero token cost |
 | [team.md](team.md) | Containers, roles, the shared volume — and the evaluation set |
-| [tracing.md](tracing.md) | Exporting the trajectory via native HTTP APIs |
+| [tracing.md](tracing.md) | Exporting the trajectory via direct HTTP APIs |
 | [configuration.md](configuration.md) | Every section of `config.toml`, and what reads it |
 
 ---

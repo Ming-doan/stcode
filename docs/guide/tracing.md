@@ -44,7 +44,7 @@ or put values in `config.toml`. Test runners may explicitly read test credential
 
 Each `agent.turn <name>` is a trace containing `chat <model>` generations and
 `execute_tool <name>` spans. Model names, input/output token counts, timestamps,
-parent IDs and errors are mapped to each provider's native JSON schema. Session
+parent IDs and errors are mapped to each provider's JSON schema. Session
 `usage` records contain the same `trace_id` so the dashboard and transcript can be joined.
 
 `content = true` includes agent inputs/replies, model messages and tool inputs/results.
@@ -52,21 +52,30 @@ The default `false` leaves that content out. Error descriptions include only the
 exception type when content recording is disabled.
 
 A bounded background queue sends completed spans without blocking the agent loop.
-Transient HTTP failures are retried three times; permanent failures and queue overflow
-log warnings without failing the agent. Warnings never include keys or response bodies.
+Retryable HTTP failures and connection failures are attempted up to three times.
+Langfuse requests with an ambiguous transport failure (such as a read timeout) are
+not replayed: v4 does not guarantee deduplication. Partial rejections are not retried.
+Permanent failures and queue overflow log warnings without failing the agent. Warnings never include keys or response bodies.
 For embedded use, call `trace.shutdown()` at process exit (or
 `await asyncio.to_thread(trace.shutdown)` from async code) to drain pending spans.
 `trace.flush()` returns whether all exports since configuration succeeded; this confirms
-HTTP ingestion, while dashboard visibility may follow later (several minutes for
-Langfuse native ingestion).
+HTTP ingestion, while dashboard visibility may follow shortly afterward.
 
 ## API compatibility
 
-Langfuse uses `POST /api/public/ingestion` with Basic authentication and
-`trace-create`, `span-create`, and `generation-create` events. This native API is
-[deprecated by Langfuse](https://langfuse.com/faq/all/deprecated-api-migration): Cloud
-support is scheduled to end November 16, 2026. Use a deployment that still supports
-this endpoint. Its replacement uses OTLP, which this integration does not implement.
+Langfuse uses `POST /api/public/otel/v1/traces` with OTLP/HTTP JSON, Basic
+authentication, and `x-langfuse-ingestion-version: 4`. This selects Langfuse's
+[real-time v4 ingestion path](https://langfuse.com/integrations/native/opentelemetry).
+The existing `httpx` client sends the JSON directly; no collector or SDK is needed.
+The application base URL and credential settings above remain the same.
+
+Each turn has exactly one root `agent` observation, with `generation` and `tool`
+children sharing its trace ID. Overall input/output live on the root. Trace name,
+session ID and turn metadata are included on the children for v4 filtering. The
+[observations table](https://langfuse.com/faq/all/explore-observations-in-v4) shows
+all spans as rows; set **Is Root Observation = true** to see one row per turn and
+open it to inspect the hierarchy. Legacy records already stored in Langfuse are
+not rewritten by this change.
 
 Phoenix uses `POST /v1/projects/{project_name}/spans` with Bearer authentication and
 native JSON spans ([server API contract](https://github.com/Arize-ai/phoenix/blob/main/src/phoenix/server/api/routers/v1/spans.py)).

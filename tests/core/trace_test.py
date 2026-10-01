@@ -1,4 +1,4 @@
-"""Native HTTP contracts: no SDK/OTLP, no implicit credential-file loading."""
+"""HTTP JSON contracts: Langfuse v4 OTLP, Phoenix REST, no SDK, no implicit credential-file loading."""
 import asyncio
 import base64
 import builtins
@@ -30,8 +30,8 @@ def requests(monkeypatch):
     def handle(request):
         sent.append(request)
         body = json.loads(request.content)
-        if "batch" in body:
-            return httpx.Response(207, json={"errors": [], "successes": [{"id": e["id"], "status": 201} for e in body["batch"]]})
+        if "resourceSpans" in body:
+            return httpx.Response(200, json={})
         return httpx.Response(202, json={"total_received": len(body["data"]),
                                         "total_queued": len(body["data"])})
 
@@ -45,30 +45,53 @@ def settings(provider="langfuse", **kw):
                        public_key="public", secret_key="secret", **kw)
 
 
-def events(requests):
-    return [e for r in requests for e in json.loads(r.content)["batch"]]
+def spans(requests):
+    return [span for request in requests
+            for resource in json.loads(request.content)["resourceSpans"]
+            for scope in resource["scopeSpans"] for span in scope["spans"]]
 
 
-def test_langfuse_exports_native_generations_with_parentage_and_usage(requests):
+def attributes(span):
+    return {a["key"]: next(iter(a["value"].values())) for a in span["attributes"]}
+
+
+def test_langfuse_v4_has_one_root_and_maps_generations_with_context(requests):
     assert trace.configure(settings())
-    with trace.span("agent.turn smoke", attributes={"gen_ai.conversation.id": "session-1"}):
+    with trace.span("agent.turn smoke", attributes={"gen_ai.conversation.id": "session-1",
+                                                  "stcode.role": "tester"}):
         tid, root_id = trace.current_ids()
-        with trace.span("chat test", attributes={"gen_ai.operation.name": "chat",
-                                                "gen_ai.request.model": "test"}) as s:
+        with trace.span("chat test", kind="client", attributes={"gen_ai.operation.name": "chat",
+                                                               "gen_ai.request.model": "test"}) as s:
             s.set(**{"gen_ai.usage.input_tokens": 12, "gen_ai.usage.output_tokens": 3})
     assert trace.flush()
     assert trace.current_ids() == ("", "")
     assert len(tid) == 32 and len(root_id) == 16
-    assert all(str(r.url) == "https://traces.example/prefix/api/public/ingestion" for r in requests)
-    assert requests[0].headers["authorization"] == "Basic " + base64.b64encode(b"public:secret").decode()
-    ev = events(requests)
-    root = next(e["body"] for e in ev if e["type"] == "trace-create")
-    generation = next(e["body"] for e in ev if e["type"] == "generation-create")
-    assert root["id"] == tid and root["sessionId"] == "session-1"
-    assert generation["traceId"] == tid and generation["parentObservationId"] == root_id
-    assert generation["model"] == "test"
-    assert generation["usageDetails"] == {"input": 12, "output": 3}
-    assert generation["startTime"] <= generation["endTime"]
+    for request in requests:
+        assert str(request.url) == "https://traces.example/prefix/api/public/otel/v1/traces"
+        assert request.headers["authorization"] == "Basic " + base64.b64encode(b"public:secret").decode()
+        assert request.headers["x-langfuse-ingestion-version"] == "4"
+        assert request.headers["content-type"] == "application/json"
+        resource = json.loads(request.content)["resourceSpans"][0]
+        assert resource["resource"]["attributes"] == [{"key": "service.name", "value": {"stringValue": "stcode"}}]
+        assert resource["scopeSpans"][0]["scope"]["name"] == "stcode"
+    records = spans(requests)
+    assert len(records) == 2
+    root, = [s for s in records if not s.get("parentSpanId")]
+    generation, = [s for s in records if s.get("parentSpanId")]
+    assert root["spanId"] == root_id
+    assert generation["traceId"] == tid and generation["parentSpanId"] == root_id
+    assert attributes(root)["langfuse.observation.type"] == "agent"
+    assert generation["kind"] == 3
+    assert attributes(generation)["langfuse.observation.type"] == "generation"
+    assert attributes(generation)["langfuse.observation.model.name"] == "test"
+    assert json.loads(attributes(generation)["langfuse.observation.usage_details"]) == {"input": 12, "output": 3}
+    for span in records:
+        attrs = attributes(span)
+        assert attrs["langfuse.trace.name"] == "agent.turn smoke"
+        assert attrs["langfuse.session.id"] == "session-1"
+        assert attrs["langfuse.trace.metadata.stcode_role"] == "tester"
+        assert isinstance(span["startTimeUnixNano"], str)
+        assert 0 < int(span["startTimeUnixNano"]) <= int(span["endTimeUnixNano"])
 
 
 def test_phoenix_uses_native_spans_and_redacts_content_by_default(requests):
@@ -118,8 +141,8 @@ def test_async_siblings_share_parent_without_leaking_context(requests):
     assert trace.flush()
     assert all(c[0] == parent[0] for c in children)
     assert children[0][1] != children[1][1]
-    spans = [e["body"] for e in events(requests) if e["type"] == "span-create"]
-    assert all(s["parentObservationId"] == parent[1] for s in spans if s["name"].startswith("child"))
+    records = spans(requests)
+    assert all(s["parentSpanId"] == parent[1] for s in records if s["name"].startswith("child"))
 
 
 def test_env_wins_and_tracing_never_imports_otel_or_a_provider_sdk(requests, monkeypatch):
@@ -148,7 +171,8 @@ def test_missing_langfuse_keys_warns_and_stays_off(caplog):
 
 
 @pytest.mark.parametrize("status,body,expected_calls", [
-    (401, {}, 1), (503, {}, 3), (207, {"errors": [{"message": "secret"}]}, 1),
+    (401, {}, 1), (503, {}, 3), (500, {}, 1),
+    (200, {"partialSuccess": {"rejectedSpans": "1", "errorMessage": "secret"}}, 1),
     (202, {"total_queued": 0}, 1),
 ])
 def test_export_failures_do_not_fail_agent_or_leak_responses(monkeypatch, caplog, status, body, expected_calls):
@@ -202,14 +226,17 @@ def test_agent_request_exports_model_and_tool_under_one_turn(requests, tmp_path)
                 await agent.aclose()
     asyncio.run(run())
     assert trace.flush()
-    ev = events(requests)
-    root = next(e["body"] for e in ev if e["type"] == "trace-create")
-    assert root["input"] == "Read hello.txt" and root["output"] == "hello tracing"
-    observations = [e["body"] for e in ev if e["type"] != "trace-create"]
-    assert all(s.get("level") != "ERROR" for s in observations)
-    assert len([s for s in observations if s["name"].startswith("chat ")]) == 2
-    assert any(s["name"] == "execute_tool read" for s in observations)
-    assert {s["traceId"] for s in observations} == {root["id"]}
+    observations = spans(requests)
+    assert len(observations) == 4
+    root, = [s for s in observations if not s.get("parentSpanId")]
+    assert attributes(root)["langfuse.observation.input"] == "Read hello.txt"
+    assert attributes(root)["langfuse.observation.output"] == "hello tracing"
+    assert all(s["status"]["code"] == 1 for s in observations)
+    assert len([s for s in observations if attributes(s)["langfuse.observation.type"] == "generation"]) == 2
+    tool, = [s for s in observations if s["name"] == "execute_tool read"]
+    assert attributes(tool)["langfuse.observation.type"] == "tool"
+    assert {s["traceId"] for s in observations} == {root["traceId"]}
+    assert all(s["parentSpanId"] == root["spanId"] for s in observations if s is not root)
 
 
 def test_http_export_never_blocks_span_completion_and_shutdown_drains(monkeypatch):
@@ -222,7 +249,7 @@ def test_http_export_never_blocks_span_completion_and_shutdown_drains(monkeypatc
         entered.set()
         assert release.wait(5)
         sent.append(request)
-        return httpx.Response(207, json={"errors": [], "successes": [{"id": e["id"], "status": 201} for e in json.loads(request.content)["batch"]]})
+        return httpx.Response(200, json={})
 
     monkeypatch.setattr(trace.httpx, "Client", lambda **kw: client(transport=httpx.MockTransport(slow), **kw))
     trace.configure(settings())
@@ -236,19 +263,19 @@ def test_http_export_never_blocks_span_completion_and_shutdown_drains(monkeypatc
     finally:
         release.set()
         trace.shutdown()
-    assert len([e for e in events(sent) if e["type"] == "trace-create"]) == 2
+    assert len(spans(sent)) == 2
     assert not trace.enabled()
 
 
-def test_transport_failure_is_retried_without_duplicate_event_ids(monkeypatch):
+def test_connection_failure_is_retried_with_same_completed_spans(monkeypatch):
     sent = []
     client = httpx.Client
 
     def handle(request):
         sent.append(request)
         if len(sent) == 1:
-            raise httpx.ReadTimeout("secret endpoint", request=request)
-        return httpx.Response(207, json={"errors": [], "successes": [{"id": e["id"], "status": 201} for e in json.loads(request.content)["batch"]]})
+            raise httpx.ConnectTimeout("secret endpoint", request=request)
+        return httpx.Response(200, json={})
 
     monkeypatch.setattr(trace.httpx, "Client", lambda **kw: client(transport=httpx.MockTransport(handle), **kw))
     trace.configure(settings())
@@ -265,8 +292,8 @@ def test_exception_is_exported_and_original_error_propagates(requests):
             raise ValueError("private")
     assert trace.current_ids() == ("", "")
     assert trace.flush()
-    observation = next(e["body"] for e in events(requests) if e["type"] == "span-create")
-    assert observation["level"] == "ERROR" and observation["statusMessage"] == "ValueError"
+    observation, = spans(requests)
+    assert observation["status"] == {"code": 2, "message": "ValueError"}
 
 
 def test_phoenix_environment_selects_url_key_and_project(requests, monkeypatch):
@@ -290,3 +317,50 @@ def test_shutdown_allows_reconfiguration_without_previous_content_setting(reques
         pass
     assert trace.flush()
     assert "data" in json.loads(requests[0].content)
+
+
+@pytest.mark.parametrize("failure", [httpx.ReadTimeout, httpx.WriteError, httpx.RemoteProtocolError])
+def test_langfuse_ambiguous_delivery_is_not_replayed(monkeypatch, failure):
+    sent = []
+    client = httpx.Client
+
+    def handle(request):
+        sent.append(request)
+        raise failure("secret endpoint", request=request)
+
+    monkeypatch.setattr(trace.httpx, "Client", lambda **kw: client(transport=httpx.MockTransport(handle), **kw))
+    trace.configure(settings())
+    with trace.span("smoke"):
+        pass
+    assert not trace.flush()
+    assert len(sent) == 1
+
+
+def test_otlp_values_preserve_types_and_timestamp_precision(requests):
+    from datetime import datetime, timezone
+    trace.configure(settings())
+    with trace.span("smoke", attributes={"count": 123, "ratio": 0.25, "ok": True,
+                                        "labels": ["a", "b"], "object": {"x": 1},
+                                        "stcode.input": "private"}):
+        pass
+    assert trace.flush()
+    record, = spans(requests)
+    values = {a["key"]: a["value"] for a in record["attributes"]}
+    assert values["count"] == {"intValue": "123"}
+    assert values["ratio"] == {"doubleValue": 0.25}
+    assert values["ok"] == {"boolValue": True}
+    assert values["labels"] == {"arrayValue": {"values": [{"stringValue": "a"}, {"stringValue": "b"}]}}
+    assert json.loads(values["object"]["stringValue"]) == {"x": 1}
+    assert "private" not in json.dumps(record)
+    assert datetime.now(timezone.utc).year == datetime.fromtimestamp(int(record["startTimeUnixNano"]) / 1e9, timezone.utc).year
+
+
+@pytest.mark.parametrize("body", [{}, {"partialSuccess": {}}, {"partialSuccess": {"rejectedSpans": "0"}}])
+def test_otlp_full_success_is_accepted(monkeypatch, body):
+    client = httpx.Client
+    monkeypatch.setattr(trace.httpx, "Client", lambda **kw: client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body)), **kw))
+    trace.configure(settings())
+    with trace.span("smoke"):
+        pass
+    assert trace.flush()

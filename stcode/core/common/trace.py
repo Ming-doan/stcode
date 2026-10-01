@@ -1,4 +1,4 @@
-"""Export agent spans through Langfuse/Phoenix native HTTP APIs, without SDKs.
+"""Export agent spans through Langfuse v4 OTLP/HTTP and Phoenix REST, without SDKs.
 
 Callers keep the small span/Recorder interface. Context variables preserve asyncio
 parentage; a bounded worker queue keeps HTTP I/O outside the agent loop.
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import json
 import os
 import queue
 import secrets
@@ -23,6 +24,11 @@ import httpx
 logger = logging.getLogger("stcode.trace")
 INSTRUMENTATION_NAME = "stcode"
 _CONTENT_KEYS = {"stcode.input", "stcode.output", "gen_ai.input.messages", "gen_ai.output.messages"}
+_TRACE_KEYS = {
+    "gen_ai.conversation.id", "gen_ai.agent.name", "stcode.role", "stcode.approval_mode",
+    "langfuse.user.id", "langfuse.session.id", "langfuse.version",
+    "langfuse.release", "langfuse.environment",
+}
 _current: ContextVar[_Span | None] = ContextVar("stcode_span", default=None)
 _exporter: _Exporter | None = None
 _record_content = False
@@ -54,6 +60,8 @@ class _Span:
     trace_id: str
     parent_id: str | None
     content: bool
+    trace_name: str = ""
+    kind: str = "internal"
     span_id: str = field(default_factory=lambda: secrets.token_hex(8))
     start: str = field(default_factory=_now)
     end: str = ""
@@ -79,37 +87,74 @@ class _Span:
         return "AGENT" if self.name.startswith("agent.turn ") else "CHAIN"
 
 
+def _otel_value(value: Any) -> dict[str, Any]:
+    """OTLP JSON AnyValue; structured attribute values are JSON strings."""
+    if isinstance(value, bool):
+        return {"boolValue": value}
+    if isinstance(value, int):
+        return {"intValue": str(value)}
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    if isinstance(value, (list, tuple)):
+        return {"arrayValue": {"values": [_otel_value(item) for item in value]}}
+    return {"stringValue": value if isinstance(value, str) else json.dumps(value)}
+
+
+def _unix_nano(timestamp: str) -> str:
+    # Avoid float timestamps: contemporary epoch nanoseconds exceed float precision.
+    delta = datetime.fromisoformat(timestamp) - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return str(((delta.days * 86400 + delta.seconds) * 1000000 + delta.microseconds) * 1000)
+
+
 def _langfuse(span: _Span) -> dict[str, Any]:
-    attrs = span.attributes
-    body: dict[str, Any] = {
-        "id": span.span_id, "traceId": span.trace_id, "name": span.name,
-        "startTime": span.start, "endTime": span.end,
-        "metadata": {k: v for k, v in attrs.items() if k not in _CONTENT_KEYS},
-    }
-    if span.parent_id:
-        body["parentObservationId"] = span.parent_id
-    if span.error:
-        body.update(level="ERROR", statusMessage=span.error)
+    original = span.attributes
+    attrs = {k: v for k, v in original.items() if k not in _CONTENT_KEYS}
+    attrs["langfuse.trace.name"] = span.trace_name
+    attrs["langfuse.observation.type"] = {
+        "AGENT": "agent", "LLM": "generation", "TOOL": "tool", "CHAIN": "chain",
+    }[span.operation]
+    if "gen_ai.conversation.id" in original:
+        attrs["langfuse.session.id"] = original["gen_ai.conversation.id"]
+    for key, value in original.items():
+        if key in _CONTENT_KEYS:
+            continue
+        if key.startswith("stcode.") or key == "gen_ai.agent.name":
+            level = "trace" if key in _TRACE_KEYS else "observation"
+            attrs[f"langfuse.{level}.metadata.{key.replace('.', '_')}"] = (
+                value if isinstance(value, str) else json.dumps(value)
+            )
     for target, keys in (("input", ("stcode.input", "gen_ai.input.messages")),
                          ("output", ("stcode.output", "gen_ai.output.messages"))):
         for key in keys:
-            if key in attrs:
-                body[target] = attrs[key]
+            if key in original:
+                value = original[key]
+                attrs[f"langfuse.observation.{target}"] = (
+                    value if isinstance(value, str) else json.dumps(value)
+                )
                 break
     if span.operation == "LLM":
-        body["model"] = attrs.get("gen_ai.request.model")
-        body["usageDetails"] = {
-            target: attrs[source] for source, target in (
+        if "gen_ai.request.model" in original:
+            attrs["langfuse.observation.model.name"] = original["gen_ai.request.model"]
+        usage = {
+            target: original[source] for source, target in (
                 ("gen_ai.usage.input_tokens", "input"),
                 ("gen_ai.usage.output_tokens", "output"),
-            ) if source in attrs
+            ) if source in original
         }
+        attrs["langfuse.observation.usage_details"] = json.dumps(usage)
+    body: dict[str, Any] = {
+        "traceId": span.trace_id, "spanId": span.span_id, "name": span.name,
+        "kind": {"internal": 1, "server": 2, "client": 3, "producer": 4, "consumer": 5}.get(span.kind, 1),
+        "startTimeUnixNano": _unix_nano(span.start), "endTimeUnixNano": _unix_nano(span.end),
+        "attributes": [{"key": k, "value": _otel_value(v)} for k, v in attrs.items()],
+        "status": {"code": 2, "message": span.error} if span.error else {"code": 1},
+    }
+    if span.parent_id:
+        body["parentSpanId"] = span.parent_id
     return body
 
 
 def _phoenix(span: _Span) -> dict[str, Any]:
-    import json
-
     attrs = {k: v for k, v in span.attributes.items() if k not in _CONTENT_KEYS}
     mapping = {
         "gen_ai.request.model": "llm.model_name",
@@ -165,43 +210,45 @@ class _Exporter:
     def payload(self, spans: list[_Span]) -> dict[str, Any]:
         if self.provider == "phoenix":
             return {"data": [_phoenix(s) for s in spans]}
-        batch = []
-        for s in spans:
-            body = _langfuse(s)
-            if s.parent_id is None:
-                root: dict[str, Any] = {k: body[k] for k in ("name", "metadata", "input", "output") if k in body}
-                root.update(id=s.trace_id, timestamp=s.start)
-                if "gen_ai.conversation.id" in s.attributes:
-                    root["sessionId"] = s.attributes["gen_ai.conversation.id"]
-                batch.append({"id": secrets.token_hex(16), "timestamp": _now(),
-                              "type": "trace-create", "body": root})
-            batch.append({"id": secrets.token_hex(16), "timestamp": _now(),
-                          "type": "generation-create" if s.operation == "LLM" else "span-create",
-                          "body": body})
-        return {"batch": batch}
+        return {"resourceSpans": [{
+            "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": self.service}}]},
+            "scopeSpans": [{"scope": {"name": INSTRUMENTATION_NAME},
+                            "spans": [_langfuse(span) for span in spans]}],
+        }]}
 
     def _send(self, client: httpx.Client, spans: list[_Span]) -> None:
-        # Reuse event IDs on retries: Langfuse deduplicates ingestion events by ID.
+        # Build completed spans once. V4 does not guarantee deduplication on replay.
         payload = self.payload(spans)
         for attempt in range(3):
             try:
                 response = client.post(self.url, headers=self.headers, json=payload)
-                if response.status_code == 429 or response.status_code >= 500:
+                retryable = response.status_code in (429, 502, 503, 504)
+                if self.provider == "phoenix" and response.status_code >= 500:
+                    retryable = True
+                if retryable:
                     if attempt < 2:
                         time.sleep(0.2 * 2 ** attempt)
                         continue
                 response.raise_for_status()
-                result = response.json()
+                result = response.json() if response.content else {}
                 if self.provider == "langfuse":
-                    accepted = {entry["id"] for entry in result.get("successes", [])
-                                if 200 <= entry.get("status", 0) < 300}
-                    expected = {entry["id"] for entry in payload["batch"]}
-                    if result.get("errors") or accepted != expected:
-                        raise ValueError("ingestion rejected events")
+                    if response.status_code != 200:
+                        raise ValueError("unexpected OTLP response status")
+                    partial = result.get("partialSuccess", {})
+                    if int(partial.get("rejectedSpans", 0)):
+                        raise ValueError("OTLP ingestion rejected spans")
+                    if partial.get("errorMessage"):
+                        logger.warning("Langfuse accepted trace export with an ingestion warning")
                 elif result.get("total_queued") != len(spans):
                     raise ValueError("ingestion did not queue all spans")
                 return
-            except httpx.TransportError:
+            except httpx.TransportError as exc:
+                # A read/write failure may follow a successful ingestion. Replaying
+                # that request can create duplicate observations on the v4 read path.
+                if self.provider == "langfuse" and not isinstance(
+                    exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+                ):
+                    raise
                 if attempt < 2:
                     time.sleep(0.2 * 2 ** attempt)
                     continue
@@ -269,7 +316,9 @@ def configure(settings: Any) -> bool:
             return False
         import base64
         headers["Authorization"] = "Basic " + base64.b64encode(f"{public}:{secret}".encode()).decode()
-        path = "/api/public/ingestion"
+        headers["x-langfuse-ingestion-version"] = "4"
+        headers["Accept"] = "application/json"
+        path = "/api/public/otel/v1/traces"
     elif provider == "phoenix":
         url = os.getenv("PHOENIX_COLLECTOR_ENDPOINT") or settings.url or "http://localhost:6006"
         key = os.getenv("PHOENIX_API_KEY") or settings.api_key
@@ -314,10 +363,12 @@ def span(name: str, *, kind: str = "internal", attributes: Mapping[str, Any] | N
         return
     parent = _current.get()
     recorder = _Span(name, parent.trace_id if parent else secrets.token_hex(16),
-                     parent.span_id if parent else None, _record_content)
+                     parent.span_id if parent else None, _record_content,
+                     trace_name=parent.trace_name if parent else name, kind=kind.lower())
     recorder.set(**{"service.name": exporter.service})
-    if parent and "gen_ai.conversation.id" in parent.attributes:
-        recorder.set(**{"gen_ai.conversation.id": parent.attributes["gen_ai.conversation.id"]})
+    if parent:
+        recorder.set(**{k: v for k, v in parent.attributes.items()
+                        if k in _TRACE_KEYS or k.startswith("langfuse.trace.")})
     recorder.set(**dict(attributes or {}))
     token = _current.set(recorder)
     try:
