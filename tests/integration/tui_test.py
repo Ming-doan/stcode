@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import pytest
 from typing import Any, Callable
 
 from conftest import asynctest
@@ -987,7 +988,7 @@ async def test_a_shell_entry_is_marked_by_a_rule_not_a_box(
             await pilot.pause()
             entry = next(e for e in app.chat.transcript.children if isinstance(e, ShellOutput))
             edge, _colour = entry.styles.border_left
-            assert edge == "thick"
+            assert edge == "solid"
 
 
 # ---- /effort is remembered ---------------------------------------------------------
@@ -1042,3 +1043,62 @@ async def test_a_command_line_flag_is_not_written_to_the_config(
         assert load_config(env.config_path).agent.approval_mode != "plan", (
             "the flag was written to the config file"
         )
+
+
+@asynctest
+async def test_refused_mode_cycle_warns_and_keeps_connection_usable(
+    tmp_path: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("stcode.core.daemon.autonomy.in_container", lambda: False)
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            await pilot.press("shift+tab")
+            assert await until(lambda: bool(app.chat.transcript.query(".notice.warning")))
+            assert app.state.effective["mode"] == "auto-edit"
+            assert not app.chat.transcript.query(".notice.error")
+            assert await app.connection.client.info()
+            assert load_config(env.config_path).agent.approval_mode == "auto-edit"
+
+
+@asynctest
+async def test_aliases_use_daemon_workspace_when_client_paths_differ(
+    tmp_path: Path, workspace: Path
+) -> None:
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        runner = await env.daemon.create_session(cwd=workspace)
+        app = build_app(
+            Launcher(env.address, log_path=env.log_path), daemonless=True,
+            cwd=tmp_path, resume=runner.id, prefs_path=env.prefs_path,
+        )
+        async with app.run_test() as pilot:
+            await attached_elsewhere(app, pilot)
+            assert app.options.cwd != workspace
+            # Even a stale client snapshot must not change the listing root.
+            app.state.info["cwd"] = str(tmp_path)
+            app.chat.prompt.text = "!pwd"
+            await pilot.press("enter")
+            entry = next(iter(app.chat.transcript.query(ShellOutput)))
+            assert await until(lambda: str(workspace) in entry._output)
+            await pilot.press("at")
+            assert await until(lambda: bool(app.chat.files))
+            assert "src/app.py" in app.chat.files
+            entry.finish("\n".join(str(n) for n in range(80)), 0)
+            await pilot.pause()
+            assert entry.size.height == 6
+            assert entry.max_scroll_y > 0
+
+
+@asynctest
+async def test_file_completion_after_disconnect_warns_without_closing_ui(
+    tmp_path: Path, workspace: Path
+) -> None:
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            await app.connection.close_client()
+            await pilot.press("at")
+            assert await until(lambda: bool(app.chat.transcript.query(".notice.warning")))
+            assert app.chat.files == []

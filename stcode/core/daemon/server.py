@@ -54,6 +54,8 @@ from stcode.core.daemon.protocol import (
     Detach,
     ErrorMessage,
     GetConfig,
+    WorkspaceFiles,
+    WorkspaceShell,
     History,
     Info,
     Interrupt,
@@ -70,6 +72,7 @@ from stcode.core.daemon.protocol import (
     parse_client_message,
 )
 from stcode.core.daemon.runner import SessionRunner
+from stcode.core.daemon.workspace import list_files, run_shell
 from stcode.core.providers.gateway import LLMGateway
 from stcode.core.providers.registry import default_model_for
 from stcode.core.session import Session
@@ -440,6 +443,7 @@ class _Connection:
         self._drain_task = asyncio.create_task(self._drain(), name="stcode-conn-writer")
         self._attached: set[str] = set()
         self._current: str = ""
+        self._workspace_tasks: set[asyncio.Task[None]] = set()
 
     # ---- io ----
 
@@ -479,6 +483,9 @@ class _Connection:
     async def aclose(self) -> None:
         """Detach from everything, then close the socket. **Never touches the agents** —
         that is the whole promise of the daemon."""
+        for task in self._workspace_tasks:
+            task.cancel()
+        await asyncio.gather(*self._workspace_tasks, return_exceptions=True)
         for session_id in list(self._attached):
             await self._detach(session_id)
         self._drain_task.cancel()
@@ -532,6 +539,10 @@ class _Connection:
                         session_dir=str(self._daemon.config.session.dir),
                     )
                 )
+            case WorkspaceFiles() | WorkspaceShell():
+                task = asyncio.create_task(self._workspace_request(message))
+                self._workspace_tasks.add(task)
+                task.add_done_callback(self._workspace_tasks.discard)
             case GetConfig():
                 self.send(self._daemon.config_frame())
             case SetConfig():
@@ -557,12 +568,28 @@ class _Connection:
                 try:
                     guard_autonomy(message.mode, self._daemon.has_approver)
                 except AutonomyRefused as refusal:
-                    self.send(ErrorMessage(session=runner.id, message=str(refusal)))
+                    self.send(ErrorMessage(session=runner.id, message=str(refusal), level="warning"))
                 else:
                     runner.set_mode(message.mode)
                 # Either way, report what the mode now *is*: a client must never be
                 # left showing a change that was refused.
                 self.send(runner.describe())
+
+    async def _workspace_request(self, message: WorkspaceFiles | WorkspaceShell) -> None:
+        reply: dict[str, Any] = {
+            "type": message.type, "request_id": message.request_id,
+            "session": self._target_id(message.session),
+        }
+        try:
+            runner = self._runner(message.session)
+            cwd = runner.agent.harness.context.cwd
+            if isinstance(message, WorkspaceFiles):
+                reply["files"] = await asyncio.to_thread(list_files, cwd)
+            else:
+                reply.update(await run_shell(message.command, cwd, message.timeout))
+        except Exception as exc:
+            reply["error"] = str(exc)
+        self.send(reply)
 
     def _attach(self, runner: SessionRunner, *, replay: bool) -> None:
         """Subscribe, then replay, then join the live stream.

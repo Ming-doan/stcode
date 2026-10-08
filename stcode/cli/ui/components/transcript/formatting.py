@@ -8,7 +8,7 @@ The transcript — eight shapes, each one because it has to be told apart at a g
 | `│ quoted, dim` | thinking. Capped at the last six lines while it streams |
 | dim, unquoted | a running tool's output. Advisory, never in the session |
 | plain text | the model's answer |
-| a green or red box | a tool call and its result — the colour *is* the outcome |
+| a gray block with a green left border | a tool call and its result |
 | a rule down the left | a `!` command you ran. Never in the session |
 | a tinted full-width box | a warning or an error |
 
@@ -24,13 +24,12 @@ shell, and a stray `[` in one must not be read as a style tag.
 from __future__ import annotations
 
 import zlib
+from dataclasses import dataclass
 from typing import Any, Mapping
 
-from rich.console import RenderableType
-from rich.panel import Panel
+from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
 from rich.rule import Rule
 from rich.text import Text
-from rich import box
 
 
 THINKING_LINES = 6
@@ -113,7 +112,7 @@ def _shorten(text: str, limit: int) -> str:
 
 
 def platform_rule(text: str) -> RenderableType:
-    """`───── mode → auto-edit ─────`, full width, dim italic.
+    """`───── mode → auto-edit ─────`, full width, light gray.
 
     A rule rather than a line of text: what the *platform* did is not part of the
     conversation, and it should not be possible to mistake one for the other.
@@ -123,8 +122,34 @@ def platform_rule(text: str) -> RenderableType:
     — which is what a tool's output looked like when it arrived as progress.
     """
     return Rule(
-        Text(" ".join(text.split()), style="italic dim"), characters="─", style="dim"
+        Text(" ".join(text.split()), style="#999999"), characters="─", style="#bbbbbb"
     )
+
+
+@dataclass
+class ToolPreview:
+    name: str
+    arguments: Mapping[str, Any]
+    result: str
+    ok: bool
+    finished: bool
+    colour: str
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        width = max(1, options.max_width)
+        heading = self.name + (" · failed" if self.finished and not self.ok else "")
+        yield Text(heading, style=f"bold {self.colour}", no_wrap=True, overflow="ellipsis")
+        arguments = Text(format_arguments(self.arguments))
+        arguments.truncate(width, overflow="ellipsis")
+        yield arguments
+        if self.result.strip():
+            lines = Text(self.result.strip(), style="dim").wrap(console, width)
+            if len(lines) > TOOL_RESULT_LINES:
+                lines = lines[:TOOL_RESULT_LINES]
+                lines[-1].truncate(max(0, width - 1))
+                lines[-1].append("…")
+            for line in lines:
+                yield line
 
 
 def tool_render(
@@ -136,43 +161,8 @@ def tool_render(
     finished: bool = True,
     colour: str = "",
 ) -> RenderableType:
-    """One tool call as a small box: its name in the heading, arguments and result under.
-
-    **The colour carries the outcome, so nothing else has to.** Green when it worked,
-    red when it did not, dim while it is still running — which means no `✗` to read, no
-    second word for the same fact, and a turn you can skim by colour alone. The name is
-    the box's heading rather than a first column, so a long `bash` command no longer
-    decides how wide the name column is.
-
-    `colour` is the theme's, resolved by the caller: a Rich style string cannot say
-    `$success`. Left empty it falls back to the plain ANSI names, which is what tests
-    and any non-Textual caller get.
-    """
-    if not colour:
-        colour = "dim" if not finished else ("green" if ok else "red")
-
-    body = Text(format_arguments(arguments), style="dim")
-    for line in _result_lines(result):
-        body.append("\n")
-        body.append(line, style="dim")
-    return Panel(
-        body,
-        title=Text(name, style=f"bold {colour}"),
-        title_align="left",
-        border_style=colour,
-        box=box.ROUNDED,
-        padding=(0, 1),
-        expand=True,
-    )
-
-
-def _result_lines(result: str, limit: int = TOOL_RESULT_LINES) -> list[str]:
-    if not result.strip():
-        return []
-    lines = [line.rstrip() for line in result.strip().splitlines()]
-    if len(lines) <= limit:
-        return lines
-    return [*lines[:limit], "…"]
+    """A borderless receipt, clipped to one argument and two result display rows."""
+    return ToolPreview(name, arguments, result, ok, finished, colour or "green")
 
 
 def shell_render(command: str, output: str, *, exit_code: int = 0) -> RenderableType:

@@ -21,13 +21,14 @@ async with await DaemonClient.connect(Address()) as client:
     async for frame in client.events(): ...
 ```
 
-Five modules, one job each:
+Daemon modules, one job each:
 
 | | |
 | --- | --- |
 | `protocol.py` | the JSONL message shapes — the only thing on the wire |
 | `runner.py` | `SessionRunner`: one live session, its watchers, its parked requests |
 | `server.py` | the socket, the registry, one connection object per client, config reloads |
+| `workspace.py` | explicit user shell commands and bounded file discovery in the session workspace |
 | `autonomy.py` | `guard_autonomy` / `in_container` — the `full-auto` rule, as code |
 | `main.py` | `stcode-daemon`: flags, the startup report, signals, exit codes |
 
@@ -66,6 +67,13 @@ The **daemon owns file execution, tool execution, and session state**.
   own container workspace (`Path.cwd()`, e.g. `/workspace`). If an incoming `cwd` does not
   exist on the daemon filesystem, the daemon logs a warning and falls back to its own
   working directory.
+
+`!` shell commands and `@` file completion also use the attached session's directory
+on this machine. Their `workspace_shell` and `workspace_files` requests carry a
+`request_id`; replies echo it, so concurrent commands cannot steal each other's
+results. Connection-owned tasks keep slow commands off the reader and are cancelled
+on disconnect. Shell processes are killed as a group on timeout or disconnect.
+These user actions never enter the agent's session history.
 
 ## The protocol
 
@@ -241,6 +249,9 @@ There is no override flag, and there will not be one. `in_container()` looks for
 signals a real container leaves (`/.dockerenv`, cgroup markers, `STCODE_SANDBOX=1`), and
 an attached human does not count as an approver — a human watching a stream is not a
 human answering a prompt, and `full-auto` never asks.
+
+A refused interactive mode switch reports a warning and keeps the existing mode and
+connection. Startup still refuses an unsafe full-auto configuration.
 
 This is code, not a warning in a document. The agent runs commands with your privileges;
 the container is the mitigation.

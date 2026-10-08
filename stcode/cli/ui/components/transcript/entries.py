@@ -6,7 +6,7 @@ from rich.text import Text
 from textual.containers import Horizontal, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Static
-from stcode.cli.ui.theme import brand_text, error_text
+from stcode.cli.ui.theme import brand_text
 from stcode.cli.ui.components.transcript.formatting import (
     PROGRESS_LINES,
     agent_colour,
@@ -151,15 +151,10 @@ class ToolCall(Static):
         )
 
     def _colour(self) -> str:
-        """The theme's green or red — resolved here because only a mounted widget can
-        see which theme is in force."""
-        if not self._finished:
-            return "dim"
-        dark = self.app.current_theme.dark
-        return brand_text(dark) if self._ok else error_text(dark)
+        return brand_text(self.app.current_theme.dark)
 
 
-class ShellOutput(Static):
+class ShellOutput(VerticalScroll):
     """A `!` command and its output, marked by a rule down the left.
 
     A rule rather than a box, because this is the one thing on the screen that is
@@ -168,10 +163,14 @@ class ShellOutput(Static):
     """
 
     def __init__(self, command: str) -> None:
-        super().__init__(classes="entry shell", markup=False)
+        super().__init__(classes="entry shell")
+        self._text = Static(markup=False)
         self._command = command
         self._output = ""
         self._exit_code = 0
+
+    def compose(self) -> Any:
+        yield self._text
 
     def on_mount(self) -> None:
         self._refresh()
@@ -181,7 +180,7 @@ class ShellOutput(Static):
         self._refresh()
 
     def _refresh(self) -> None:
-        self.update(
+        self._text.update(
             shell_render(self._command, self._output, exit_code=self._exit_code)
         )
 

@@ -1133,3 +1133,26 @@ async def test_create_session_falls_back_when_cwd_does_not_exist(tmp_path: Path)
     finally:
         await daemon.aclose()
 
+
+
+@asynctest
+async def test_workspace_requests_are_correlated_and_do_not_block_control(
+    sandbox: Path, tmp_path: Path
+) -> None:
+    (sandbox / "daemon-only.txt").write_text("hello")
+    async with Harnessed(config_for(tmp_path), RecordingGateway([])) as env:
+        async with await env.client() as client:
+            opened = await client.create(cwd=sandbox)
+            before = env.daemon.sessions[opened["id"]].agent.session.records()
+            slow = asyncio.create_task(client.workspace_shell("sleep 1; pwd", timeout=3))
+            fast = asyncio.create_task(client.workspace_shell("echo fast", timeout=3))
+            try:
+                assert (await asyncio.wait_for(fast, 0.8))["output"].strip() == "fast"
+                assert "daemon-only.txt" in await client.workspace_files()
+                assert (await client.info())["cwd"] == str(sandbox)
+                assert str(sandbox) in (await slow)["output"]
+                result = await client.workspace_shell("sleep 10", timeout=1)
+                assert result["exit_code"] == 124 and result["timed_out"] == 1
+                assert env.daemon.sessions[opened["id"]].agent.session.records() == before
+            finally:
+                await asyncio.gather(slow, fast, return_exceptions=True)

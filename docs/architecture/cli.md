@@ -14,7 +14,7 @@ See [decision 0006](../decisions/0006-cli-and-core-are-separate-programs.md) and
 | `ui/screens/` | Pages and modal forms; chat interaction and presentation | Components and logic |
 | `ui/components/` | Reusable widgets, transcript entries and Rich formatting | UI helpers, models and labels |
 | `logic/` | Connection/session/settings workflows, commands, completion, request queue | Services and models |
-| `services/` | Socket client, daemon launcher, preferences, file discovery, local shell | Models and other services |
+| `services/` | Socket client, daemon launcher, preferences and daemon transport | Models and other services |
 | `models.py` | Client vocabulary, launch options and preference values | Standard library and Pydantic |
 | `labels.py` | User-facing copy and presentation tables | Models and pure command helpers |
 
@@ -42,10 +42,11 @@ Streaming appends to an existing entry; it does not rebuild the transcript.
 The status component owns its spinner timer. Approval and question requests remain
 inline cards, ordered by arrival and correlated by execution ID.
 
-Local preferences belong to `ui.toml`. Local `!` commands use the terminal's workspace,
-even when connected to a remote daemon, and never enter the agent's session history.
-Blocking shell and file operations run in thread workers; widget updates return to
-the UI thread.
+Local preferences belong to `ui.toml`. `!` commands and `@` file discovery use the
+attached session's workspace on the daemon, including remote connections. Commands
+never enter agent history. Correlated workspace requests run independently of the
+connection reader, so shell execution does not delay mode changes or approvals.
+A refused full-auto mode change is a warning; the existing mode and connection stay active.
 
 ## Styles and tests
 
@@ -55,7 +56,7 @@ in scoped `DEFAULT_CSS`; screens can override those defaults.
 Tests mirror `logic/`, `services/` and `ui/` under `tests/cli/`. Import-boundary tests
 protect the layers. Plain Python workflow tests cover refused settings, queue order
 and connection cleanup. The existing real-socket TUI integration suite protects
-keyboard behavior, trust, approvals, history, streaming and local shell semantics.
+keyboard behavior, trust, approvals, history, streaming and daemon workspace semantics.
 
 Before delivery, run `uv run pytest`, the strict MkDocs build, and an installed-wheel
 smoke test that loads the screens and their styles from outside the checkout.

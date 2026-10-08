@@ -34,9 +34,18 @@ class Transcript(VerticalScroll):
     .entry.shell {
         width: 1fr;
         padding: 0 1;
-        border-left: thick $primary;
+        height: 6;
+        border-left: solid $primary;
+        scrollbar-size-vertical: 1;
     }
     
+    .entry.tool {
+        background: $foreground 6%;
+        color: $foreground;
+        border-left: solid $primary;
+        padding: 0 1;
+    }
+
     .entry.thinking, .entry.progress {
         max-height: 6;
         scrollbar-size-vertical: 1;

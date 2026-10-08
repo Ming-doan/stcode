@@ -37,6 +37,8 @@ async with await DaemonClient.connect(Address()) as client:   # ~/.stcode/daemon
 | `answer` | `execution_id`, `text` | answers a `question` |
 | `set_mode` | `mode` | reaches the **live** session, not just later ones |
 | `set_meta` | `model`, `provider`, `reasoning_effort` | appends a `meta` record; the agent reads it before the next model call |
+| `workspace_files` | `session`, `request_id` | replies with relative `files` from the daemon session workspace (up to 2,000) |
+| `workspace_shell` | `session`, `request_id`, `command`, `timeout` | runs a user command on the daemon, outside agent history; timeout is clamped to 1–120 seconds |
 | `info` | — | skills, MCP servers, tool names, paths and this session's token totals, as the **daemon's** machine sees them |
 | `get_config` | — | the daemon's config as a `config` frame. Keys are never sent |
 | `set_config` | `provider`, `model`, `api_key`, `reasoning_effort`, `approval_mode` | patches the daemon's `config.toml` and reloads. `api_key` over the unix socket only |
@@ -55,6 +57,8 @@ and then has to say which it means.
 | `history` | the transcript so far, sent on attach before the live stream is joined |
 | `approval_request` | a tool is waiting on a human |
 | `question` | `ask_user_question` is waiting |
+| `workspace_files` | `session`, `request_id` | replies with relative `files` from the daemon session workspace (up to 2,000) |
+| `workspace_shell` | `session`, `request_id`, `command`, `timeout` | runs a user command on the daemon, outside agent history; timeout is clamped to 1–120 seconds |
 | `info` | answer to `info`. `usage` on it is the session's totals, summed from its `usage` records — one per model call, which is what `turn_finished` cannot give you |
 | `config` | answer to `get_config` and `set_config` — see below |
 | `progress` | a line from a long-running tool. Advisory; nothing is recorded |
@@ -164,3 +168,7 @@ not a dropped connection:
 ```
 
 → [The daemon (architecture)](../architecture/daemon.md)
+
+Workspace replies echo `type`, `request_id` and `session`. Shell replies include
+`output`, `exit_code`, and optional `timed_out`; either workspace reply may carry
+`error`. They are correlated independently of streaming events and ordinary requests.

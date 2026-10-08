@@ -38,8 +38,8 @@ class UiPrefs(BaseModel):
 
     shell_timeout: float = DEFAULT_SHELL_TIMEOUT
     """Seconds a `!` command may run before it is killed. Capped at
-    `MAX_SHELL_TIMEOUT`. Here rather than in `config.toml` because `!` runs on *this*
-    terminal's machine and the agent never sees it — same split as the theme."""
+    `MAX_SHELL_TIMEOUT`. A client preference sent with each daemon workspace command;
+    the command never enters the agent's history."""
 
     def is_trusted(self, path: str | Path) -> bool:
         """Whether `path`, or a parent of it, has been trusted.

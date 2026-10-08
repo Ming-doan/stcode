@@ -1,22 +1,17 @@
-"""Select the correct workspace for local client operations."""
+"""Workspace requests always target the attached daemon session."""
 
-from pathlib import Path
+from typing import Any
 
-from stcode.cli.models import StartOptions, UiPrefs
-from stcode.cli.services.files import list_files
-from stcode.cli.services.shell import ShellResult, run_shell
-from .state import ClientState
+from stcode.cli.models import UiPrefs
+from stcode.cli.services.client import DaemonClient
 
 
 class Workspace:
-    def __init__(
-        self, options: StartOptions, state: ClientState, prefs: UiPrefs
-    ) -> None:
-        self.options, self.state, self.prefs = options, state, prefs
+    def __init__(self, prefs: UiPrefs) -> None:
+        self.prefs = prefs
 
-    def files(self) -> list[str]:
-        root = Path(str(self.state.info.get("cwd", "") or self.options.cwd))
-        return list_files(root) if root.is_dir() else []
+    async def files(self, client: DaemonClient) -> list[str]:
+        return await client.workspace_files()
 
-    def shell(self, command: str) -> ShellResult:
-        return run_shell(command, self.options.cwd, self.prefs.shell_timeout)
+    async def shell(self, client: DaemonClient, command: str) -> dict[str, Any]:
+        return await client.workspace_shell(command, self.prefs.shell_timeout)

@@ -95,7 +95,7 @@ Eight shapes, each one because it has to be told apart from the others at a glan
 | `│ the middleware is probably in src/api` | **thinking.** Quoted and dim, so reasoning never reads as an answer. Capped at six lines while it streams — the last six — and scrollable afterwards |
 | dim, unquoted | **a running tool's output**, while it is still running: a REPL cell printing, a URL being fetched. Last six lines, advisory, never in the session |
 | plain text | **the model's answer** |
-| a green or red box | **a tool call and its result.** The colour is the outcome |
+| a gray block with a green left border | **a tool call and its result.** Failures are labelled |
 | a rule down the left | **a `!` command you ran.** Never in the session |
 | `▌ no API key for anthropic` | **a warning or an error.** Full-width box, yellow or red |
 
@@ -107,32 +107,25 @@ enough, and `?` has the paths when you want them.
 ### Tool calls
 
 ```
-╭─ read ───────────────────────────────────────────────────────────╮   green
-│ path=src/api/mw.py                                               │
-│ 1  from fastapi import Request                                   │
-│ 2  from .limits import Bucket                                    │
-╰──────────────────────────────────────────────────────────────────╯
+│ read
+│ path=src/api/mw.py
+│ 1  from fastapi import Request
+│ 2  from .limits import Bucket
 
-╭─ bash ───────────────────────────────────────────────────────────╮   red
-│ command=pytest -q                                                │
-│ 3 failed, 12 passed                                              │
-│ …                                                                │
-╰──────────────────────────────────────────────────────────────────╯
+│ bash · failed
+│ command=pytest -q
+│ 3 failed, 12 passed
+│ …
 ```
 
-The name is the box's **heading**, the arguments and the result are grey under it, and
-one box per call — so a turn with four parallel calls is four boxes and not a paragraph
-of interleaved status lines.
+Tool calls use a light gray fill and a thin primary-color left border. The name uses
+primary-colored text, arguments use normal foreground text trimmed to one display
+line, and results use gray text trimmed to two display lines. An ellipsis marks
+omitted content; a failed call is labelled `failed`. Full results remain in the session.
 
-**The colour carries the outcome, so nothing else has to.** Dim while the call is
-running, green when it worked, red when it did not. There is no `✗` and no second word
-for the same fact, which means a turn can be skimmed by colour alone.
-
-The result is trimmed to **two lines**, with a `…` when there was more. The box is a
-receipt, not a viewer: what you want from a finished call is that it ran and whether it
-worked, and six calls each showing six lines is a screenful of output with the
-conversation pushed off the top of it. The whole value is in the session — and the
-`tool_finished` frame only carries 240 characters of it anyway.
+Event dividers use light gray lines and text on one terminal row. Terminal font size
+is controlled by your terminal, so individual event rows cannot use a smaller font.
+The input has only a light left border.
 
 ### Sub-agents
 
@@ -141,9 +134,9 @@ its content indented:
 
 ```
 api-scout │ Three handlers, all in src/api/mw.py.
-api-scout ╭────────────────────────────────────────────────────────╮
-          │ grep │ pattern=Bucket                                  │
-          ╰────────────────────────────────────────────────────────╯
+api-scout │ grep
+          │ pattern=Bucket
+          │ src/api/mw.py:12: class Bucket:
 ```
 
 The colour is picked from the name, not at random: the same sub-agent is the same colour
@@ -197,7 +190,7 @@ Four characters do something instead of being an ordinary line of text:
 The first three **filter as you keep typing** — `/mo` narrows to `/model` and `/mode`, `@mw`
 to `src/api/mw.py`. Six rows are visible and the list scrolls.
 
-The first `@` of a session lists the workspace in a thread, so it can open a beat before
+The first `@` of a session requests the daemon workspace listing, so it can open a beat before
 it has anything to show. It says `listing the workspace…` and fills itself in when the
 listing arrives — there is nothing to retype.
 
@@ -372,9 +365,9 @@ not written to the session — so `!git diff` before describing a change costs n
 and leaves nothing the model will later read back as something it did. The rule down the
 left is there for that reason: it must be impossible to mistake for the agent's work.
 
-It runs in **this** terminal's workspace. In `--daemonless` the agent's workspace is a
-different machine, and `!` is always the near one — which is the honest answer, because
-this is your shell, not the agent's.
+It runs on the **daemon's machine**, in the attached session's workspace. `@` file
+completion also lists files there, never on the CLI's machine. Shell output occupies
+a fixed six-row scrollable block with a thin left border.
 
 Ten seconds, then it is killed. Raise it in `~/.stcode/ui.toml`:
 
@@ -385,6 +378,9 @@ shell_timeout = 30    # seconds; clamped to 1–120
 The ceiling is low on purpose. `!` runs on the UI's budget rather than the agent's, and
 a command that needs two minutes belongs in a second terminal — or in a `bash` tool call
 where the agent can watch it and act on the result.
+
+Cycling to `full-auto` outside a supported container shows a warning and keeps the
+current mode. The daemon and connection remain available.
 
 ## Approvals and questions
 

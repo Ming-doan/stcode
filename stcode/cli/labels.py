@@ -215,7 +215,7 @@ SHORTCUT_ROWS: list[Row] = [
     ("?", "this card — backspace closes it"),
     ("/", "commands — type more to filter"),
     ("@", "files to mention — type more to filter"),
-    ("!", "run a shell command here — never sent to the agent"),
+    ("!", "run a shell command on the daemon — never sent to the agent"),
     ("enter", "send"),
     ("ctrl+j", "newline (shift+enter and alt+enter where the terminal reports them)"),
     ("shift+tab", "change approval mode"),

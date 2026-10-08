@@ -22,6 +22,7 @@ from stcode.cli.logic.sessions import Sessions
 from stcode.cli.logic.settings import Settings
 from stcode.cli.logic.state import ClientState
 from stcode.cli.logic.workspace import Workspace
+from stcode.cli.services.client import RequestRefused
 from stcode.cli.ui.components.banner import Banner
 from stcode.cli.ui.components.cards import Card, CardZone
 from stcode.cli.ui.components.prompt import Prompt
@@ -51,7 +52,7 @@ class ChatScreen(Screen[None]):
         self.prefs, self.prefs_path = prefs, prefs_path
         self.sessions = Sessions(connection, state, options)
         self.settings = Settings(state)
-        self.workspace = Workspace(options, state, prefs)
+        self.workspace = Workspace(prefs)
         self.requests = RequestQueue()
         self.files: list[str] | None = None
         self._request_connection = request_connection
@@ -83,7 +84,7 @@ class ChatScreen(Screen[None]):
         elif kind in ("approval_request", "question"):
             self._enqueue_request(frame)
         else:
-            if kind == "error" or (
+            if (kind == "error" and frame.get("level") != "warning") or (
                 kind in ("turn_finished", "agent_failed") and not frame.get("agent")
             ):
                 self.status.stop_working()
@@ -227,8 +228,8 @@ class ChatScreen(Screen[None]):
         symbol, query = trigger
         kind = labels.CARD_COMMANDS if symbol == "/" else labels.CARD_FILES
         if symbol == "@" and self.files is None:
-            # First `@` of the session: the listing runs in a thread, and the card that
-            # opens now is empty. `_files_loaded` refills it when the thread returns —
+            # First `@` of the session: the daemon lists files while the card opens.
+            # `_files_loaded` refills it when the reply arrives —
             # without that, the first `@` showed nothing and only the second one worked,
             # which reads as a broken key rather than a slow one.
             self._load_files()
@@ -402,18 +403,7 @@ class ChatScreen(Screen[None]):
             self._send(text)
 
     def _run_shell(self, command: str) -> None:
-        """Run one command here, in this terminal, and show what it printed.
-
-        **Nothing about this touches the agent.** It is not a tool call, it is not
-        approved, and it is not written to the session — so `!git status` before you
-        describe a change costs no context and leaves no record the model will later
-        read back as something it did. The transcript entry is a rule down the left for
-        exactly that reason: it has to be impossible to mistake for the agent's work.
-
-        It runs in *this* process's workspace, not the daemon's. In `--daemonless` those
-        are different machines, and `!` is always the near one — which is the honest
-        answer, because this is your shell and not the agent's.
-        """
+        """Run a user command in the daemon workspace, outside agent history."""
         if not command:
             self.presenter.warn(labels.SHELL_NO_COMMAND)
             return
@@ -611,21 +601,30 @@ class ChatScreen(Screen[None]):
             await self.sessions.interrupt()
             self.presenter.note(labels.STREAM_STOPPED)
 
-    @work(thread=True, group="files", exclusive=True)
-    def _load_files(self) -> None:
-        found = self.workspace.files()
-        self.app.call_from_thread(self._files_loaded, found)
+    @work(group="files", exclusive=True)
+    async def _load_files(self) -> None:
+        client, session_id = self.connection.client, self.state.session_id
+        try:
+            if client is None:
+                raise ConnectionError(labels.not_connected())
+            found = await self.workspace.files(client)
+        except Exception as exc:
+            self.presenter.warn(str(exc))
+            found = []
+        if self.connection.client is client and self.state.session_id == session_id:
+            self._files_loaded(found)
 
-    @work(thread=True, group="shell")
-    def _shell_worker(self, entry: ShellOutput, command: str) -> None:
-        result = self.workspace.shell(command)
-        output = result.output
-        if result.timed_out is not None:
-            output = labels.shell_timed_out(result.timed_out)
-        elif result.error is not None:
-            output = labels.shell_failed(result.error)
-        self.app.call_from_thread(entry.finish, output, result.exit_code)
-        self.app.call_from_thread(self.presenter.settle)
+    @work(group="shell")
+    async def _shell_worker(self, entry: ShellOutput, command: str) -> None:
+        try:
+            result = await self.workspace.shell(self.sessions.client, command)
+            output = result.get("output", "")
+            if result.get("timed_out") is not None:
+                output += "\n" + labels.shell_timed_out(result["timed_out"])
+            entry.finish(output, result.get("exit_code", 0))
+        except Exception as exc:
+            entry.finish(labels.shell_failed(exc), 1)
+        self.presenter.settle()
 
     @work(group="answers")
     async def _apply_settings(self, patch: dict[str, Any]) -> None:
@@ -644,6 +643,8 @@ class ChatScreen(Screen[None]):
     async def _set_mode(self, mode: ApprovalMode) -> None:
         try:
             await self.settings.set_mode(self.sessions.client, mode)
+        except RequestRefused as exc:
+            self.presenter.warn(str(exc))
         except Exception as exc:
             self.presenter.error(labels.daemon_failed(exc))
         finally:
@@ -661,6 +662,8 @@ class ChatScreen(Screen[None]):
             self.status.refresh_display()
 
     def _adopt_session(self, frame: dict[str, Any]) -> None:
+        if str(frame.get("id", "")) != self.state.session_id:
+            self.files = None
         previous_mode = self.state.effective.get("mode")
         self.state.adopt_session(frame)
         mode = self.state.effective.get("mode", "")

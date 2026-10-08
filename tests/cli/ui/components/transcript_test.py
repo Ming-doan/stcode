@@ -84,13 +84,12 @@ def _plain(renderable: object, width: int = 80) -> str:
 
 
 def test_the_tool_name_is_the_heading_and_carries_no_icon() -> None:
-    """The colour says whether it worked. A `✗` on top of that is the same fact twice,
-    and it shifts the name a character to the right on failures only."""
+    """Names occupy their own row; failures keep the same alignment."""
     ok = _plain(tool_render("read", {"path": "src/app.py"}))
     failed = _plain(tool_render("read", {"path": "nope.py"}, ok=False))
     assert "✗" not in ok and "✗" not in failed
-    # The name is in the border row, not in a column of its own beside the arguments.
-    assert ok.splitlines()[0].lstrip().startswith("╭─ read")
+    # The name is on its own row above the arguments.
+    assert ok.splitlines()[0].strip() == "read"
     assert "path=src/app.py" in ok
 
 
@@ -108,12 +107,13 @@ def test_a_short_result_is_not_marked_as_trimmed() -> None:
     assert "one" in rendered and "two" in rendered and "…" not in rendered
 
 
-def test_the_box_is_dim_until_the_call_finishes() -> None:
-    """Running, worked, failed — three states, and only the last two are a verdict."""
-    running = tool_render("bash", {"command": "make"}, finished=False)
-    assert running.border_style == "dim"  # type: ignore[attr-defined]
-    assert tool_render("bash", {}, ok=True).border_style == "green"  # type: ignore[attr-defined]
-    assert tool_render("bash", {}, ok=False).border_style == "red"  # type: ignore[attr-defined]
+def test_tool_previews_fit_display_lines_even_in_a_narrow_terminal() -> None:
+    rendered = _plain(tool_render("bash", {"command": "x" * 300},
+                                  result="y" * 400), width=24)
+    assert len(rendered.splitlines()) == 4
+    assert rendered.splitlines()[1].endswith("…")
+    assert rendered.splitlines()[3].endswith("…")
+    assert "failed" in _plain(tool_render("bash", {}, ok=False))
 
 
 # ---- the ! box --------------------------------------------------------------------

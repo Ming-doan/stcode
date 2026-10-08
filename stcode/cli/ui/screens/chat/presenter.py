@@ -62,7 +62,10 @@ class ChatPresenter:
             case "history":
                 self.replay(frame)
             case "error":
-                self.error(str(frame.get("message", "")))
+                if frame.get("level") == "warning":
+                    self.warn(str(frame.get("message", "")))
+                else:
+                    self.error(str(frame.get("message", "")))
 
     def replay(self, frame: dict[str, Any]) -> None:
         """Render a re-attached session's transcript before its live stream arrives.

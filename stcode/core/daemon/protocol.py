@@ -151,6 +151,24 @@ class Info(BaseModel):
     session: str = ""
 
 
+class WorkspaceFiles(BaseModel):
+    """List paths in the attached daemon workspace for client completion."""
+
+    type: Literal["workspace_files"] = "workspace_files"
+    session: str = ""
+    request_id: str
+
+
+class WorkspaceShell(BaseModel):
+    """Run an explicit user command outside the agent and its history."""
+
+    type: Literal["workspace_shell"] = "workspace_shell"
+    session: str = ""
+    request_id: str
+    command: str
+    timeout: float = Field(default=10, allow_inf_nan=False)
+
+
 class GetConfig(BaseModel):
     """Ask for the daemon's own config, as a `config` frame. Keys are never sent."""
 
@@ -194,6 +212,8 @@ ClientMessage = Annotated[
         SetMode,
         SetMeta,
         Info,
+        WorkspaceFiles,
+        WorkspaceShell,
         GetConfig,
         SetConfig,
         Shutdown,
@@ -364,6 +384,7 @@ class ErrorMessage(BaseModel):
     type: Literal["error"] = "error"
     session: str = ""
     message: str
+    level: Literal["error", "warning"] = "error"
 
 
 ServerMessage = Union[

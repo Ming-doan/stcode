@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -64,6 +65,10 @@ class DaemonClosed(Exception):
     """The daemon went away, refused a request, or did not answer it."""
 
 
+class RequestRefused(DaemonClosed):
+    """A request was rejected while the daemon connection remains usable."""
+
+
 class DaemonClient:
     """One connection to one daemon."""
 
@@ -74,6 +79,7 @@ class DaemonClient:
         self._writer = writer
         self._events: "asyncio.Queue[dict[str, Any]]" = asyncio.Queue()
         self._waiters: dict[str, "asyncio.Future[dict[str, Any]]"] = {}
+        self._workspace_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._closed = asyncio.Event()
         self._read_task = asyncio.create_task(
             self._read_loop(), name="stcode-client-reader"
@@ -107,6 +113,12 @@ class DaemonClient:
                     continue  # A line we cannot parse is the daemon's bug, not a reason to drop.
                 if not isinstance(frame, dict):
                     continue
+                request_id = str(frame.get("request_id", ""))
+                if request_id:
+                    waiter = self._workspace_waiters.pop(request_id, None)
+                    if waiter is not None and not waiter.done():
+                        waiter.set_result(frame)
+                    continue
                 waiter = self._waiters.pop(str(frame.get("type", "")), None)
                 if waiter is not None and not waiter.done():
                     waiter.set_result(frame)
@@ -123,12 +135,13 @@ class DaemonClient:
             )
         finally:
             self._closed.set()
-            for waiter in self._waiters.values():
+            for waiter in [*self._waiters.values(), *self._workspace_waiters.values()]:
                 if not waiter.done():
                     waiter.set_exception(
                         DaemonClosed("the daemon closed the connection")
                     )
             self._waiters.clear()
+            self._workspace_waiters.clear()
 
     async def _fire(self, kind: str, **fields: Any) -> None:
         message = {
@@ -171,7 +184,7 @@ class DaemonClient:
             )
         if error in done:
             frame = error.result()  # raises DaemonClosed if the socket died first
-            raise DaemonClosed(
+            raise RequestRefused(
                 str(frame.get("message", "the daemon reported an error"))
             )
         return reply.result()
@@ -301,6 +314,37 @@ class DaemonClient:
     async def info(self, session_id: str = "") -> dict[str, Any]:
         """Skills, MCP servers, tools and paths — as the **daemon's** machine sees them."""
         return await self._request("info", "info", session=session_id)
+
+    async def _workspace_request(
+        self, kind: str, *, request_timeout: float = REPLY_TIMEOUT, **fields: Any
+    ) -> dict[str, Any]:
+        request_id = uuid.uuid4().hex
+        reply: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._workspace_waiters[request_id] = reply
+        try:
+            await self._fire(kind, request_id=request_id, session=self.session_id, **fields)
+            frame = await asyncio.wait_for(reply, request_timeout)
+            if frame.get("error"):
+                raise RequestRefused(str(frame["error"]))
+            return frame
+        except asyncio.TimeoutError as exc:
+            raise DaemonClosed(f"the daemon did not answer `{kind}`") from exc
+        finally:
+            self._workspace_waiters.pop(request_id, None)
+            if not reply.done():
+                reply.cancel()
+
+    async def workspace_files(self) -> list[str]:
+        frame = await self._workspace_request("workspace_files")
+        return [str(path) for path in frame.get("files", [])]
+
+    async def workspace_shell(self, command: str, timeout: float = 10) -> dict[str, Any]:
+        duration = max(1.0, min(120.0, timeout))
+        # The shell's deadline may exceed the ordinary request deadline.
+        return await self._workspace_request(
+            "workspace_shell", request_timeout=duration + REPLY_TIMEOUT,
+            command=command, timeout=duration,
+        )
 
     async def get_config(self) -> dict[str, Any]:
         """The daemon's `config` frame: default provider and model, effort, mode, the
