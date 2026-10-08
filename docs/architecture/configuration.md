@@ -102,7 +102,7 @@ cap, right for a hosted API; `1` for Ollama or llama.cpp. → [providers.md](pro
 | --- | --- | --- |
 | `reasoning_effort` | `"medium"` | `none` … `max`. What `/effort` writes |
 | `approval_mode` | `"suggest"` | default for new sessions. What `/mode` writes; `full-auto` only in a container |
-| `max_turns` | `40` | tool-call ceiling **within** one turn, not a conversation length |
+| `max_turns` | `200` | model/tool rounds **within** one turn; `0` = unlimited. Each round may contain multiple tool calls |
 | `max_depth` | `1` | not meant to be raised: recursion with no budget is a fork bomb |
 | `max_concurrent` | `4` | tools running at once |
 | `enable_task` | `true` | whether sub-agents exist |
@@ -175,6 +175,11 @@ provider's own environment variables. See [tracing.md](tracing.md).
 ### `[tools]`
 
 `tavily_api_key` for `web_search`, default `$TAVILY_API_KEY`.
+
+`Agent.create` passes the entire `ToolConfig` to `HarnessContext.tool_config`.
+Tools resolve their credentials through that config; environment lookup stays in
+`core/configs.py`. Sub-agents inherit a copy of the tool config. New service settings
+belong in `ToolConfig`, without adding service-specific fields to `HarnessContext`.
 
 ## Environment variables
 

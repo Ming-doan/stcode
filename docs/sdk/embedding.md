@@ -72,7 +72,7 @@ the first terminal event.
 | --- | --- |
 | `TextDelta` | assistant text, as it streams |
 | `ReasoningDelta` | the model's deliberation — never sent back as history |
-| `ToolStarted` / `ToolFinished` | a tool call, with a 240-char preview of its result |
+| `ToolStarted` / `ToolFinished` | a tool call, with a 240-char preview of its result (`todo_write` carries the full result) |
 | `SupervisorNudge` | a loop was spotted and the agent was redirected |
 | `TurnFinished` | **the only stop condition** — the model replied without calling a tool |
 | `AgentFailed` | the ceiling, a provider error, or an interrupt |

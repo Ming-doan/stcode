@@ -107,6 +107,16 @@ def test_a_short_result_is_not_marked_as_trimmed() -> None:
     assert "one" in rendered and "two" in rendered and "…" not in rendered
 
 
+def test_the_whole_todo_list_remains_visible_when_lines_wrap() -> None:
+    result = "\n".join(f"[ ] Task {n}: inspect all the relevant files" for n in range(8))
+    result += "\n\n[0/8 complete]"
+    rendered = _plain(tool_render("todo_write", {}, result=result), width=24)
+    for n in range(8):
+        assert f"[ ] Task {n}:" in rendered
+    assert "[0/8 complete]" in rendered
+    assert "…" not in rendered
+
+
 def test_tool_previews_fit_display_lines_even_in_a_narrow_terminal() -> None:
     rendered = _plain(tool_render("bash", {"command": "x" * 300},
                                   result="y" * 400), width=24)

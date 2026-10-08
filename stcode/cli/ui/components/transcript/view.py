@@ -55,16 +55,18 @@ class Transcript(VerticalScroll):
        people read twenty minutes after they needed it. */
     .entry.notice {
         width: 1fr;
-        padding: 0 1;
+        padding: 1 2;
         color: $foreground;
     }
     
     .entry.notice.error {
-        background: $error 25%;
+        background: $error 12%;
+        border-left: solid $error;
     }
     
     .entry.notice.warning {
-        background: $warning 25%;
+        background: $warning 12%;
+        border-left: solid $warning;
     }
     
     .entry.agent-row {

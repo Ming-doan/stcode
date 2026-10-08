@@ -416,6 +416,36 @@ async def test_a_tool_call_renders_as_one_box_updated_in_place(
 
 
 @asynctest
+async def test_todo_output_is_complete_live_and_when_replayed(
+    tmp_path: Path, workspace: Path
+) -> None:
+    todos = [{"content": f"Task {n}: inspect the relevant files and verify the result"}
+             for n in range(8)]
+    gateway = RecordingGateway([calls_tool("plan", "todo_write", todos=todos), says("ready")])
+    async with Harnessed(tmp_path, workspace, gateway) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            app.chat._on_submit(Prompt.Submitted("make a plan"))
+            assert await until(lambda: len(gateway.calls) == 2)
+            await pilot.pause()
+            live = app.chat.transcript.query_one(ToolCall)
+            assert len(live._result) > 240
+            assert "Task 7:" in live._result and "[0/8 complete]" in live._result
+            assert live.size.height > 10
+
+            app.chat.presenter.replay({"records": [
+                {"type": "tool_call", "id": "replay", "name": "todo_write",
+                 "arguments": {"todos": todos}},
+                {"type": "tool_result", "id": "replay", "content": live._result},
+            ]})
+            await pilot.pause()
+            replayed = list(app.chat.transcript.query(ToolCall))[-1]
+            assert replayed._result == live._result
+            assert replayed.size.height == live.size.height
+
+
+@asynctest
 async def test_a_sub_agent_is_indented_under_its_name(
     tmp_path: Path, workspace: Path, monkeypatch: Any
 ) -> None:

@@ -49,6 +49,9 @@ PROVIDER_KEY_ENV: dict[ProviderName, str] = {
 
 ENV_TRUE = ("1", "true", "True", "yes")
 
+DEFAULT_MAX_TURNS = 200
+"""Model/tool rounds per user turn; zero disables the ceiling."""
+
 
 # Locations and secrets
 def home_dir() -> Path:
@@ -124,7 +127,7 @@ class AgentConfig(BaseModel):
     Args:
         reasoning_effort: How much reasoning to ask for from the LLM.
         approval_mode: How much to gate tool calls on human approval.
-        max_turns: How many tool calls round in one turn. `0` = unlimited.
+        max_turns: Maximum model/tool rounds in one turn. `0` = unlimited.
         max_depth: How many sub-agent calls round in one turn. `1` = no recursion.
         max_concurrent: How many LLM calls may run at once. `0` = unlimited.
         enable_task: Enable sub-agent by include `task` tool.
@@ -136,7 +139,7 @@ class AgentConfig(BaseModel):
     """
     reasoning_effort: ReasoningEffort = "medium"
     approval_mode: ApprovalMode = "suggest"
-    max_turns: int = Field(default=40, ge=0)
+    max_turns: int = Field(default=DEFAULT_MAX_TURNS, ge=0)
     max_depth: int = Field(default=1, ge=1)
     max_concurrent: int = Field(default=4, ge=0)
     enable_task: bool = True

@@ -219,7 +219,7 @@ class Harness:
             skills=self.context.skills,
             session_ctx=self.context.session_ctx,
             env=dict(self.context.env),
-            tavily_key=self.context.tavily_key,
+            tool_config=self.context.tool_config.model_copy(deep=True),
         )
         child = Harness(
             child_context,

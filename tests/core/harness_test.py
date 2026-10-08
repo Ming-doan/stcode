@@ -590,6 +590,41 @@ def test_subagents_get_isolated_contexts_but_share_the_registry(tmp_path: Path) 
     assert left.outputs is parent.outputs  # one output store for the whole session
 
 
+@pytest.mark.parametrize("arguments", [
+    {"query": "python"}, {"url": "https://example.com"},
+    {"query": "python", "url": "https://example.com"},
+])
+def test_web_tools_use_config_credentials_in_parent_and_child(
+    tmp_path: Path, run: Any, monkeypatch: Any, arguments: dict[str, str]
+) -> None:
+    from stcode.core.configs import ToolConfig
+    from stcode.core.harness.tools import web
+
+    monkeypatch.setenv("TAVILY_API_KEY", "fallback-key")
+    config = ToolConfig.model_validate({"tavily_api_key": "configured-key"})
+    parent = Harness(HarnessContext(cwd=tmp_path, tool_config=config), approval_mode="full-auto")
+    child = parent.for_subagent("research", tools=["web_search"])
+    assert child.context.tool_config == config
+    assert child.context.tool_config is not config
+    keys = []
+
+    async def post(key: str, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+        keys.append(key)
+        return {"results": [{"url": "https://example.com", "raw_content": "page"}]}
+
+    monkeypatch.setattr(web, "_post", post)
+    for harness in (parent, child):
+        result = run(harness.invoke("web_search", arguments))
+        assert not result.is_error
+    assert keys == ["configured-key", "configured-key"]
+    parent.context.tool_config.tavily_api_key = None
+    assert not run(parent.invoke("web_search", arguments)).is_error
+    assert keys[-1] == "fallback-key"
+    monkeypatch.delenv("TAVILY_API_KEY")
+    result = run(parent.invoke("web_search", arguments))
+    assert result.is_error and "needs a Tavily API key" in result.content
+
+
 def test_bind_makes_tools_callable_without_plumbing(tmp_path: Path, run: Any) -> None:
     """`namespace()` is gone with the RPC bridge it existed for; `bind()` is what is
     left, and it is what an in-process caller or a test actually needs."""

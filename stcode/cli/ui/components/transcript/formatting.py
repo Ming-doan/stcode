@@ -43,7 +43,7 @@ Two, because the box is a *receipt* and not a viewer: the interesting thing abou
 finished tool call is that it ran and whether it worked, and a turn with six calls each
 showing six lines is a screen of output with the conversation pushed off the top. The
 full value is in the session, and `ToolFinished` only carries 240 characters of it
-anyway.
+anyway. `todo_write` is the exception: its complete plan is sent and displayed.
 """
 
 PROGRESS_LINES = 6
@@ -144,7 +144,7 @@ class ToolPreview:
         yield arguments
         if self.result.strip():
             lines = Text(self.result.strip(), style="dim").wrap(console, width)
-            if len(lines) > TOOL_RESULT_LINES:
+            if self.name != "todo_write" and len(lines) > TOOL_RESULT_LINES:
                 lines = lines[:TOOL_RESULT_LINES]
                 lines[-1].truncate(max(0, width - 1))
                 lines[-1].append("…")
@@ -161,7 +161,7 @@ def tool_render(
     finished: bool = True,
     colour: str = "",
 ) -> RenderableType:
-    """A borderless receipt, clipped to one argument and two result display rows."""
+    """One argument row and two result rows, except todos show their full result."""
     return ToolPreview(name, arguments, result, ok, finished, colour or "green")
 
 

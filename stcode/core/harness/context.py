@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Literal
 
 from pydantic import BaseModel, Field
 
+from stcode.core.configs import ToolConfig
 from stcode.core.harness.errors import ToolError
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, fine for type checkers
@@ -120,8 +121,8 @@ class HarnessContext:
     env: dict[str, str] = field(default_factory=dict)
     """Extra environment for spawned processes, layered over `os.environ`."""
 
-    tavily_key: str = ""
-    """`[tools] tavily_api_key`, resolved. Empty means `web_search` explains it is off."""
+    tool_config: ToolConfig = field(default_factory=ToolConfig)
+    """The complete `[tools]` configuration, including service credentials."""
 
     # ---- paths ----
 

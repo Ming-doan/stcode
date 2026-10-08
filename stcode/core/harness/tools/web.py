@@ -86,7 +86,7 @@ async def web_search(
     """
     if not query and not url:
         raise ToolError("Pass `query` to search, `url` to read a page, or both to crawl a site.")
-    key = runtime.context.tavily_key
+    key = runtime.context.tool_config.tavily_key()
     if not key:
         raise ToolError(
             "Web access needs a Tavily API key ([tools] tavily_api_key, or $TAVILY_API_KEY). "

@@ -164,6 +164,63 @@ def test_the_tool_call_ceiling_fails_loudly(tmp_path: Path, run: Any) -> None:
 
     assert isinstance(events[-1], AgentFailed)
     assert "ceiling of 3" in events[-1].message
+    assert len(agent.gateway.calls) == 3
+    run(agent.aclose())
+
+
+@pytest.mark.parametrize("max_turns", [None, 0])
+def test_long_work_can_finish_past_the_old_forty_round_ceiling(
+    tmp_path: Path, run: Any, max_turns: int | None
+) -> None:
+    from stcode.core.configs import AgentConfig
+
+    kwargs = {} if max_turns is None else {"max_turns": max_turns}
+    agent = build(tmp_path, [
+        *[calls_tool(f"c{n}", "ls", path=".") for n in range(45)], says("done"),
+    ], **kwargs)
+    if max_turns is None:
+        assert agent.max_turns == AgentConfig().max_turns == 200
+    events = run(drain(agent, "finish the work"))
+    assert isinstance(events[-1], TurnFinished)
+    assert events[-1].text == "done"
+    assert len(agent.gateway.calls) == 46
+    run(agent.aclose())
+
+
+def test_an_unlimited_turn_can_still_be_interrupted(tmp_path: Path, run: Any) -> None:
+    agent = build(tmp_path, [calls_tool("c1", "ls", path=".")], max_turns=0)
+
+    async def scenario() -> list[Any]:
+        events = []
+        async for event in agent.run("keep going"):
+            events.append(event)
+            if isinstance(event, ToolFinished):
+                await agent.interrupt()
+        return events
+
+    events = run(scenario())
+    assert isinstance(events[-1], AgentFailed)
+    assert events[-1].message == "Interrupted."
+    assert len(agent.gateway.calls) == 1
+    run(agent.aclose())
+
+
+def test_only_todo_results_reach_clients_without_the_character_cap(
+    tmp_path: Path, run: Any
+) -> None:
+    todos = [{"content": f"Task {n}: " + "details " * 12} for n in range(8)]
+    agent = build(tmp_path, [
+        calls_tool("todo", "todo_write", todos=todos),
+        calls_tool("file", "read", path="long.txt"), says("done"),
+    ])
+    (agent.harness.context.cwd / "long.txt").write_text("content " * 100)
+    events = run(drain(agent, "make a plan"))
+    finished = [event for event in events if isinstance(event, ToolFinished)]
+    result = next(r for r in agent.session.records() if r["type"] == "tool_result")
+    assert len(finished[0].preview) > 240
+    assert finished[0].preview == result["content"]
+    assert "[0/8 complete]" in finished[0].preview
+    assert len(finished[1].preview) == 240
     run(agent.aclose())
 
 
@@ -317,6 +374,7 @@ def test_create_wires_config_through_to_harness_and_session(tmp_path: Path, run:
     assert agent.max_turns == 7 and agent.difficulty == "low"
     assert agent.harness.approval_mode == "plan"
     assert agent.harness.session_id == agent.session.id
+    assert agent.harness.context.tool_config is config.tools
     assert agent.session.path.parent == tmp_path / "sessions"
     assert agent.session.meta()["role"] == "backend-dev"
     assert agent.session.meta()["model"] == "claude-opus-5", "no `low` route, so the default entry"

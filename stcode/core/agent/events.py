@@ -20,8 +20,8 @@ from pydantic import BaseModel, Field
 from stcode.core.providers.types import ReasoningDelta, TextDelta, Usage
 
 PREVIEW_CHARS = 240
-"""How much of a tool result rides on `ToolFinished`. Enough for a status line; the full
-result is in the session."""
+"""How much of a tool result rides on `ToolFinished`. The full result is in the
+session; `todo_write` also sends its complete result so clients can display the plan."""
 
 
 class ToolStarted(BaseModel):

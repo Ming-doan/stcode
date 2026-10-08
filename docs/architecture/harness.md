@@ -27,7 +27,7 @@ core/harness/
   harness.py        the facade that composes everything below
   approvals.py      ApprovalMode, ToolPermission, and the mode policy
   errors.py         the ToolError family — a leaf, so nothing cycles
-  context.py        HarnessContext — cwd, scope, reads, todos, git, repl, shells
+  context.py        HarnessContext — cwd, scope, reads, todos, git, repl, shells, tool_config
   mcp.py            MCP servers → generated code, or advertised tools
   tools/
     base.py         @tool, Tool, Runtime[T] — the parameter the model cannot see

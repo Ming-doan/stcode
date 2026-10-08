@@ -123,6 +123,13 @@ primary-colored text, arguments use normal foreground text trimmed to one displa
 line, and results use gray text trimmed to two display lines. An ellipsis marks
 omitted content; a failed call is labelled `failed`. Full results remain in the session.
 
+`todo_write` is the only exception to the result preview limit: its full task list and
+completion count are shown, including wrapped lines, both live and in resumed sessions.
+
+Warnings and errors use a light status-colored background, a thin left border, and
+one row of vertical padding with two columns of horizontal padding. Vivid amber and
+red accents distinguish the statuses; body text keeps the theme's readable foreground.
+
 Event dividers use light gray lines and text on one terminal row. Terminal font size
 is controlled by your terminal, so individual event rows cannot use a smaller font.
 The input has a thick primary-colored left border and one row of padding above and

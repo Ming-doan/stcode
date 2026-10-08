@@ -43,7 +43,7 @@ from stcode.core.common import trace
 from stcode.core.harness import Harness
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
 from stcode.core.harness.tools.base import ApprovalFn, AskFn, EventFn, ProgressFn, Tool
-from stcode.core.configs import Config, Difficulty, resolve_prompt
+from stcode.core.configs import DEFAULT_MAX_TURNS, Config, Difficulty, resolve_prompt
 from stcode.core.providers.gateway import LLMGateway
 from stcode.core.providers.types import (
     MessageStop,
@@ -56,10 +56,6 @@ from stcode.core.session import Session
 
 if TYPE_CHECKING:  # pragma: no cover
     from stcode.core.configs import AgentConfig
-
-DEFAULT_MAX_TURNS = 40
-"""Tool-call ceiling within one turn — the only thing between a model that keeps
-grepping and an unbounded bill. Hitting it is reported, not swallowed."""
 
 
 class Agent:
@@ -158,7 +154,7 @@ class Agent:
             approval_mode=approval_mode or config.agent.approval_mode,
             **harness_kwargs,
         )
-        harness.context.tavily_key = config.tools.tavily_key()
+        harness.context.tool_config = config.tools
         session = session or Session.create(
             cwd=harness.context.cwd,
             role=role,
@@ -393,7 +389,9 @@ class Agent:
             self._drain_mailbox()
             self.session.append(type="user", content=text)
 
-            for iteration in range(self.max_turns):
+            iteration = 0
+            while self.max_turns == 0 or iteration < self.max_turns:
+                iteration += 1
                 reply, calls, usage, failure = "", [], Usage(), None
                 try:
                     async with aclosing(self._stream()) as stream:
@@ -447,12 +445,12 @@ class Agent:
                 # `tool_use` block that has no `tool_result`.
                 self._deliver()
 
-                async for event in self._supervise(iteration + 1):
+                async for event in self._supervise(iteration):
                     yield event
 
             yield AgentFailed(
                 message=(
-                    f"Reached the ceiling of {self.max_turns} tool calls in one turn "
+                    f"Reached the ceiling of {self.max_turns} model/tool rounds in one turn "
                     "without finishing. The trajectory is in the session log."
                 )
             )
@@ -589,7 +587,10 @@ class Agent:
                 id=call.id,
                 name=call.name,
                 ok=not result.is_error,
-                preview=result.content[:PREVIEW_CHARS],
+                preview=(
+                    result.content if call.name == "todo_write"
+                    else result.content[:PREVIEW_CHARS]
+                ),
             )
 
     # ---- lifecycle ----

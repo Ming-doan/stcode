@@ -49,7 +49,7 @@ jitter = true
 [agent]
 reasoning_effort = "medium"      # none | minimal | low | medium | high | xhigh | max
 approval_mode = "suggest"        # plan | suggest | auto-edit | full-auto (containers only)
-max_turns = 40
+max_turns = 200                  # model/tool rounds per turn; 0 = unlimited
 difficulty = "high"
 # tools = ["read", "grep", "glob", "ls"]   # an allow-list, replacing the default set
 # exclude_tools = ["web_search"]           # subtracted from whatever is left

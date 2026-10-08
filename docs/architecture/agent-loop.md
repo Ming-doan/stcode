@@ -28,9 +28,19 @@ No `answer` dict, no `ready` flag, no sentinel string: models already end a turn
 talking, and a protocol layered on top of that is a protocol the model has to be taught,
 gets wrong occasionally, and costs tokens to restate every turn.
 
-`max_turns` (default 40) caps tool calls *within* one turn — the only thing between a
-model that keeps grepping and an unbounded bill. Hitting it ends the turn with a loud
-`AgentFailed` naming the ceiling, never a silent stop.
+`max_turns` (default 200) caps model/tool rounds *within* one turn. A round may
+contain several parallel tool calls; the final answer also needs a model round.
+`0` disables the ceiling. Hitting a finite ceiling ends the turn with a loud
+`AgentFailed` naming the ceiling, never a silent stop. Interrupts and supervisor
+checks still work when the ceiling is disabled.
+
+The default leaves more room for substantial coding work than the former 40 rounds,
+while retaining a finite bound. There is no established best count across agents:
+[Claude Code](https://code.claude.com/docs/en/cli-reference) documents no default
+turn limit and an optional `--max-turns` for print mode;
+[Codex Goals](https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex)
+documents completion and budget-based continuation, without specifying a fixed
+tool-round default. 200 is a project choice, not a benchmark-derived optimum.
 
 ## One turn, step by step
 
@@ -39,7 +49,7 @@ _run_turn(text)
 ├── span "agent.turn <name>"                  ← tracing, if enabled
 └── _turn_body(text)
     ├── drain the team mailbox, append `user` record
-    └── for iteration in range(max_turns):
+    └── while max_turns == 0 or iteration < max_turns:
         ├── _stream()            → TextDelta / ReasoningDelta / ToolCallEnd / MessageStop
         │                          and one `usage` record per model call
         ├── append `assistant` + one `tool_call` record per call
@@ -89,8 +99,9 @@ sees it at its next `raise_if_cancelled()` and the stream stops at its next even
 | `TurnFinished` | the stop condition, with the full four-field `Usage` |
 | `AgentFailed` | the ceiling, a provider error, or an interrupt. Terminal for this turn only |
 
-`ToolFinished` carries a 240-char preview rather than the result: `daemon/protocol.py`
-maps these one-to-one onto the wire, and a 4 MB payload does not belong on a socket.
+`ToolFinished` normally carries a 240-char preview: `daemon/protocol.py` maps these
+one-to-one onto the wire. `todo_write` is the exception: its complete result travels
+in `preview` so the TUI can show every task and the completion count, live and on replay.
 
 ### A sub-agent's events go out the side
 
@@ -210,7 +221,7 @@ fight.
 
 | Key | Effect |
 | --- | --- |
-| `[agent] max_turns` | tool-call ceiling within one turn |
+| `[agent] max_turns` | model/tool-round ceiling within one turn; `0` = unlimited |
 | `[agent] max_concurrent` | tools running at once |
 | `[agent] difficulty` | which routing tier the main loop uses |
 | `[agent] enable_task`, `max_depth` | whether sub-agents exist at all |
