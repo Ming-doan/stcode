@@ -46,7 +46,7 @@ class Card(Vertical):
     Card {
         height: auto;
         padding: 0 1;
-        border: round $primary;
+        border: none;
         background: $surface;
     }
     

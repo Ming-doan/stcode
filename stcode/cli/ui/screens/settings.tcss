@@ -10,7 +10,7 @@ SettingsScreen {
     height: 90%;
     max-height: 32;
     padding: 1 2;
-    border: round $accent;
+    border: none;
     background: $surface;
 }
 

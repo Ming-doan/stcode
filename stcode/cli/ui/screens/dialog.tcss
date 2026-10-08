@@ -9,7 +9,7 @@ TrustScreen, SessionsScreen {
     height: auto;
     max-height: 80%;
     padding: 1 2;
-    border: round $primary;
+    border: none;
     background: $surface;
 }
 

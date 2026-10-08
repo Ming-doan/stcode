@@ -7,7 +7,7 @@ ConnectScreen {
     max-width: 96%;
     height: auto;
     padding: 1 2;
-    border: round $accent;
+    border: none;
     background: $surface;
 }
 

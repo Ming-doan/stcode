@@ -63,12 +63,13 @@ class Prompt(TextArea):
         height: auto;
         max-height: 10;
         border: none;
-        border-left: solid $foreground 25%;
+        border-left: thick $primary;
+        padding: 1 1;
         background: $surface;
     }
     Prompt:focus {
         border: none;
-        border-left: solid $primary 50%;
+        border-left: thick $primary;
     }
     """
 

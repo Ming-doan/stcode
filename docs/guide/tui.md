@@ -125,7 +125,11 @@ omitted content; a failed call is labelled `failed`. Full results remain in the 
 
 Event dividers use light gray lines and text on one terminal row. Terminal font size
 is controlled by your terminal, so individual event rows cannot use a smaller font.
-The input has only a light left border.
+The input has a thick primary-colored left border and one row of padding above and
+below its text. Tool blocks and user messages also have one row of vertical padding.
+Cards above the input have no border and retain their horizontal padding. Modal
+dialogs (sessions, trust, connection, and settings) also have no outer border and
+keep their existing padding.
 
 ### Sub-agents
 

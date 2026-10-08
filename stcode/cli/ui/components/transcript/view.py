@@ -25,7 +25,7 @@ class Transcript(VerticalScroll):
        means reading rather than looking. */
     .entry.message.user {
         width: 1fr;
-        padding: 0 1;
+        padding: 1 1;
         background: $primary 12%;
     }
     
@@ -43,7 +43,7 @@ class Transcript(VerticalScroll):
         background: $foreground 6%;
         color: $foreground;
         border-left: solid $primary;
-        padding: 0 1;
+        padding: 1 1;
     }
 
     .entry.thinking, .entry.progress {
