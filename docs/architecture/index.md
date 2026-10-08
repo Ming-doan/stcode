@@ -49,40 +49,41 @@ flowchart TB
     subgraph vol["/team volume — mounted into every container"]
         know["knowledge/"]
         inbox["inbox/&lt;role&gt;/"]
+        members["members/&lt;role&gt;.json"]
         arte["artifacts/"]
     end
 
     tui -->|unix socket| daemon
     web -->|tcp| daemon
     harn -.->|read/write/grep| know
-    harn -.->|send_message| inbox
+    harn -.->|send_team_message| inbox
+    harn -.->|find_teammate| members
     daemon -.->|watch → wake| inbox
 ```
 
 ## Dependency direction
 
 ```
-cli ──▶ core/daemon ──▶ core/agent ──▶ { core/session, core/harness, core/providers }
-                                   └──▶ core/team (team mode only)
-core/harness ──▶ core/repl        core/common ◀── everyone (imports nothing back)
+cli  ┄┄ socket + JSONL ┄┄▶  core/daemon ──▶ core/agent ──▶ { core/session, core/harness, core/providers }
+                                                       └──▶ core/team (team mode only)
+core/harness ──▶ core/repl
+core/configs, core/common ◀── everyone in core/ (import nothing back)
 ```
 
-One way, always. If `core/providers` needs `core/session`, something is inverted. If
-`core` needs `cli`, something display-shaped ended up in the engine — move it, don't
-reverse the arrow.
+**`cli/` and `core/` are two programs.** Neither imports the other. The UI starts
+`stcode-daemon` as a subprocess and speaks the wire format in
+[the protocol](../sdk/daemon-protocol.md); the names it shares with the engine — approval
+modes, effort rungs — are copied, and anything that drifts (providers, default models)
+comes over the socket in the `config` frame. That boundary is what lets `core/` be
+rewritten in another language. → [decision 0006](../decisions/0006-cli-and-core-are-separate-programs.md)
 
-`core/configs.py` is the exception that proves it: it imports from four subpackages
-because it is the one place that knows how a TOML file maps onto them. Nothing imports
-it back except at the edges (`cli/`, `core/daemon/`, and `core/agent/Agent.create`,
-which takes the loaded model).
+Inside `core/`, one way, always. If `core/providers` needs `core/session`, something is
+inverted.
 
-The one place that edge used to leak is worth naming, because it is the pattern to
-watch for. `core/harness/prompts/` looks for role profiles in the config *directory*,
-so it needed `default_config_path()` — which lived in `configs.py`, which imports
-`harness`. It reached back with a function-level import to dodge the cycle. A lazy
-import that exists only to hide a cycle is a signal that something is in the wrong
-place: a filesystem location is not a fact about either module, so it moved down to
-`core/common/paths.py` and both now import in the legal direction.
+`core/configs.py` is the bottom of the stack: it imports nothing from `stcode`, so any
+layer may import it — the gateway its `ModelConfig`, the trace exporter its
+`TraceConfig`, the harness the enumerations. It is the one place a setting is read from
+TOML or the environment; everything else is handed a slice.
 
 ## Component contracts
 
@@ -104,22 +105,25 @@ somewhere else.
 
 ```
 stcode/
-  cli/                  what the user sees or types
+  cli/                  the UI — a separate program; never imports core/
     main.py             typer entrypoint — `stcode`, `--headless`, `--daemonless`,
-                        `stcode sessions`, `stcode config`
-    app.py              chat screen — a daemon client; find-or-start, or --daemonless
-    connect.py          "which daemon?" screen, for --daemonless
-    prompts.py          approval + question modals — the client half of the protocol
-    settings.py         first-run wizard + /model page
-    banner.py           ASCII wordmark
-    labels.py           every user-facing string, in one place
-  core/
-    configs.py          schema, load/save, .env, every [section]
+                        `--restart`, `stcode sessions`, `stcode config`
+    bootstrap.py        construct client dependencies and start Textual
+    models.py           client vocabulary, launch options and preference values
+    labels.py           user-facing copy and presentation tables
+    ui/                 Textual app, screens, components and styles
+      app.py            lifecycle, themes, app-owned connection worker
+      screens/chat/     chat interactions and incremental transcript presenter
+      screens/          connect, settings, sessions and trust
+      components/       prompt, cards, banner, status and transcript widgets
+    logic/              connection/session/settings workflows, commands and state
+    services/           JSONL client, launcher, preferences, files and shell I/O
+  core/                 the engine — `stcode-daemon` / `python -m stcode.core`
+    configs.py          locate, load, resolve, patch the config; the enumerations
     common/             vocabulary shared across core/ — imports nothing back
       tools.py          ToolDefinition, ToolResult
       truncate.py       elide() and the 8192 cap
       ids.py            new_id() — the monotonic ULID, for sessions and messages
-      paths.py          where config lives; needed on both sides of configs↔harness
       trace.py          HTTP tracing export, off by default
     providers/          adapters + gateway
     harness/            the tools, prompts and skills an agent works with
@@ -129,18 +133,19 @@ stcode/
       outputs.py        OutputStore — the bounded home of what elide() cut
     session/            JSONL store, resume, messages()/tail()
     agent/              the turn loop, events, task tool, supervisor.py
-    daemon/             socket server, protocol, registry, autonomy guard
+    daemon/             socket server, protocol, registry, autonomy guard, main.py
     repl/               _worker.py subprocess + client.py — the persistent namespace
-    team/               mailbox.py (no harness imports), tools.py (send_message)
+    team/               mailbox.py (no harness imports), tools.py (find_teammate, send_team_message)
 tests/
   conftest.py           the loop fixtures and the workspace fixture
   fakes.py              FakeProvider, RecordingGateway, FakeAgent
   fixtures/workspace/   a checked-in project, mounted as the agent's cwd
   core/                 one file per module, testing its public surface
+  cli/                  the UI's pieces, and the launcher against a real subprocess
   integration/          the flows the documentation describes
 docs/                   the mkdocs site — guide, teams, sdk, architecture, decisions
-examples/agents/        role profiles to copy into ~/.stcode/agents/
-Dockerfile              one image, all roles; --role / STCODE_ROLE picks one
+examples/agents/        role profiles to mount as a container's config.toml
+Dockerfile              one image, all roles; runs stcode-daemon; STCODE_ROLE picks one
 smoke_*.py              one per phase gate, run by hand against real processes
 ```
 
@@ -149,13 +154,16 @@ smoke_*.py              one per phase gate, run by hand against real processes
 | Kind of thing | Home | Example |
 | --- | --- | --- |
 | A word the user reads | `cli/labels.py` | `"read-only — no writes, no commands"` |
-| A value the engine branches on | `core/` | `ApprovalMode`, `APPROVAL_MODES` order |
+| A value the engine branches on | `core/configs.py` | `ApprovalMode`, `APPROVAL_MODES` order |
+| A setting, or an environment variable | `core/configs.py` | `[model.providers]`, `"${OPENAI_API_KEY}"`, `STCODE_TEAM` |
 | A type more than one package needs | `core/common/` | `ToolDefinition`, `ToolResult`, `elide`, `new_id` |
 | A type only **one** package holds | that package | `OutputStore` — only the harness has one |
-| A fact about a provider | `core/providers/` | default model, conventional key env var |
+| A fact about a provider library | `core/providers/` | its default model |
 | How a fact is *displayed* | `cli/labels.py` | `"OpenAI (also any OpenAI-compatible endpoint)"` |
-| What a role owns and reports to | `~/.stcode/agents/*.toml` | one profile = one agent: prompt and settings, data, never in the package |
-| Anything on the wire between processes | `core/daemon/protocol.py` | the JSONL message shapes |
+| What a role owns and reports to | the agent's own `config.toml` (`examples/agents/`) | one profile = one agent: prompt and settings, data, never in the package |
+| Anything on the wire between processes | `core/daemon/protocol.py`, mirrored by `cli/services/client.py` | the JSONL message shapes |
+
+See [CLI and terminal UI](cli.md) for dependency direction, screen ownership and testing.
 
 Conditional copy lives in `labels.py` as a *function*, not as an `if` in a screen: the
 decision about which wording applies is itself part of the wording.

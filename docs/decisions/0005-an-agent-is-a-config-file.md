@@ -1,6 +1,10 @@
 # 0005 — An agent profile is a config file
 
-**Status: accepted.** Supersedes the "one markdown file per role" arrangement in
+**Status: accepted, amended 2026-10-08:** profiles are no longer looked up by name
+from an agents directory (`STCODE_AGENTS_DIR`, `--role` selecting a file). The loaded
+config is the agent; `--role` only sets `[team] role`.
+
+Supersedes the "one markdown file per role" arrangement in
 [0003](0003-what-the-tui-owns.md)'s era.
 
 ## Context

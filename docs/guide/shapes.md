@@ -9,6 +9,9 @@ uv run stcode --headless     # the daemon alone — what a container runs
 uv run stcode --daemonless   # the UI alone, attached to a daemon elsewhere
 ```
 
+The daemon is its own program, `stcode-daemon`; `--headless` simply becomes it. The UI
+and the daemon share nothing but the socket between them.
+
 ## Why it is built this way
 
 The agent lives in the daemon. The TUI is a socket client that sends `push` and renders
@@ -24,9 +27,21 @@ one piece of code:
 
 ## `stcode` — the normal case
 
-Looks for a daemon at the configured address. If one answers, it attaches. If nothing
-does, it starts one in the background and attaches to that. You will not usually notice
-which happened.
+Looks for a daemon at `~/.stcode/daemon.sock` (or `--socket`, or `--transport tcp
+--host --port`). If one answers, it attaches. If nothing does, it starts
+`stcode-daemon` in the background on that same address, attaches to it, and stops it
+again when you quit. A daemon it found already running is left running — quitting is a
+detach. Its output goes to `~/.stcode/daemon.log`; if it fails to start, the reason is
+printed in the transcript.
+
+```bash
+uv run stcode --restart      # stop the local daemon first, then start a fresh one
+uv run stcode -c ./other.toml  # a daemon started here reads this config file
+```
+
+`--restart` is for a daemon that is wedged or still running the code from before an
+upgrade. `--config` only matters when this run starts the daemon; a running one already
+has its file.
 
 The session's workspace is the current directory, or one you name:
 
@@ -48,7 +63,11 @@ No UI, no terminal control, just a socket. This is what a container's entrypoint
 
 ```bash
 uv run stcode --headless --transport tcp --host 0.0.0.0 --port 7717
+uv run stcode-daemon --transport tcp --host 0.0.0.0 --port 7717   # the same thing
 ```
+
+Flags apply to this process only and are never written to the config file. It stops on
+SIGTERM or SIGINT, and exits `2` if `full-auto` is refused.
 
 ### What it prints
 
@@ -56,7 +75,7 @@ A container's daemon has no screen, so its start-up is the only place it can say
 became. It prints a report, then logs every connection, then serves until killed:
 
 ```
-stcode 0.1.0 — headless daemon
+stcode 0.1.0 — daemon
   listening   tcp 0.0.0.0:7717   (1 client max)
   workspace   /workspace
   mode        suggest
@@ -67,7 +86,7 @@ stcode 0.1.0 — headless daemon
   team        backend-dev on /team
   container   yes (STCODE_SANDBOX)
   created     /root/.stcode/sessions
-ready — ctrl-c to stop
+ready
 [info] client connected: 172.17.0.1:52418 (1/1)
 [info] session 01JC… created at /workspace
 [info] client disconnected: 172.17.0.1:52418
@@ -120,36 +139,24 @@ container.
 
 `/connect` moves a running UI to a different daemon without restarting it.
 
-### It uses the daemon's config, not yours
+### The settings on screen are the daemon's
 
-Once attached, this shape reads its settings **from the daemon**. The model, provider,
-routing tiers, approval mode and paths it shows are the ones in the container's
-`config.toml` — not the ones in `~/.stcode/config.toml` on your laptop, which describe a
-different machine's agent.
+In every shape the UI reads its settings **from the daemon** — it has no config file of
+its own. The model, provider, mode and config path it shows are the ones in the
+daemon's `config.toml`, on the daemon's machine.
 
-`/model` writes back. It sets `[defaults]` in the *daemon's* config file and reconfigures
-the gateway in place, so the change outlives the session and the container restart:
-
-```
-/model                       # the card lists what the daemon can reach
-→ provider and model written to /config/config.toml on the daemon
-```
-
-**Only `[defaults]`.** API keys, `base_url`, routing tiers and concurrency caps are shown
-read-only and never sent. Those are the operator's, and a terminal that can rewrite the
-credentials of every daemon it can reach is a worse tool than one that cannot. Change
-them where the container is deployed.
-
-Your local `~/.stcode/config.toml` is left alone in this shape, apart from the daemon
-address `/connect` succeeded on — which is a fact about *your* terminal, so it is stored
-here.
+`/model`, `/mode` and `/effort` write back to that file and reload it in place, so a
+change outlives the session and a container restart. Over TCP, **keys are not
+accepted**: the key field is disabled, because the daemon cannot tell who is on the
+other end of a port. Set a container's key where it is deployed — usually as
+`api_key = "${ANTHROPIC_API_KEY}"` and an environment variable.
 
 ## Attaching to an agent in a container
 
 ```bash
 # in the container
 docker run -e STCODE_SANDBOX=1 -e ANTHROPIC_API_KEY -p 7717:7717 \
-    -v "$PWD:/workspace" stcode --headless --transport tcp --host 0.0.0.0
+    -v "$PWD:/workspace" stcode          # the image runs stcode-daemon on tcp:7717
 
 # on your machine
 uv run stcode --daemonless --transport tcp --host <container-ip> --port 7717

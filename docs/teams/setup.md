@@ -17,6 +17,7 @@ sharing one mounted volume.
 ```
 /team/                      <- one volume, mounted into every container
   repo.git/                 <- a bare repository: the origin
+  members/<role>.json       <- written by each agent as it starts; what find_teammate reads
   inbox/<role>/             <- one directory per role; a message is a file
   knowledge/                <- shared notes, read and written with the ordinary tools
   artifacts/                <- build outputs, reports
@@ -44,17 +45,10 @@ docker run -d --name ba \
 ```
 
 Repeat with `backend-dev.toml`, `frontend-dev.toml`, `devops.toml`. Each file already
-carries its own `[team] role`, its prompt, and whatever model that agent should run at —
+carries its own `[team] role` and `description`, its prompt, and whatever model that
+agent should run at —
 a support role on a cheap tier is a line in its own profile rather than a flag you have
 to remember at `docker run`.
-
-Mounting a directory of profiles and choosing by name works too, for a host running
-several agents off one config:
-
-```bash
-  -v "$PWD/examples/agents:/agents:ro" -e STCODE_AGENTS_DIR=/agents
-  … --role ba
-```
 
 Two environment variables carry the rest:
 
@@ -67,11 +61,16 @@ Two environment variables carry the rest:
 
 ```toml
 [team]
-enabled    = true
-role       = "backend-dev"
-shared_dir = "/team"
-remote     = "/team/repo.git"
+enabled     = true
+name        = "shop"
+role        = "backend-dev"
+description = "Owns the API service and /team/knowledge/api-contract.md."
+shared_dir  = "/team"
+remote      = "/team/repo.git"
 ```
+
+`name` and `description` go on the agent's member card, which is how its teammates find
+it. → [Finding who to hand off to](workflow.md#finding-who-to-hand-off-to)
 
 A bare repository on the shared volume needs **no credential and no network**, so a
 two-container run works locally — and it is still real git: real branches, real merges,
@@ -96,7 +95,7 @@ uv run stcode --daemonless --transport tcp --host <container-ip> --port 7717
 
 Attaching also gives you the daemon's own settings: `/model` in this shape reads and
 writes the **container's** `config.toml`, not your laptop's.
-→ [`--daemonless`](../guide/shapes.md#it-uses-the-daemons-config-not-yours)
+→ [`--daemonless`](../guide/shapes.md#the-settings-on-screen-are-the-daemons)
 
 A containerised daemon takes **one client at a time**. Two terminals steering one role is
 the merge boundary being crossed by accident; the second connection is refused and told

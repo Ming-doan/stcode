@@ -1,59 +1,43 @@
-# stcode config — copy to ~/.stcode/config.toml (or %APPDATA%\stcode\config.toml
-# on Windows), or point STCODE_CONFIG at a file of your own.
+# stcode config — the daemon's file. It lives at ~/.stcode/config.toml (STCODE_HOME moves
+# the directory, STCODE_CONFIG or `stcode-daemon --config` names another file).
 #
-# You don't have to write this by hand: the first `stcode` run offers a setup screen
-# that writes the file for you, and /model edits it afterwards.
+# You don't have to write this by hand: the daemon scaffolds a minimal one on first
+# start, the UI's setup screen fills in a key, and /model, /mode and /effort change
+# single keys in place — comments like these survive.
 #
-# Credentials resolve env-first: `api_key_env` names an environment variable, `api_key`
-# is a literal fallback, and the variable wins whenever it's actually set. The setup
-# screen writes a literal when you paste a key, and chmods the file 0600 for that reason.
-# Prefer api_key_env if you'd rather keep secrets off disk entirely.
+# A secret is a literal or a "${ENV_VAR}" reference, resolved when it is used, so the
+# file never has to hold the key itself. It is chmod 0600 in case it does. The UI can
+# only send a key over the daemon's unix socket, never over TCP.
 
-# What the TUI starts with — set by the setup screen, /model, and /mode.
-# An empty model means "not chosen yet"; the chat screen warns until it's set.
-[defaults]
+[model]
+default = "anthropic"            # the entry used when no [model.routing] tier applies;
+                                 # unset = the first entry below
+
+# One table per account. The name is yours; `provider` picks the library. Two keys for
+# one library are two entries — e.g. [model.providers.work] and [model.providers.home].
+[model.providers.anthropic]
+provider = "anthropic"
+api_key = "${ANTHROPIC_API_KEY}"   # unset = the library's conventional variable
+model = "claude-sonnet-5"          # unset = the library's default model
+
+[model.providers.openai]
 provider = "openai"
-model = ""
-approval_mode = "suggest"   # plan | suggest | auto-edit | full-auto
+api_key = "${OPENAI_API_KEY}"
+# base_url = "${OPENAI_BASE_URL}"  # an OpenAI-compatible proxy or local server
+# max_concurrent = 1               # completions this endpoint serves at once; 0 = no cap.
+#                                  # Set 1 for Ollama or llama.cpp: parallel sub-agents
+#                                  # otherwise queue against one GPU and drop as 503s.
 
-[providers.anthropic]
-api_key_env = "ANTHROPIC_API_KEY"
-# api_key = "sk-ant-..."                   # literal fallback; env var above wins
-# base_url = "https://api.anthropic.com"   # override for a proxy/self-hosted gateway
+# [model.providers.google]
+# provider = "google"
+# api_key = "${GEMINI_API_KEY}"
 
-[providers.openai]
-api_key_env = "OPENAI_API_KEY"
-# base_url_env = "OPENAI_BASE_URL"  # for an OpenAI-compatible proxy; wins over base_url
-# base_url = "https://my-openai-proxy.example.com/v1"
-# max_concurrent = 1   # completions this endpoint serves at once; 0 = no cap.
-#                      # Set 1 for Ollama or llama.cpp: parallel sub-agents otherwise
-#                      # queue up against one GPU and get dropped as 503s.
-
-[providers.google]
-api_key_env = "GEMINI_API_KEY"
-
-# Each tier picks a provider + model. api_key_env/api_key/base_url are optional per tier —
-# omit them and the tier falls back to that provider's main config above. Set them
-# only when a tier needs different credentials or a different endpoint, e.g. a
-# higher-quota key reserved for "high".
-#
-# Saving from /model repoints any tier that was tracking the default provider at the
-# newly chosen model. Pin a tier to a *different* provider and the UI leaves it alone.
-[routing.low]
+# Optional, per difficulty tier. A tier with no line uses the default entry above.
+[model.routing.low]
 provider = "anthropic"
 model = "claude-haiku-4-5"
 
-[routing.medium]
-provider = "anthropic"
-model = "claude-sonnet-5"
-
-[routing.high]
-provider = "anthropic"
-model = "claude-opus-5"
-# api_key_env = "ANTHROPIC_API_KEY_HIGH"
-# base_url = "https://my-proxy.example.com"
-
-[retry]
+[model.retry]
 max_attempts = 3
 base_delay = 1.0
 max_delay = 20.0
@@ -61,51 +45,60 @@ jitter = true
 
 # Limits on one turn. `prompt` (or `prompt_file`) is what makes this file a whole *agent
 # profile*: the prompt lives beside the settings it runs under, so deploying an agent is
-# one mount — `-v ./agents/backend-dev.toml:/config/config.toml`.
-# → docs/teams/roles.md
+# one mount — `-v ./agents/backend-dev.toml:/config/config.toml`. → docs/teams/roles.md
 [agent]
+reasoning_effort = "medium"      # none | minimal | low | medium | high | xhigh | max
+approval_mode = "suggest"        # plan | suggest | auto-edit | full-auto (containers only)
 max_turns = 40
 difficulty = "high"
 # tools = ["read", "grep", "glob", "ls"]   # an allow-list, replacing the default set
 # exclude_tools = ["web_search"]           # subtracted from whatever is left
 # prompt = """
 # # Role: backend developer
-#
-# ## You own
-# `src/api/` — the HTTP surface and the logic behind it.
 # """
-# prompt_file = "backend-dev.md"   # relative to this file. Set one or the other.
+# prompt_file = "backend-dev.md"   # relative to this file; `prompt` wins if both are set
 
-# Where transcripts live. `./.stcode/sessions` keeps them with the project.
-[session]
-dir = "~/.stcode/sessions"
-keep = 100
+# Where transcripts live. Default ~/.stcode/sessions.
+# [session]
+# dir = "./.stcode/sessions"
+# keep = 100
 
 # Where the daemon listens. `unix` on your own machine, `tcp` inside a container.
+# The UI does not read this: it connects to ~/.stcode/daemon.sock unless told otherwise
+# with --socket / --transport tcp --host --port, and starts the daemon on that address.
 [daemon]
 transport = "unix"
-socket = "~/.stcode/daemon.sock"
+# socket = "~/.stcode/daemon.sock"
 # host = "0.0.0.0"       # when transport = "tcp"
 # port = 7717
 # max_clients = 0        # connections at once. Unset = 1 in a container, unlimited on
 #                        # the host. 0 is unlimited everywhere.
 
 # Team mode is OFF until `enabled` is true (or STCODE_TEAM=1, or --team). A role says
-# which agent this is; team mode says a shared volume is mounted. Two facts, two keys.
+# which agent this is (or STCODE_ROLE); team mode says a shared volume is mounted.
 # [team]
 # enabled    = true
 # role       = "backend-dev"
 # shared_dir = "/team"
-# remote     = "/team/repo.git"   # a bare repo on the volume: no credential, no network
 
-# Direct HTTP tracing. Environment values override these TOML settings; .env is not loaded.
-# → docs/guide/tracing.md (Langfuse v4 OTLP/HTTP and Phoenix REST)
+# The supervisor watches for loops. Off unless enabled (or STCODE_SUPERVISOR=1).
+# [supervisor]
+# enabled = true
+# every = 8
+
+# [mcp]
+# expose = "code"        # or "tools"
+
+# Direct HTTP tracing. Unset values fall back to the provider's own variables
+# (LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL; PHOENIX_API_KEY,
+# PHOENIX_COLLECTOR_ENDPOINT, PHOENIX_PROJECT_NAME). .env is not loaded.
 # [trace]
 # enabled = true
 # provider = "langfuse"       # or "phoenix"
-# url = "https://cloud.langfuse.com"  # Phoenix example: http://localhost:6006
-# public_key = "pk-lf-..."    # or LANGFUSE_PUBLIC_KEY
-# secret_key = "sk-lf-..."    # or LANGFUSE_SECRET_KEY
-# api_key = "..."            # Phoenix only; or PHOENIX_API_KEY
-# project_name = "default"   # existing Phoenix project; or PHOENIX_PROJECT_NAME
-# content = false            # true includes prompts, replies and tool contents
+# public_key = "${LANGFUSE_PUBLIC_KEY}"
+# secret_key = "${LANGFUSE_SECRET_KEY}"
+# content = false             # true includes prompts, replies and tool contents
+
+# Built-in tool credentials.
+# [tools]
+# tavily_api_key = "${TAVILY_API_KEY}"   # web_search; this is also the default

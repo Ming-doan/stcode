@@ -40,7 +40,7 @@ from stcode.core.daemon.protocol import (
     SessionOpened,
     event_frame,
 )
-from stcode.core.harness.approvals import ApprovalMode
+from stcode.core.configs import ApprovalMode
 from stcode.core.harness.errors import ToolDenied
 from stcode.core.harness.tools.base import ApprovalRequest, Question
 

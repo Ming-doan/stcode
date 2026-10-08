@@ -18,7 +18,6 @@ from pathlib import Path
 import pytest
 from driving import asynctest
 
-from stcode.core.harness.prompts import AGENTS_DIR_ENV
 from stcode.core.harness.skills import loader as skills_loader
 
 
@@ -31,13 +30,12 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     module-level constant computed from `Path.home()` at import time, so setting `HOME`
     is too late — the attribute itself is what has to move.
 
-    `STCODE_AGENTS_DIR` and `STCODE_MCP_CONFIG` are unset for the same reason: an
-    environment variable exported in one shell must not decide what a test discovers.
+    `STCODE_MCP_CONFIG` is unset for the same reason: an environment variable exported
+    in one shell must not decide what a test discovers.
     """
     home = tmp_path / "home"
     (home / ".agents" / "skills").mkdir(parents=True)
     monkeypatch.setattr(skills_loader, "USER_SKILLS_DIR", home / ".agents" / "skills")
-    monkeypatch.delenv(AGENTS_DIR_ENV, raising=False)
     monkeypatch.delenv(skills_loader.SKILLS_PATH_ENV, raising=False)
     monkeypatch.delenv("STCODE_MCP_CONFIG", raising=False)
     return home

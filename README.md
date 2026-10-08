@@ -45,9 +45,10 @@ uv run stcode config         # where config lives and what it selects
 ```
 
 Useful flags: `--cwd`, `--mode` (`plan` | `suggest` | `auto-edit` | `full-auto`),
-`--model`, `--role` (which agent profile supplies the prompt), `--team` (team mode, off
-by default), `--config`, and `--transport` / `--socket` / `--host` / `--port` to point at
-a daemon for this run without editing the config file.
+`--role` (which agent this is — the prompt comes from `[agent] prompt`), `--restart` (stop the local daemon and
+start a fresh one), `--config` (the file a daemon started here reads), and `--transport` /
+`--socket` / `--host` / `--port` to point at a daemon. The daemon itself is
+`stcode-daemon`; `stcode --headless` runs it.
 
 ### In the UI
 
@@ -64,7 +65,7 @@ a daemon for this run without editing the config file.
 ```bash
 # in the container
 docker run -e STCODE_SANDBOX=1 -e ANTHROPIC_API_KEY -p 7717:7717 \
-    -v "$PWD:/workspace" stcode --headless --transport tcp --host 0.0.0.0
+    -v "$PWD:/workspace" stcode          # runs stcode-daemon on tcp:7717
 
 # on your machine
 uv run stcode --daemonless --transport tcp --host <container-ip> --port 7717
@@ -113,12 +114,14 @@ We are not competing on polish.
 ## How it fits together
 
 ```
-cli ──▶ core/daemon ──▶ core/agent ──▶ { core/session, core/harness, core/providers }
-                                   └──▶ core/team (team mode only)
-core/harness ──▶ core/repl          core/common ◀── everyone (imports nothing back)
+cli  ┄┄ socket + JSONL ┄┄▶  core/daemon ──▶ core/agent ──▶ { core/session, core/harness, core/providers }
+                                                       └──▶ core/team (team mode only)
+core/harness ──▶ core/repl        core/configs, core/common ◀── everyone in core/
 ```
 
-Dependencies point one way, always. [`CLAUDE.md`](CLAUDE.md) §3 has the contract for each
+`cli/` and `core/` are separate programs that never import each other: the UI starts
+`stcode-daemon` and speaks to it over the socket. Inside `core/`, dependencies point one
+way, always. [`CLAUDE.md`](CLAUDE.md) §3 has the contract for each
 component.
 
 **Approval modes** gate what runs unattended: `plan` reads only, `suggest` asks before

@@ -28,28 +28,20 @@ def test_the_config_file_in_the_project_loads(config_path: Path) -> None:
     first: a typo in it would fail every test below with an unrelated message."""
     config = load_config(config_path)
 
-    assert config.defaults.provider == "fake"
-    assert config.routing["high"].model == "fake-large"
+    assert config.model.route("high") == ("fake", "fake-large")
+    assert config.model.route("low") == ("fake", "fake-small")
     assert config.agent.max_turns == 12
     assert config.supervisor.every == 4
 
 
-def test_a_harness_picks_up_role_skills_and_project_instructions(
+def test_a_harness_picks_up_skills_and_project_instructions(
     workspace: Path, run: Any
 ) -> None:
-    """Three separate search paths, one assertion each — because a search path that
+    """Two separate search paths, one assertion each — because a search path that
     finds nothing looks exactly like a model that did not read what it found."""
-    harness = run(
-        Harness.create(
-            cwd=workspace, role="backend-dev", approval_mode="auto-edit", load_mcp=False
-        )
-    )
+    harness = run(Harness.create(cwd=workspace, approval_mode="auto-edit", load_mcp=False))
     try:
         prompt = harness.system_prompt()
-
-        # .stcode/agents/backend-dev.toml
-        assert "Role: backend developer" in prompt
-        assert "Message devops instead." in prompt
 
         # .agents/skills/*/SKILL.md — the catalogue, not the bodies. Progressive
         # disclosure is the whole design, so finding a skill's *instructions* in the

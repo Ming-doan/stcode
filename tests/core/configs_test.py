@@ -1,9 +1,9 @@
 """
-Config tests — the file, and what survives a round trip through it.
+Config tests — the file, what a patch leaves in it, and how values resolve.
 
-`save_config` rewrites the whole file from the model, so anything the model holds that
-TOML has no spelling for is a crash at save time, on a screen the user is in the middle
-of using. That is what these check.
+`update_config` edits the user's file in place, so the failures worth guarding are the
+ones that damage it: a comment lost, an environment secret written down, a patch that
+leaves a file the daemon can no longer start from.
 """
 
 from __future__ import annotations
@@ -11,63 +11,21 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import tomlkit
 
 from stcode.core.configs import (
-    DEFAULT_CONFIG_TOML,
-    REDACTED,
-    GatewayConfig,
-    apply_cli_overrides,
-    apply_provider_settings,
+    DEFAULT_CONFIG,
+    Config,
     load_config,
-    redacted,
-    resolve_agent_prompt,
-    save_config,
+    resolve_prompt,
+    secret,
+    update_config,
 )
-from stcode.core.providers import ProviderConfig, RouteConfig
 
 
 def test_the_shipped_default_config_parses() -> None:
     """It is written by hand, in a string, and nothing else would notice a typo."""
-    from stcode.core.common.compat import tomllib
-
-    GatewayConfig.model_validate(tomllib.loads(DEFAULT_CONFIG_TOML))
-
-
-def test_a_session_dir_survives_a_round_trip(tmp_path: Path) -> None:
-    """`dir` is a `Path` in memory and a string in TOML. `tomli_w` cannot write a
-    `PosixPath`, so the conversion has to happen on the way out, not by accident."""
-    path = tmp_path / "config.toml"
-    config = GatewayConfig.model_validate({"session": {"dir": "./.stcode/sessions"}})
-    assert config.session.dir == Path("./.stcode/sessions")
-
-    save_config(config, path)
-    assert load_config(path).session.dir == Path("./.stcode/sessions")
-
-
-def test_saving_keeps_the_settings_the_ui_just_wrote(tmp_path: Path) -> None:
-    path = tmp_path / "config.toml"
-    config = apply_provider_settings(
-        GatewayConfig(), provider="anthropic", api_key="literal", model="claude-opus-5"
-    )
-    save_config(config, path)
-    reloaded = load_config(path)
-
-    assert reloaded.defaults.model == "claude-opus-5"
-    assert reloaded.providers["anthropic"].api_key == "literal"
-    assert reloaded.routing["high"].model == "claude-opus-5"
-    # The literal is why the file is 0600.
-    assert path.stat().st_mode & 0o777 == 0o600
-
-
-def test_tool_policy_reaches_the_config(tmp_path: Path) -> None:
-    config = GatewayConfig.model_validate({"agent": {"exclude_tools": ["web_search"]}})
-    assert config.agent.exclude_tools == ["web_search"]
-    assert config.agent.tools == []
-
-
-def test_tracing_is_off_unless_asked(tmp_path: Path) -> None:
-    """A session nobody is watching should not pay for a tracer."""
-    assert GatewayConfig().trace.enabled is False
+    Config.model_validate(tomlkit.parse(DEFAULT_CONFIG).unwrap())
 
 
 def test_a_missing_config_says_where_it_looked(tmp_path: Path) -> None:
@@ -75,93 +33,116 @@ def test_a_missing_config_says_where_it_looked(tmp_path: Path) -> None:
         load_config(tmp_path / "nope.toml")
 
 
-# ---- flags are not settings -------------------------------------------------------
-
-
-def test_cli_overrides_leave_the_loaded_config_alone() -> None:
-    """The failure: `stcode --transport tcp` once, and every bare `stcode` afterwards
-    binds TCP.
-
-    The UI writes its config back whenever a mode or an address changes. If the flags
-    were folded into that same object, the flag went to disk with it — and the docstring
-    promising "never written back" was describing something that had stopped being true.
-    """
-    stored = GatewayConfig()
-    assert stored.daemon.transport == "unix"
-
-    live = apply_cli_overrides(stored, transport="tcp", approval_mode="full-auto")
-
-    assert live.daemon.transport == "tcp", "the flag did not take effect for this run"
-    assert stored.daemon.transport == "unix", "the flag reached the config that gets saved"
-    assert stored.defaults.approval_mode != "full-auto"
-
-
-def test_the_shipped_daemon_default_is_a_unix_socket() -> None:
-    """`unix` and `~/.stcode/daemon.sock`, with nothing configured. A `tcp` in somebody's
-    file got there from a flag or from the connect screen, not from us."""
-    daemon = GatewayConfig().daemon
-    assert daemon.transport == "unix"
-    assert daemon.socket == "~/.stcode/daemon.sock"
-
-
-# ---- what the setup screen writes -------------------------------------------------
-
-
-def test_routing_models_are_applied_over_the_default_repointing() -> None:
-    """The three tier fields are the last word: a tier you typed into is a tier you
-    meant, even though choosing a model repoints every tier that was following it."""
-    config = apply_provider_settings(
-        GatewayConfig(),
-        provider="openai",
-        model="gpt-5",
-        routing_models={"low": "gpt-5-mini", "medium": "", "high": "gpt-5"},
-    )
-    assert config.routing["low"].model == "gpt-5-mini"
-    assert config.routing["medium"].model == "gpt-5", "a blank tier follows the model field"
-    assert config.routing["low"].provider == "openai"
-
-
-def test_the_concurrency_cap_survives_a_round_trip(tmp_path: Path) -> None:
-    """The one knob that makes a local model usable behind parallel sub-agents."""
+def test_a_scaffolded_config_is_private(tmp_path: Path) -> None:
+    """The file may come to hold a literal key, so it starts 0600."""
     path = tmp_path / "config.toml"
-    config = apply_provider_settings(
-        GatewayConfig(), provider="openai", model="local", max_concurrent=1
-    )
-    assert config.providers["openai"].max_concurrent == 1
-    save_config(config, path)
-    assert load_config(path).providers["openai"].max_concurrent == 1
+    load_config(path, create_if_missing=True)
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
-def test_a_chosen_effort_is_remembered(tmp_path: Path) -> None:
-    """`/effort` used to reach the running session and nothing else, so the choice
-    quietly reverted at the next `stcode`."""
+# ---- secrets ----------------------------------------------------------------------
+
+
+def test_a_secret_reference_resolves_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MY_KEY", "sk-env")
+    assert secret("${MY_KEY}") == "sk-env"
+    assert secret("sk-literal") == "sk-literal"
+    monkeypatch.delenv("MY_KEY")
+    assert secret("${MY_KEY}") is None, "an unset variable must read as no key, not as its name"
+
+
+def test_a_provider_falls_back_to_its_conventional_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-conventional")
+    config = Config.model_validate({"model": {"providers": {"a": {"provider": "anthropic"}}}})
+    assert config.model.providers["a"].key() == "sk-conventional"
+
+
+def test_an_environment_secret_never_reaches_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failure the old save had: a value resolved from the environment was dumped
+    back into the file, and the secret was on disk from then on."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
     path = tmp_path / "config.toml"
-    config = apply_provider_settings(
-        GatewayConfig(), provider="openai", model="m", reasoning_effort="high"
+    load_config(path, create_if_missing=True)
+    update_config(path, {"agent.reasoning_effort": "high"})
+    assert "sk-from-env" not in path.read_text()
+    assert "${OPENAI_API_KEY}" in path.read_text()
+
+
+# ---- patching the file ------------------------------------------------------------
+
+
+def test_a_patch_keeps_comments_and_untouched_keys(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('# mine\n[agent]\nmax_turns = 7  # why seven\n')
+    update_config(path, {"agent.approval_mode": "plan"})
+    text = path.read_text()
+    assert "# mine" in text and "# why seven" in text
+    assert load_config(path).agent.max_turns == 7
+    assert load_config(path).agent.approval_mode == "plan"
+
+
+def test_a_patch_that_would_not_load_is_refused_before_writing(tmp_path: Path) -> None:
+    """A daemon must never write the file it will fail to start from next time."""
+    path = tmp_path / "config.toml"
+    load_config(path, create_if_missing=True)
+    before = path.read_text()
+    with pytest.raises(ValueError):
+        update_config(path, {"model.default": "nobody"})
+    assert path.read_text() == before
+
+
+def test_a_none_removes_a_key(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[model.providers.openai]\nprovider = "openai"\nmodel = "x"\n')
+    update_config(path, {"model.providers.openai.model": None})
+    assert load_config(path).model.providers["openai"].model == ""
+
+
+def test_overrides_apply_to_this_load_and_never_to_the_file(tmp_path: Path) -> None:
+    """The failure: `--transport tcp` once, and every later start binds TCP."""
+    path = tmp_path / "config.toml"
+    load_config(path, create_if_missing=True)
+    live = load_config(path, overrides={"daemon.transport": "tcp", "agent.approval_mode": "plan"})
+    assert live.daemon.transport == "tcp"
+    assert live.agent.approval_mode == "plan"
+    assert load_config(path).daemon.transport == "unix"
+    assert "tcp" not in path.read_text()
+
+
+# ---- routing ----------------------------------------------------------------------
+
+
+def test_with_no_routing_every_tier_uses_the_default_entry() -> None:
+    config = Config.model_validate(
+        {"model": {"providers": {"work": {"provider": "openai", "model": "gpt-x"}}}}
     )
-    save_config(config, path)
-    assert load_config(path).defaults.reasoning_effort == "high"
+    assert config.model.route("low") == ("work", "gpt-x")
+    assert config.model.route("high") == ("work", "gpt-x")
 
 
-# ---- agent profiles, and the team switch -------------------------------------------
+def test_two_accounts_on_one_library_are_two_entries() -> None:
+    config = Config.model_validate(
+        {
+            "model": {
+                "default": "personal",
+                "providers": {
+                    "work": {"provider": "openai", "api_key": "sk-work"},
+                    "personal": {"provider": "openai", "api_key": "sk-me"},
+                },
+                "routing": {"low": {"provider": "work", "model": "mini"}},
+            }
+        }
+    )
+    assert config.model.route("high")[0] == "personal"
+    assert config.model.route("low") == ("work", "mini")
 
 
-def test_a_profile_carries_its_prompt_and_survives_a_round_trip(tmp_path: Path) -> None:
-    """One file is one agent — that is the whole reason a prompt lives in the config.
+def test_routing_to_an_unconfigured_entry_refuses() -> None:
+    with pytest.raises(ValueError, match="no \\[model.providers"):
+        Config.model_validate({"model": {"routing": {"low": {"provider": "ghost", "model": "m"}}}})
 
-    A prompt is the one value here with newlines and quotes in it, so a round trip
-    through `tomli_w` is worth asserting rather than assuming.
-    """
-    path = tmp_path / "backend-dev.toml"
-    config = GatewayConfig()
-    config.agent.prompt = '# Role: backend dev\n\n## You own\n`src/api/`, and "nothing else".'
-    config.team.role = "backend-dev"
-    save_config(config, path)
 
-    loaded = load_config(path)
-    assert loaded.agent.prompt == config.agent.prompt
-    assert resolve_agent_prompt(loaded) == config.agent.prompt
-    assert loaded.source_path == path
+# ---- agent profiles, and the team switch ------------------------------------------
 
 
 def test_a_prompt_file_is_relative_to_the_config_that_named_it(tmp_path: Path) -> None:
@@ -172,15 +153,7 @@ def test_a_prompt_file_is_relative_to_the_config_that_named_it(tmp_path: Path) -
     path = profiles / "backend-dev.toml"
     path.write_text('[agent]\nprompt_file = "backend-dev.md"\n')
 
-    assert resolve_agent_prompt(load_config(path)) == "# Role: backend dev\n\nYou own the API."
-
-
-def test_naming_both_prompts_refuses(tmp_path: Path) -> None:
-    config = GatewayConfig()
-    config.agent.prompt = "inline"
-    config.agent.prompt_file = "elsewhere.md"
-    with pytest.raises(ValueError, match="one prompt"):
-        resolve_agent_prompt(config)
+    assert resolve_prompt(load_config(path)) == "# Role: backend dev\n\nYou own the API."
 
 
 def test_a_missing_prompt_file_refuses_loudly(tmp_path: Path) -> None:
@@ -189,52 +162,25 @@ def test_a_missing_prompt_file_refuses_loudly(tmp_path: Path) -> None:
     path = tmp_path / "backend-dev.toml"
     path.write_text('[agent]\nprompt_file = "gone.md"\n')
     with pytest.raises(FileNotFoundError, match="cannot be read"):
-        resolve_agent_prompt(load_config(path))
+        resolve_prompt(load_config(path))
 
 
-def test_the_source_path_is_never_written_back(tmp_path: Path) -> None:
-    """It describes the file; writing it into the file would be a key that grows on
-    every save and means nothing to anybody reading it."""
-    path = tmp_path / "config.toml"
-    save_config(load_config(path, create_if_missing=True), path)
-    assert "source_path" not in path.read_text()
-
-
-def test_team_mode_is_off_by_default_and_a_role_does_not_turn_it_on() -> None:
+def test_team_mode_is_off_by_default_and_a_role_does_not_turn_it_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two facts, not one. A role says which agent this is; team mode says a shared
     volume is mounted — and a profile copied to a laptop used to mean both."""
-    assert GatewayConfig().team.enabled is False
-
-    live = apply_cli_overrides(GatewayConfig(), role="backend-dev")
-    assert live.team.role == "backend-dev"
-    assert live.team.enabled is False, "--role turned team mode on"
-
-    assert apply_cli_overrides(GatewayConfig(), team=True).team.enabled is True
-
-
-def test_a_client_never_sees_a_literal_key() -> None:
-    """`get_config` shows a daemon's settings; it does not hand over the credential.
-
-    The env var *name* stays, because it is what diagnoses an unauthenticated daemon
-    and it is not itself the secret.
-    """
-    config = GatewayConfig()
-    config.providers["anthropic"] = ProviderConfig(
-        api_key="sk-secret", api_key_env="ANTHROPIC_API_KEY"
-    )
-    config.routing["high"] = RouteConfig(
-        provider="anthropic", model="claude-opus-5", api_key="sk-tier"
-    )
-
-    data = redacted(config)
-    assert data["providers"]["anthropic"]["api_key"] == REDACTED
-    assert data["providers"]["anthropic"]["api_key_env"] == "ANTHROPIC_API_KEY"
-    assert data["routing"]["high"]["api_key"] == REDACTED
-    # And the original is untouched — this is a view, not an edit.
-    assert config.providers["anthropic"].api_key == "sk-secret"
+    monkeypatch.delenv("STCODE_TEAM", raising=False)
+    assert Config().team.enabled is False
+    assert Config.model_validate({"team": {"role": "backend-dev"}}).team.enabled is False
+    monkeypatch.setenv("STCODE_TEAM", "1")
+    assert Config().team.enabled is True
 
 
 def test_the_client_limit_is_unset_by_default() -> None:
     """Unset means "1 in a container, unlimited on the host", which `Daemon` resolves.
     A number here would have to be wrong on one of the two."""
-    assert GatewayConfig().daemon.max_clients is None
+    assert Config().daemon.max_clients is None
+
+
+def test_tracing_is_off_unless_asked() -> None:
+    """A session nobody is watching should not pay for a tracer."""
+    assert Config().trace.enabled is False

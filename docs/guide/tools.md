@@ -21,7 +21,8 @@ and whose **docstring is the prompt the model reads**.
 | `skill` | read | load a procedure's instructions |
 | `repl` | execute | a persistent Python namespace |
 | `task` | execute | a sub-agent, added by the agent layer |
-| `send_message` | execute | team mode only |
+| `find_teammate` | read | team mode only |
+| `send_team_message` | execute | team mode only |
 
 A sub-agent gets a narrower set: no `task` (one that can spawn is one for which
 `max_depth` bounds nothing) and no `repl` (a persistent namespace is the parent's job).

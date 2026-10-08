@@ -292,7 +292,7 @@ def test_a_shared_gateway_is_not_closed_by_the_agent(tmp_path: Path, run: Any) -
 def test_create_wires_config_through_to_harness_and_session(tmp_path: Path, run: Any) -> None:
     """The one test of `Agent.create`: everything else builds the parts directly, so
     this is where a mis-wired config section would otherwise go unnoticed."""
-    from stcode.core.configs import GatewayConfig
+    from stcode.core.configs import Config
 
     agents = tmp_path / "work" / ".stcode" / "agents"
     agents.mkdir(parents=True)
@@ -300,12 +300,13 @@ def test_create_wires_config_through_to_harness_and_session(tmp_path: Path, run:
         '[agent]\nprompt = """\n# Role: backend dev\n\n## You own\nthe API.\n"""\n'
     )
 
-    config = GatewayConfig.model_validate(
+    config = Config.model_validate(
         {
-            "defaults": {"provider": "anthropic", "model": "claude-opus-5", "approval_mode": "plan"},
-            "providers": {"anthropic": {"api_key": "not-used"}},
-            "routing": {"medium": {"provider": "anthropic", "model": "claude-sonnet-5"}},
-            "agent": {"max_turns": 7, "difficulty": "low"},
+            "model": {
+                "providers": {"anthropic": {"provider": "anthropic", "api_key": "not-used", "model": "claude-opus-5"}},
+                "routing": {"medium": {"provider": "anthropic", "model": "claude-sonnet-5"}},
+            },
+            "agent": {"max_turns": 7, "difficulty": "low", "approval_mode": "plan"},
             "session": {"dir": str(tmp_path / "sessions")},
         }
     )
@@ -318,6 +319,7 @@ def test_create_wires_config_through_to_harness_and_session(tmp_path: Path, run:
     assert agent.harness.session_id == agent.session.id
     assert agent.session.path.parent == tmp_path / "sessions"
     assert agent.session.meta()["role"] == "backend-dev"
+    assert agent.session.meta()["model"] == "claude-opus-5", "no `low` route, so the default entry"
     # Plan mode forbids EXECUTE, so `task` is registered and correctly not advertised.
     assert "task" in agent.harness.registry and "task" not in agent.harness.tool_names()
     run(agent.aclose())
@@ -514,7 +516,7 @@ def test_a_looping_agent_is_caught_and_redirected(tmp_path: Path, run: Any) -> N
 
 def test_sub_agents_get_no_supervisor(tmp_path: Path, run: Any) -> None:
     """A nudge for a one-shot worker arrives about when the worker is finishing."""
-    from stcode.core.configs import GatewayConfig
+    from stcode.core.configs import Config
 
     agents = tmp_path / "work" / ".stcode" / "agents"
     agents.mkdir(parents=True)
@@ -522,10 +524,13 @@ def test_sub_agents_get_no_supervisor(tmp_path: Path, run: Any) -> None:
         '[agent]\nprompt = """\n# Role: backend dev\n\n## You own\nthe API.\n"""\n'
     )
 
-    config = GatewayConfig.model_validate(
+    config = Config.model_validate(
         {
-            "providers": {"anthropic": {"api_key": "not-used"}},
-            "routing": {"low": {"provider": "anthropic", "model": "claude-haiku-4-5"}},
+            "model": {
+                "providers": {"anthropic": {"provider": "anthropic", "api_key": "not-used"}},
+                "routing": {"low": {"provider": "anthropic", "model": "claude-haiku-4-5"}},
+            },
+            "supervisor": {"enabled": True},
             "session": {"dir": str(tmp_path / "sessions")},
         }
     )

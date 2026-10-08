@@ -6,18 +6,18 @@
 #   docker run -v ./examples/agents/backend-dev.toml:/config/config.toml \
 #              -e STCODE_TEAM=1 -e STCODE_SANDBOX=1 -e ANTHROPIC_API_KEY \
 #              -v team:/team -p 7717:7717 stcode
-#
-# Or drop the directory in as $STCODE_AGENTS_DIR and select this one with --role backend-dev,
-# in which case only [agent] prompt is read from here.
 
-[defaults]
+[model.providers.anthropic]
 provider = "anthropic"
+api_key = "${ANTHROPIC_API_KEY}"
 model = "claude-sonnet-5"
 
 [team]
 # Off unless the deployment says otherwise — STCODE_TEAM=1, --team, or `enabled = true`
 # here. A role is which agent this is; team mode is whether a shared volume is mounted.
 role = "backend-dev"
+# What teammates see from find_teammate — say what you own.
+description = "Owns the API service and /team/knowledge/api-contract.md."
 
 [agent]
 difficulty = "high"
@@ -49,10 +49,10 @@ DevOps when you need something deployed or configured.
    team's origin — a bare repository on the shared volume.
 2. Work on a branch named for the task: `git checkout -b api/rate-limit`.
 3. Write the contract into `/team/knowledge/api-contract.md` **before** implementing,
-   and `send_message` frontend-dev with the path. They are blocked until you do; a
+   and `send_team_message` frontend-dev with the path. They are blocked until you do; a
    contract they can build against is worth more to them than a finished endpoint.
 4. Build it. Write tests. Run them and read the failures.
-5. `git push origin <branch>` when it is green, then `send_message` devops with the
+5. `git push origin <branch>` when it is green, then `send_team_message` devops with the
    branch name. Do not merge — devops is the only role that merges.
 
 Never edit the frontend's code. If something there needs to change, say so in a message.

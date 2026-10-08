@@ -24,6 +24,11 @@ One binary, three shapes, no implementation switches between them:
 | `stcode --headless` | the daemon alone — what a container runs |
 | `stcode --daemonless` | the UI alone, attached to a daemon elsewhere (`/connect` to move it) |
 
+`stcode/cli` and `stcode/core` are **separate programs that never import each other**.
+The daemon is `stcode-daemon`; the UI starts it as a subprocess when nothing is listening
+and speaks to it only over the socket. The daemon alone reads and writes `config.toml`.
+→ [decision 0006](docs/decisions/0006-cli-and-core-are-separate-programs.md)
+
 **Two modes, one engine.** `Agent` does not know which mode it is in; the difference is
 which harness is loaded and which tools are injected.
 
@@ -32,7 +37,7 @@ which harness is loaded and which tools are injected.
 | Deployment | one daemon on your machine | N containers, each = 1 daemon + 1 agent |
 | Workspace | existing checkout at `cwd`, scope-enforced | agent runs `git clone` itself |
 | Roles | none | BA / frontend-dev / backend-dev / devops … |
-| Coordination | `task` tool (in-process sub-agent) | shared `/team` volume + `send_message` |
+| Coordination | `task` tool (in-process sub-agent) | shared `/team` volume + `find_teammate` / `send_team_message` |
 | Client | TUI over unix socket | TUI/web over TCP; attach and steer mid-run |
 | Approval | human in the loop | `full-auto`, guarded by container detection |
 
@@ -68,6 +73,7 @@ is `strict`, so a broken internal link or a page missing from `nav` fails the bu
 | [providers.md](docs/architecture/providers.md) | `LLMGateway` — difficulty routing, retry, the unified wire format, prompt caching |
 | [session.md](docs/architecture/session.md) | The append-only JSONL transcript, its three readers, and ids |
 | [daemon.md](docs/architecture/daemon.md) | The socket, the protocol, `full-auto`'s container rule |
+| [cli.md](docs/architecture/cli.md) | Client UI, workflow logic, I/O services and screen ownership |
 | [mcp.md](docs/architecture/mcp.md) | MCP servers as *code* rather than as tool definitions |
 | [supervisor.md](docs/architecture/supervisor.md) | Stagnation detection at (almost) zero token cost |
 | [team.md](docs/architecture/team.md) | Containers, roles, the shared volume, git integration — and the evaluation set |
@@ -96,9 +102,10 @@ appended as a `user` message, never a system-prompt edit, so caching survives. �
 [supervisor.md](docs/architecture/supervisor.md)
 
 **3.3 Agent-to-agent messaging has no protocol.** Containers share a volume, so a message
-is a **file**: `send_message` writes JSON into `/team/inbox/<role>/`, and the receiver
-drains its own directory. No registry, no routing table, no service discovery, no N²
-socket mesh. Messages carry `refs` not content — enforced, not requested. →
+is a **file**: `send_team_message` writes JSON into `/team/inbox/<role>/`, and the
+receiver drains its own directory; `find_teammate` reads the cards each agent writes to
+`/team/members/` at start-up. No registry service, no routing table, no N² socket mesh.
+Messages carry `refs` not content — enforced, not requested. →
 [team.md](docs/architecture/team.md)
 
 **3.4 Daemon-first, so containerization is not a rewrite.** Detach does not kill the
@@ -221,6 +228,10 @@ Six steps, in order. Full version, with the reasoning for each, in
 ### The rest
 
 - Python 3.10+ (CI runs 3.10–3.13; `core/common/compat.py` holds the only two backports), `uv` for everything. `uv run pytest` before claiming anything works.
+- `cli/` never imports `core/`, and `core/` never imports `cli/`. A name both need is
+  copied into `cli/models.py`; display copy lives in `cli/labels.py`. A fact that changes when the engine does goes over the
+  socket. Settings and environment variables are read in `core/configs.py` and nowhere
+  else in `core/`.
 - Type hints mandatory in `core/`. `mypy --strict` on it — installed, and **not yet
   clean**: ~35 errors, mostly provider SDK stubs. Documented in
   [docs/contributing/testing.md](docs/contributing/testing.md) rather than claimed.

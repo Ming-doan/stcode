@@ -9,8 +9,21 @@ socket mesh. Containers share a volume, so:
 /team/inbox/backend-dev/01HXZ8Q2K3M4N5P6R7S8T9V0W1.json
 ```
 
-`send_message` writes a JSON file into the recipient's directory. The recipient drains
-its own directory at the top of every turn. That is the whole mechanism.
+`send_team_message` writes a JSON file into the recipient's directory. The recipient
+drains its own directory at the top of every turn. That is the whole mechanism.
+
+## Finding who to hand off to
+
+Every agent writes a card to `/team/members/<role>.json` as it starts — its role and a
+one-line `[team] description`. Before handing off, an agent asks:
+
+```python
+find_teammate("api")
+# backend-dev — Owns the API service and /team/knowledge/api-contract.md. (on 3f2a9c1b7d4e)
+```
+
+and then sends to the role it found. `send_team_message` refuses a role with no card,
+naming the ones there are — a message to a typo would sit in an inbox nobody reads.
 
 Messages are written **write-then-rename**, so a reader draining at the same moment
 sees either nothing or a complete message. Filenames are ULIDs, so an inbox drains
@@ -19,7 +32,7 @@ oldest-first with no index.
 ## Messages carry refs, not content
 
 ```python
-send_message(
+send_team_message(
     to="devops",
     subject="Rate limiting ready on branch feat/ratelimit",
     body="Config lives in the new [ratelimit] section. Needs REDIS_URL set.",
@@ -91,7 +104,7 @@ never splices into a turn in flight.
 | a **team** | a product, into roles | one checkout and one merge boundary each |
 | a **sub-agent** | one role's task, inside its own checkout | no boundary at all |
 
-A sub-agent gets no `send_message`, so the messaging discipline between roles is
+A sub-agent gets no team tools, so the messaging discipline between roles is
 untouched. `[agent] enable_task = false` is the off switch if you want one.
 
 ## Does it actually help?

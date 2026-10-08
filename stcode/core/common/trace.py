@@ -8,7 +8,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import json
-import os
 import queue
 import secrets
 import threading
@@ -21,8 +20,11 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from stcode.core.configs import TraceConfig
+
 logger = logging.getLogger("stcode.trace")
 INSTRUMENTATION_NAME = "stcode"
+SERVICE_NAME = "stcode"
 _CONTENT_KEYS = {"stcode.input", "stcode.output", "gen_ai.input.messages", "gen_ai.output.messages"}
 _TRACE_KEYS = {
     "gen_ai.conversation.id", "gen_ai.agent.name", "stcode.role", "stcode.approval_mode",
@@ -300,17 +302,16 @@ class _Exporter:
         return barrier.ready.wait(max(0, timeout - (time.monotonic() - started))) and barrier.ok
 
 
-def configure(settings: Any) -> bool:
-    """Start one exporter. Environment values override TOML; never read .env files."""
+def configure(settings: TraceConfig) -> bool:
+    """Start one exporter from `[trace]`. Credentials are resolved by the config."""
     global _exporter, _record_content
-    if _exporter is not None or not getattr(settings, "enabled", False):
+    if _exporter is not None or not settings.enabled:
         return _exporter is not None
-    provider = getattr(settings, "provider", "langfuse")
+    values = settings.resolved()
+    url = values["url"]
     headers = {}
-    if provider == "langfuse":
-        url = os.getenv("LANGFUSE_BASE_URL") or os.getenv("LANGFUSE_HOST") or settings.url or "https://cloud.langfuse.com"
-        public = os.getenv("LANGFUSE_PUBLIC_KEY") or settings.public_key
-        secret = os.getenv("LANGFUSE_SECRET_KEY") or settings.secret_key
+    if settings.provider == "langfuse":
+        public, secret = values["public_key"], values["secret_key"]
         if not public or not secret:
             logger.warning("Langfuse trace credentials are missing; tracing disabled")
             return False
@@ -319,19 +320,14 @@ def configure(settings: Any) -> bool:
         headers["x-langfuse-ingestion-version"] = "4"
         headers["Accept"] = "application/json"
         path = "/api/public/otel/v1/traces"
-    elif provider == "phoenix":
-        url = os.getenv("PHOENIX_COLLECTOR_ENDPOINT") or settings.url or "http://localhost:6006"
-        key = os.getenv("PHOENIX_API_KEY") or settings.api_key
-        project = os.getenv("PHOENIX_PROJECT_NAME") or settings.project_name or "default"
+    else:
+        project = values["project_name"]
         if any(c in project for c in "/?#"):
             logger.warning("Invalid Phoenix trace project name; tracing disabled")
             return False
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
+        if values["api_key"]:
+            headers["Authorization"] = f"Bearer {values['api_key']}"
         path = f"/v1/projects/{quote(project, safe='')}/spans"
-    else:
-        logger.warning("Unknown trace provider; tracing disabled")
-        return False
     try:
         parsed = urlsplit(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.query or parsed.fragment or parsed.username:
@@ -341,7 +337,7 @@ def configure(settings: Any) -> bool:
     except ValueError:
         logger.warning("Invalid trace base URL; tracing disabled")
         return False
-    _exporter = _Exporter(provider, url.rstrip("/") + path, headers, settings.service_name)
+    _exporter = _Exporter(settings.provider, url.rstrip("/") + path, headers, SERVICE_NAME)
     _record_content = bool(settings.content)
     return True
 

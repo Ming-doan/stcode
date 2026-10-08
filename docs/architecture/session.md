@@ -110,7 +110,7 @@ writing a file whose first two lines are both `meta`. It is still an override, a
 what that looks like from outside is `/effort` chosen one message too early applying to
 no model call at all.
 
-`[defaults] reasoning_effort` is the layer under all of this: the agent folds it in
+`[agent] reasoning_effort` is the layer under all of this: the agent folds it in
 beneath whatever the session has overridden, so the config's answer applies from the
 first call and a `/effort` during the conversation replaces it.
 

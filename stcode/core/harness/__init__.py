@@ -23,8 +23,6 @@ from stcode.core.harness.approvals import (
     ApprovalMode,
     ToolPermission,
     is_forbidden,
-    next_approval_mode,
-    parse_approval_mode,
     requires_approval,
 )
 from stcode.core.harness.context import HarnessContext, TodoItem
@@ -76,8 +74,6 @@ __all__ = [
     "is_forbidden",
     "load_mcp_config",
     "mode_for",
-    "next_approval_mode",
-    "parse_approval_mode",
     "read_project_instructions",
     "requires_approval",
     "to_tool_definition",

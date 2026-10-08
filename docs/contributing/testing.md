@@ -14,7 +14,10 @@ tests/
   fakes.py                 the three test doubles
   fixtures/workspace/      a real small project, mounted as the agent's cwd
   core/                    one file per module, testing its public surface
-  cli/                     the same, for the terminal UI's own modules
+  cli/                     client boundary and entry-point tests
+    logic/                 pure workflows, command parsing and completion
+    services/              launcher and preferences I/O
+    ui/                    themes and reusable components
   integration/             the flows the documentation describes
 ```
 
@@ -87,7 +90,7 @@ the code a mock would replace.
 ## The fixture workspace
 
 `tests/fixtures/workspace/` is a small, checked-in project: source files, an
-`AGENTS.md`, a role, two skills, a config, and an MCP server. The `workspace` fixture
+`AGENTS.md`, two skills, a config carrying a role, and an MCP server. The `workspace` fixture
 copies it into `tmp_path` per test, so tests can edit it without sharing state.
 
 It exists because a search path that finds **nothing** looks, from outside, exactly like
@@ -95,7 +98,7 @@ a model ignoring what it found. Each discovery mechanism gets an assertion that 
 on disk reached the prompt.
 
 Integration tests also run with an isolated home: `~/.agents/skills` is redirected and
-`STCODE_AGENTS_DIR` / `STCODE_MCP_CONFIG` are unset, so a prompt assertion does not
+`STCODE_MCP_CONFIG` is unset, so a prompt assertion does not
 depend on what the developer happens to have installed.
 
 ## Driving coroutines

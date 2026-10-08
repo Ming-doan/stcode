@@ -42,9 +42,9 @@ from stcode.core.agent.supervisor import Supervisor
 from stcode.core.common import trace
 from stcode.core.harness import Harness
 from stcode.core.harness.approvals import DEFAULT_APPROVAL_MODE, ApprovalMode
-from stcode.core.harness.prompts import resolve_prompt
 from stcode.core.harness.tools.base import ApprovalFn, AskFn, EventFn, ProgressFn, Tool
-from stcode.core.providers.gateway import Difficulty, LLMGateway
+from stcode.core.configs import Config, Difficulty, resolve_prompt
+from stcode.core.providers.gateway import LLMGateway
 from stcode.core.providers.types import (
     MessageStop,
     ReasoningDelta,
@@ -54,8 +54,8 @@ from stcode.core.providers.types import (
 )
 from stcode.core.session import Session
 
-if TYPE_CHECKING:  # pragma: no cover — the arrow points this way for types only
-    from stcode.core.configs import AgentConfig, GatewayConfig
+if TYPE_CHECKING:  # pragma: no cover
+    from stcode.core.configs import AgentConfig
 
 DEFAULT_MAX_TURNS = 40
 """Tool-call ceiling within one turn — the only thing between a model that keeps
@@ -85,7 +85,7 @@ class Agent:
         self.difficulty = difficulty
         self.max_turns = max_turns
         self.reasoning_effort = reasoning_effort
-        """What `[defaults] reasoning_effort` asked for, if anything. A floor, not a
+        """What `[agent] reasoning_effort` asked for, if anything. A floor, not a
         fixture: a `/effort` chosen mid-conversation lands in the session's own `meta`
         and wins, because that is a statement about *this* conversation."""
         self.supervisor = supervisor
@@ -106,7 +106,7 @@ class Agent:
     @classmethod
     async def create(
         cls,
-        config: "GatewayConfig",
+        config: Config,
         *,
         cwd: str | Path | None = None,
         role: str = "",
@@ -115,41 +115,38 @@ class Agent:
         gateway: LLMGateway | None = None,
         **harness_kwargs: Any,
     ) -> "Agent":
-        """Build an agent from a loaded `GatewayConfig`.
-
-        `GatewayConfig` is the *in-memory* model, not the TOML — typing it is free
-        coupling to the values this reads anyway, and `core/configs` imports nothing
-        from `core/agent`, so the arrow still points one way.
-        """
+        """Build an agent from a loaded `Config`."""
         # Idempotent, and off unless [trace] says otherwise: the first agent built in
         # this process starts the exporter, every later one finds it running.
         trace.configure(config.trace)
 
         owns_gateway = gateway is None
-        gateway = gateway or LLMGateway(
-            providers=config.providers, routing=config.routing, retry=config.retry
-        )
+        gateway = gateway or LLMGateway(config.model)
         # `role` names the prompt section and the session `meta` record. It does not by
         # itself turn on team mode — `[team] enabled` (or `STCODE_TEAM`, or `--team`) is
         # a deployment declaring that a shared volume is mounted, and a solo session
         # naming a role should not go looking for an inbox that is not there.
-        team = getattr(config, "team", None)
-        role = role or (team.role if team else "")
-        joins_team = bool(team and team.enabled)
+        team = config.team
+        role = role or team.role
+        joins_team = team.enabled
         if joins_team and not role:
-            # Loud, like an unknown role: team mode with nobody to be is a mailbox with
-            # no owner, and every message to it would be addressed to "".
+            # Loud: team mode with nobody to be is a mailbox with no owner, and every
+            # message to it would be addressed to "".
             raise ValueError(
                 "[team] enabled is on but no role is set. Name one in [team] role, "
                 "with --role, or with STCODE_ROLE — a team member has to be somebody."
             )
+        if joins_team and team.url:
+            # Reserved for a team service. Falling back to `shared_dir` instead would
+            # leave the operator on a volume they believe they have replaced.
+            raise ValueError(
+                f"[team] url is set ({team.url}), but there is no team service client "
+                "yet. Remove it and share a volume through [team] shared_dir."
+            )
 
         # The config's own prompt, when it is an agent profile. Resolved here so a
         # mounted profile never has to be found by name.
-        harness_kwargs.setdefault(
-            "agent_prompt",
-            resolve_prompt(config.agent.prompt, config.agent.prompt_file, config.source_path),
-        )
+        harness_kwargs.setdefault("agent_prompt", resolve_prompt(config))
 
         # `setdefault`, not a keyword: a caller passing `load_mcp=False` meant it, and
         # passing both would be a duplicate-argument TypeError.
@@ -158,13 +155,14 @@ class Agent:
         harness_kwargs.setdefault("role", role)
         harness = await Harness.create(
             cwd=cwd,
-            approval_mode=approval_mode or config.defaults.approval_mode,
+            approval_mode=approval_mode or config.agent.approval_mode,
             **harness_kwargs,
         )
+        harness.context.tavily_key = config.tools.tavily_key()
         session = session or Session.create(
             cwd=harness.context.cwd,
             role=role,
-            model=config.defaults.model,
+            model=config.model.route(config.agent.difficulty)[1] if config.model.providers else "",
             directory=config.session.dir,
             # No file until the first message. A `stcode` that was opened in the wrong
             # directory and closed again should leave nothing to list.
@@ -179,7 +177,7 @@ class Agent:
             difficulty=config.agent.difficulty,
             max_turns=config.agent.max_turns,
             max_concurrent=config.agent.max_concurrent,
-            reasoning_effort=config.defaults.reasoning_effort,
+            reasoning_effort=config.agent.reasoning_effort,
             owns_gateway=owns_gateway,
             supervisor=(
                 Supervisor(
@@ -194,9 +192,11 @@ class Agent:
         )
         if config.agent.enable_task and harness.depth < config.agent.max_depth:
             agent.enable_task()
-        if joins_team and team is not None:
-            agent.enable_team(team.shared_dir, role)
-        # Last, so it can also withhold `task` and `send_message`: the config is the
+        if joins_team:
+            agent.enable_team(
+                team.shared_dir, role, description=team.description, team=team.name
+            )
+        # Last, so it can also withhold `task` and the team tools: the config is the
         # operator's word, and a tool added by a feature switch does not outrank it.
         apply_tool_policy(harness, config.agent)
         return agent
@@ -251,24 +251,31 @@ class Agent:
         self.harness.registry.register(make_task_tool(self), replace=True)
         self.harness.allow("task")
 
-    def enable_team(self, shared_dir: str, role: str) -> None:
-        """Join a team: a mailbox on the shared volume, and `send_message`.
+    def enable_team(
+        self, shared_dir: str | Path, role: str, *, description: str = "", team: str = ""
+    ) -> None:
+        """Join a team: an inbox and a member card on the shared volume, then
+        `find_teammate` and `send_team_message`.
 
-        Registered from here for the same reason as `task` — the tool closes over this
+        Registered from here for the same reason as `task` — the tools close over this
         agent's mailbox, and `core/harness` must not import `core/team`.
 
         `task` survives. The two split different things: a team splits a *product* into
         roles with their own checkouts and one merge boundary each, a sub-agent splits
         one role's *task* inside its own checkout, creating no boundary at all. A
-        sub-agent still gets no `send_message` (it is not in `WORKER_TOOLS`), so the
+        sub-agent still gets no team tools (they are not in `WORKER_TOOLS`), so the
         messaging discipline between roles is untouched. `[agent] enable_task = false`
         is the off switch if you want one.
         """
-        from stcode.core.team import Mailbox, make_send_message_tool
+        from stcode.core.team import (
+            Mailbox,
+            make_find_teammate_tool,
+            make_send_team_message_tool,
+        )
 
         mailbox = Mailbox(shared_dir, role)
         try:
-            mailbox.ensure()
+            mailbox.join(description=description, team=team)
         except OSError as exc:
             raise RuntimeError(
                 f"Team mode needs a writable shared volume at {mailbox.root} ({exc}). "
@@ -276,9 +283,9 @@ class Agent:
                 "to run solo."
             ) from exc
         self.mailbox = mailbox
-        self.harness.registry.register(make_send_message_tool(self.mailbox), replace=True)
-        self.harness.allow("send_message")
-        self.harness.teammates = [name for name in self.mailbox.roles() if name != role]
+        for built in (make_find_teammate_tool(mailbox), make_send_team_message_tool(mailbox)):
+            self.harness.registry.register(built, replace=True)
+            self.harness.allow(built.name)
 
     # ---- driving ----
 
@@ -519,7 +526,7 @@ class Agent:
         overridden here — a tier is a statement about one piece of work, an override is
         a statement about the conversation, and sub-agents inherit neither.
 
-        `[defaults] reasoning_effort` is folded in underneath, so the config's answer
+        `[agent] reasoning_effort` is folded in underneath, so the config's answer
         applies from the first call and a `/effort` during the conversation replaces it.
         """
         overrides = self.session.overrides()
@@ -618,7 +625,7 @@ def apply_tool_policy(harness: Harness, settings: "AgentConfig") -> None:
 
     `tools` is an allow-list replacing the default set; `exclude_tools` subtracts from
     whatever is left. Both are checked against the registry, which by now holds the
-    built-ins *and* anything registered since — `task`, `send_message`, MCP tools in
+    built-ins *and* anything registered since — `task`, the team tools, MCP tools in
     `expose = "tools"` mode — so a name that exists can be named here.
 
     An unknown name raises. A config that quietly produced a smaller tool set would be

@@ -13,15 +13,13 @@ lives here too instead of leaking back into the screens as an `if`.
 from __future__ import annotations
 
 import os
+from typing import Any, Sequence
 
-from typing import Sequence
-
-from stcode.core.harness.approvals import APPROVAL_MODES, ApprovalMode
-from stcode.core.providers import PROVIDERS, ProviderConfig, default_model_for, key_env_for
-from stcode.core.providers.types import REASONING_EFFORTS
-
-Row = tuple[str, str]
-"""One line of a card: a label and what it means. Every card is a list of these."""
+from stcode.cli.models import APPROVAL_MODES, ApprovalMode, REASONING_EFFORTS, Row
+from stcode.cli.logic.commands import (
+    next_approval_mode as next_approval_mode,
+    parse_approval_mode as parse_approval_mode,
+)
 
 # --------------------------------------------------------------------------- providers
 
@@ -31,16 +29,26 @@ PROVIDER_LABELS: dict[str, str] = {
     "google": "Google Gemini",
 }
 
-# OpenAI first: it's the default, and Select shows options in the order given.
-PROVIDER_ORDER = ["openai", "anthropic", "google"]
 
-
-def provider_options() -> list[tuple[str, str]]:
-    """(label, value) pairs for the provider Select, preferred order first and any
-    newly registered provider appended rather than silently dropped."""
-    names = [p for p in PROVIDER_ORDER if p in PROVIDERS]
-    names += [p for p in sorted(PROVIDERS) if p not in names]
-    return [(PROVIDER_LABELS.get(name, name), name) for name in names]
+def provider_options(config: dict[str, Any]) -> list[tuple[str, str]]:
+    """(label, value) pairs for the provider Select: the daemon's configured entries,
+    then each library it could add an entry for."""
+    providers: dict[str, Any] = config.get("providers", {})
+    options = [
+        (
+            name
+            if name == entry.get("provider")
+            else f"{name}  ({entry.get('provider')})",
+            name,
+        )
+        for name, entry in providers.items()
+    ]
+    options += [
+        (f"{PROVIDER_LABELS.get(library, library)}  — new", library)
+        for library in config.get("libraries", {})
+        if library not in providers
+    ]
+    return options
 
 
 def provider_short_name(provider: str) -> str:
@@ -113,9 +121,7 @@ things on different days for reasons nobody could see. → `core/providers/types
 def effort_rows(provider: str = "") -> list[Row]:
     """Every rung, with the clamp named for the provider currently in force.
 
-    The rungs come from `core/providers`, not from a list written out here: the scale is
-    a fact about the providers, and a second copy in the UI is a copy that goes stale the
-    next time one is added.
+    `provider` is the library (`openai`, …), which is what the clamps depend on.
     """
     clamps = EFFORT_CLAMPS.get(provider, {})
     rows: list[Row] = []
@@ -128,18 +134,6 @@ def effort_rows(provider: str = "") -> list[Row]:
 
 EFFORT_ROWS: list[Row] = effort_rows()
 """The unqualified list, for callers with no provider in hand."""
-
-DIFFICULTY_HELP: dict[str, str] = {
-    "low": "the cheap tier",
-    "medium": "the middle tier",
-    "high": "the best model you configured",
-}
-
-
-def difficulty_options() -> list[tuple[str, str]]:
-    """(label, value) pairs for the difficulty Select in the setup screen."""
-    return [(f"{name}  —  {DIFFICULTY_HELP[name]}", name) for name in ("low", "medium", "high")]
-
 
 COMMANDS: list[Row] = [
     ("/model", "provider, key, model and routing"),
@@ -171,7 +165,11 @@ def commands_for(*, daemonless: bool, skills: Sequence[str] = ()) -> list[Row]:
     They come last and are marked, so a skill can never be mistaken for something the
     UI itself does, and a skill named after a command cannot take it over.
     """
-    rows = list(COMMANDS) if daemonless else [row for row in COMMANDS if row[0] not in DAEMONLESS_ONLY]
+    rows = (
+        list(COMMANDS)
+        if daemonless
+        else [row for row in COMMANDS if row[0] not in DAEMONLESS_ONLY]
+    )
     taken = {row[0] for row in rows}
     return rows + [row for row in skill_commands(skills) if row[0] not in taken]
 
@@ -189,6 +187,7 @@ SKILL_COMMAND_HINT = "skill — loads its instructions, then does the work"
 
 def daemonless_only(name: str) -> str:
     return f"/{name} needs --daemonless — this stcode is attached to the daemon it started."
+
 
 CARD_HELP = "help"
 CARD_COMMANDS = "commands"
@@ -259,8 +258,12 @@ def mcp_rows(servers: list[dict[str, object]]) -> list[Row]:
     rows: list[Row] = []
     for server in servers:
         tools = server.get("tools") or []
-        names = ", ".join(str(tool) for tool in tools) if isinstance(tools, list) else ""
-        rows.append((str(server.get("name", "?")), names or "connected, no tools advertised"))
+        names = (
+            ", ".join(str(tool) for tool in tools) if isinstance(tools, list) else ""
+        )
+        rows.append(
+            (str(server.get("name", "?")), names or "connected, no tools advertised")
+        )
     return rows
 
 
@@ -309,7 +312,9 @@ def token_rows(totals: dict[str, int]) -> list[Row]:
         rows.append(("cache write", f"{written:,}"))
     if read:
         rows.append(("cache read", f"{read:,} — charged at a fraction of input"))
-    rows.append(("total", f"{totals.get('input_tokens', 0) + totals.get('output_tokens', 0):,}"))
+    rows.append(
+        ("total", f"{totals.get('input_tokens', 0) + totals.get('output_tokens', 0):,}")
+    )
     rows.append(("model calls", f"{calls:,}"))
     return rows
 
@@ -373,7 +378,9 @@ def turn_usage(usage: dict[str, object]) -> str:
     """Cache reads are shown because "turn 2 is cheaper" is otherwise unverifiable."""
     cached = int(usage.get("cache_read_input_tokens", 0) or 0)
     tail = f" · {cached} cached" if cached else ""
-    return f"{usage.get('input_tokens', 0)} in / {usage.get('output_tokens', 0)} out{tail}"
+    return (
+        f"{usage.get('input_tokens', 0)} in / {usage.get('output_tokens', 0)} out{tail}"
+    )
 
 
 def supervisor_nudge(text: str) -> str:
@@ -412,8 +419,7 @@ def working_status(frame: str) -> str:
 
 # ------------------------------------------------------------------------- warnings
 
-STATUS_NO_MODEL = "not set"
-NO_MODEL_ERROR = "No model chosen. /model picks one."
+STATUS_NO_MODEL = "—"
 SETUP_SKIPPED = "Setup skipped — nothing written. /model sets it up any time."
 
 
@@ -450,7 +456,9 @@ TRUST_NO = "Cancel"
 
 SESSIONS_TITLE = "sessions"
 SESSIONS_EMPTY = "No sessions yet. A session file appears when you say something."
-SESSIONS_INTRO = "Only a parent session can be resumed — a sub-agent's is a transcript to read."
+SESSIONS_INTRO = (
+    "Only a parent session can be resumed — a sub-agent's is a transcript to read."
+)
 SESSIONS_RESUME = "Resume"
 
 
@@ -475,7 +483,7 @@ def _tilde(path: object) -> str:
     interesting part and it is always the longest."""
     text = str(path or "")
     home = os.path.expanduser("~")
-    return f"~{text[len(home):]}" if home and text.startswith(home) else text
+    return f"~{text[len(home) :]}" if home and text.startswith(home) else text
 
 
 # --------------------------------------------------------------------------- connect
@@ -513,42 +521,6 @@ def no_daemon_here(address: object) -> str:
 
 DAEMONLESS_CANCELLED = "Not connected. /connect to try another address."
 
-REMOTE_CONFIG_UNCHANGED = (
-    "provider and model written to the daemon's config — keys, base URL and routing "
-    "stay as it has them"
-)
-"""Said once after a `/model` save in `--daemonless`.
-
-The four `[defaults]` keys are written to the daemon's own `config.toml`, so the choice
-outlives the session and the container restart. Everything else in that file is how the
-operator provisioned the daemon — usually from an environment variable rather than the
-file at all — and a terminal that could rewrite those means one `/model` on the wrong
-tab silently repoints a fleet. A UI that quietly did nothing would be worse than one
-that says which half landed.
-"""
-
-
-def remote_config(path: str) -> str:
-    """Said once on attaching in `--daemonless`: whose settings are on screen.
-
-    The path is the point. A client showing `~/.stcode/config.toml` while driving a
-    container is describing the wrong disk, and the model in the status line is the
-    first thing anybody reads.
-    """
-    return f"using the daemon's config at {path}"
-
-
-REMOTE_CONFIG_READONLY = "the daemon's config is read-only here — /model still sets the session"
-"""When `set_config` would not land: a read-only mount is the ordinary case in a
-container. Better said up front than after a save that silently did half its job."""
-
-
-SETTINGS_INTRO_REMOTE = (
-    "This daemon's settings. Provider and model are written back to its config file; "
-    "keys, base URL and routing belong to whoever deployed it."
-)
-"""The settings screen in `--daemonless`, where the credential fields are read-only."""
-
 # ------------------------------------------------------------------------- approvals
 
 
@@ -567,7 +539,11 @@ behind. The middle is where a long cell is most repetitive.
 
 
 def approval_summary(
-    tool: str, permission: str, arguments: dict[str, object], *, lines: int = APPROVAL_BODY_LINES
+    tool: str,
+    permission: str,
+    arguments: dict[str, object],
+    *,
+    lines: int = APPROVAL_BODY_LINES,
 ) -> str:
     """What is about to happen, in the terms the tool works in.
 
@@ -582,7 +558,9 @@ def approval_summary(
     elif "path" in arguments:
         body = str(arguments["path"])
     else:
-        body = ", ".join(f"{key}={_short(str(value))}" for key, value in arguments.items())
+        body = ", ".join(
+            f"{key}={_short(str(value))}" for key, value in arguments.items()
+        )
     return f"{tool} ({permission})\n{_elide_lines(body, lines)}"
 
 
@@ -610,67 +588,34 @@ def _short(text: str, limit: int = 60) -> str:
 SETTINGS_TITLE_FIRST_RUN = "Welcome to stcode — one-time setup"
 SETTINGS_TITLE = "Model settings"
 
-SETTINGS_INTRO_FIRST_RUN = "Pick a provider and paste a key — skippable, /model changes it later."
-SETTINGS_INTRO = "The key field is write-only; blank keeps the stored one."
+SETTINGS_INTRO_FIRST_RUN = (
+    "Pick a provider and paste a key — skippable, /model changes it later."
+)
+SETTINGS_INTRO = "Saved to the daemon's config. The key field is write-only; blank keeps the stored one."
 
 FIELD_PROVIDER = "Provider"
 FIELD_API_KEY = "API key"
-FIELD_BASE_URL = "Base URL"
 FIELD_MODEL = "Model"
-FIELD_DIFFICULTY = "Difficulty"
-FIELD_MAX_CONCURRENT = "Requests at once"
-FIELD_ROUTING = "Routing"
-
-ROUTING_HEADING_HINT = (
-    "A model per tier. The agent runs at the difficulty above; sub-agents and the "
-    "supervisor pick their own. Blank follows the model field."
-)
-
-DIFFICULTY_HINT = "Which tier the main agent runs at."
-
-MAX_CONCURRENT_PLACEHOLDER = "0 — no cap. Set 1 for Ollama or another local endpoint."
-
-MAX_CONCURRENT_HINT = (
-    "How many completions this endpoint will serve at once. Parallel sub-agents "
-    "overwhelm a local model and it drops them as 503s."
-)
-
-BASE_URL_PLACEHOLDER = "optional — a proxy or compatible gateway"
-
-
-def routing_label(difficulty: str) -> str:
-    return f"  {difficulty}"
-
-
-def routing_placeholder(provider: str, difficulty: str) -> str:
-    return f"optional — follows Model; {DIFFICULTY_HELP.get(difficulty, '')}"
-
-
-def bad_concurrency(value: str) -> str:
-    return f"{value!r} is not a number of requests."
 
 BUTTON_SKIP = "Skip"
 BUTTON_CANCEL = "Cancel"
 BUTTON_SAVE = "Save"
 
 
-def model_placeholder(provider: str) -> str:
-    return f"optional — e.g. {default_model_for(provider)}"
+def model_placeholder(default_model: str) -> str:
+    return f"blank — {default_model}" if default_model else "the model to use"
 
 
-def key_placeholder(provider: str, stored: ProviderConfig) -> str:
-    if stored.api_key:
-        return "•••••••• stored — type to replace"
-    return f"paste your {provider_short_name(provider)} API key"
+def key_placeholder(has_key: bool) -> str:
+    return "•••••••• set — type to replace" if has_key else "paste your API key"
 
 
-def key_hint(provider: str, stored: ProviderConfig) -> str:
-    """Say which credential actually wins, since two can be in play at once."""
-    env_name = stored.api_key_env or key_env_for(provider)
-    if env_name and os.environ.get(env_name):
-        return f"${env_name} is set and takes precedence over anything typed here."
-    if stored.api_key:
-        return "A key is stored in your config file (chmod 0600)."
-    if env_name:
-        return f"Or leave blank and export ${env_name} instead."
-    return "Stored in your config file (chmod 0600)."
+def key_hint(key_env: str, *, has_key: bool, editable: bool) -> str:
+    """Say where the key comes from, and why the field may be locked."""
+    if not editable:
+        return "Keys can only be changed from the daemon's own machine (unix socket)."
+    if has_key:
+        return "A key resolves for this provider. Typing one stores it in the config file (0600)."
+    if key_env:
+        return f"Or leave blank and export ${key_env} for the daemon."
+    return "Stored in the daemon's config file (0600)."

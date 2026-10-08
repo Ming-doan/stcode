@@ -6,18 +6,18 @@
 #   docker run -v ./examples/agents/frontend-dev.toml:/config/config.toml \
 #              -e STCODE_TEAM=1 -e STCODE_SANDBOX=1 -e ANTHROPIC_API_KEY \
 #              -v team:/team -p 7717:7717 stcode
-#
-# Or drop the directory in as $STCODE_AGENTS_DIR and select this one with --role frontend-dev,
-# in which case only [agent] prompt is read from here.
 
-[defaults]
+[model.providers.anthropic]
 provider = "anthropic"
+api_key = "${ANTHROPIC_API_KEY}"
 model = "claude-sonnet-5"
 
 [team]
 # Off unless the deployment says otherwise — STCODE_TEAM=1, --team, or `enabled = true`
 # here. A role is which agent this is; team mode is whether a shared volume is mounted.
 role = "frontend-dev"
+# What teammates see from find_teammate — say what you own.
+description = "Owns the web UI; builds against /team/knowledge/api-contract.md."
 
 [agent]
 difficulty = "high"
@@ -47,10 +47,10 @@ spec itself is unclear.
 1. Clone before you write code: `git clone /team/repo.git /workspace/web`.
 2. Work on a branch named for the task: `git checkout -b web/rate-limit-banner`.
 3. If `api-contract.md` does not exist yet, do not guess the shape of the API.
-   `send_message` backend-dev saying exactly what you need, then build what you can
+   `send_team_message` backend-dev saying exactly what you need, then build what you can
    without it — the layout, the states, the tests.
 4. Build it. Run the project's own checks.
-5. `git push origin <branch>`, then `send_message` devops with the branch name.
+5. `git push origin <branch>`, then `send_team_message` devops with the branch name.
 
 Never edit the backend's code. If an endpoint is wrong, that is a message, not a fix.
 """

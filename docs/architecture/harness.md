@@ -126,7 +126,8 @@ tool. A call may narrow what it claims, never widen it.
 | `repl` | `repl(code, timeout=120)` | persistent namespace; top-level agents only |
 | `web_search` | `web_search(query=None, url=None)` | needs `TAVILY_API_KEY`; says so on the first call if missing |
 | `task` | `task(prompt, name, tools=None, scope=None, difficulty=...)` | sub-agent — lives in `core/agent/` |
-| `send_message` | `send_message(to, subject, body, refs=None)` | team mode — lives in `core/team/` |
+| `find_teammate` | `find_teammate(query="")` | team mode — lives in `core/team/` |
+| `send_team_message` | `send_team_message(to, subject, body="", refs=None)` | team mode — lives in `core/team/` |
 
 **Read before write** is one design, not three: `read` records what it saw, `write` and
 `edit` refuse a file this session has not read and warn when it changed underneath them.
@@ -142,12 +143,12 @@ questions.
 ### Named sets
 
 `MAIN_TOOLS` is a top-level agent's allowance; `WORKER_TOOLS` is a sub-agent's — no
-`repl`, no `task`, no `send_message`. `READ_ONLY_TOOLS` is derived from the declared
+`repl`, no `task`, no team tools. `READ_ONLY_TOOLS` is derived from the declared
 permissions, so it cannot drift. Registered is not advertised: a tool with no working
 backend stays out of every set.
 
-Two tools are added from *outside* the harness, both as factories closing over something
-`core/harness` must not import: `task` over an `Agent`, `send_message` over a `Mailbox`.
+Three tools are added from *outside* the harness, both as factories closing over something
+`core/harness` must not import: `task` over an `Agent`, the team tools over a `Mailbox`.
 
 ### Choosing the set from config
 
@@ -157,8 +158,8 @@ tools = ["read", "grep", "glob", "ls"]   # an allow-list replacing the default s
 exclude_tools = ["web_search"]           # subtracted from whatever is left
 ```
 
-Applied by `apply_tool_policy` **after** the agent is fully assembled, so `task`,
-`send_message` and MCP tools can be named too — and so the operator's word outranks a
+Applied by `apply_tool_policy` **after** the agent is fully assembled, so `task`, the
+team tools and MCP tools can be named too — and so the operator's word outranks a
 feature switch that added one. A name matching no tool raises at startup with the list of
 real ones: a config that quietly produced a smaller tool set would be diagnosed as "the
 model is ignoring its tools", weeks later.
@@ -233,8 +234,9 @@ files meant every deployment had to keep two mounts in step. One file holds both
 
 ```toml
 # agents/backend-dev.toml
-[defaults]
+[model.providers.anthropic]
 provider = "anthropic"
+api_key  = "${ANTHROPIC_API_KEY}"
 model    = "claude-sonnet-5"
 
 [team]
@@ -252,7 +254,7 @@ prompt = """
 ```
 
 It is an ordinary config file, so there is nothing new to learn and nothing new to
-validate: `GatewayConfig` already describes every section in it. `[agent] prompt` is the
+validate: `Config` already describes every section in it. `[agent] prompt` is the
 only addition, with `[agent] prompt_file` for a prompt long enough to want its own file —
 resolved relative to the config, so a mounted directory moves as a unit.
 
@@ -264,28 +266,6 @@ docker run -v ./agents/backend-dev.toml:/config/config.toml … stcode
 
 No agents directory, no role lookup, nothing to keep in step. The container's config
 file says which agent it is, and `STCODE_CONFIG` already pointed at it.
-
-### Looking one up by name
-
-The other half is for a machine that has several profiles and picks one per run —
-`stcode --role backend-dev`, or `[team] role` in a shared config:
-
-```
-.stcode/agents/<name>.toml          # this project's
-~/.stcode/agents/<name>.toml        # this machine's
-$STCODE_AGENTS_DIR/<name>.toml      # one directory and nothing else
-```
-
-Searched in that order by `load_agent()`, and **only the `[agent]` prompt is read from
-it** — a profile found by name contributes a prompt, not a second opinion about the
-model or the socket. Those come from the config that is actually loaded. The alternative
-is two files that both claim to configure the daemon, and a support question about which
-one won.
-
-An unknown name **raises**, with the list of what is installed: a container started with
-a typo'd role, or with its agents volume unmounted, must refuse rather than run an agent
-that owns nothing. There is deliberately no bundled fallback — a silent one would mean
-that container starts anyway, as somebody else's backend dev.
 
 The repository ships four to copy in `examples/agents/`. A profile states what it owns,
 whose output it reads, and who it reports to; the prompt is passed through unchanged,

@@ -12,7 +12,6 @@ low default result counts are for that, not to save credits.
 
 from __future__ import annotations
 
-import os
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -23,7 +22,6 @@ from stcode.core.harness.context import HarnessContext
 from stcode.core.harness.tools.base import Runtime, ToolError, tool
 
 TAVILY_BASE_URL = "https://api.tavily.com"
-TAVILY_KEY_ENV = "TAVILY_API_KEY"
 WEB_MAX_OUTPUT = 24576
 """Higher than other tools, and still the tool most likely to elide. The remainder is
 in `tool_out` — filter it in the REPL rather than asking for less next time."""
@@ -31,18 +29,7 @@ in `tool_out` — filter it in the REPL rather than asking for less next time.""
 _REQUEST_TIMEOUT = 90.0
 
 
-def _api_key() -> str:
-    key = os.environ.get(TAVILY_KEY_ENV, "").strip()
-    if not key:
-        raise ToolError(
-            f"Web access needs a Tavily API key in ${TAVILY_KEY_ENV}. Ask the user to "
-            "set it, or answer from the repository and your own knowledge and say that "
-            "you could not check the web."
-        )
-    return key
-
-
-async def _post(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+async def _post(key: str, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
     """One request to Tavily, with its failures translated into advice.
 
     Status codes are mapped rather than surfaced raw: a model that reads "401" tries the
@@ -52,7 +39,7 @@ async def _post(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             response = await client.post(
                 f"{TAVILY_BASE_URL}/{endpoint}",
-                headers={"Authorization": f"Bearer {_api_key()}", "Content-Type": "application/json"},
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                 json={key: value for key, value in payload.items() if value is not None},
             )
         except httpx.TimeoutException:
@@ -61,7 +48,7 @@ async def _post(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
             raise ToolError(f"Could not reach Tavily: {exc}") from exc
 
     if response.status_code == 401:
-        raise ToolError(f"Tavily rejected the key in ${TAVILY_KEY_ENV}. Do not retry.")
+        raise ToolError("Tavily rejected the configured key. Do not retry.")
     if response.status_code == 429:
         raise ToolError("Tavily rate limit or credit limit reached. Do not retry this turn.")
     if response.status_code >= 400:
@@ -99,6 +86,13 @@ async def web_search(
     """
     if not query and not url:
         raise ToolError("Pass `query` to search, `url` to read a page, or both to crawl a site.")
+    key = runtime.context.tavily_key
+    if not key:
+        raise ToolError(
+            "Web access needs a Tavily API key ([tools] tavily_api_key, or $TAVILY_API_KEY). "
+            "Ask the user to set it, or answer from the repository and your own knowledge "
+            "and say that you could not check the web."
+        )
 
     if url and not url.startswith(("http://", "https://")):
         url = f"https://{url}"
@@ -106,6 +100,7 @@ async def web_search(
     if query and url:
         await runtime.progress(f"Crawling {url} for {query!r}")
         payload = await _post(
+        key,
             "crawl",
             {"url": url, "instructions": query, "limit": max_results,
              "extract_depth": depth, "format": "markdown"},
@@ -115,7 +110,7 @@ async def web_search(
     if url:
         await runtime.progress(f"Reading {url}")
         payload = await _post(
-            "extract", {"urls": [url], "extract_depth": depth, "format": "markdown"}
+            key, "extract", {"urls": [url], "extract_depth": depth, "format": "markdown"}
         )
         results = payload.get("results", [])
         if not results:
@@ -126,6 +121,7 @@ async def web_search(
 
     await runtime.progress(f"Searching for {query!r}")
     payload = await _post(
+        key,
         "search",
         {"query": query, "max_results": max_results, "search_depth": depth,
          "include_answer": True, "include_domains": include_domains},
@@ -164,4 +160,4 @@ def _render_pages(results: list[dict[str, Any]], heading: str) -> str:
     return "\n".join(parts)
 
 
-__all__ = ["TAVILY_KEY_ENV", "web_search"]
+__all__ = ["web_search"]

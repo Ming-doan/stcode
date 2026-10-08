@@ -1,17 +1,8 @@
 # Roles
 
-A role is **one `config.toml`**. It is data, not code, and it is not shipped in the
-package.
-
-```
-~/.stcode/agents/backend-dev.toml
-<project>/.stcode/agents/backend-dev.toml
-$STCODE_AGENTS_DIR/backend-dev.toml
-```
-
-Searched nearest-first, with **no bundled fallback**. That is deliberate: a silent
-fallback would mean a container whose volume failed to mount still starts — as somebody
-else's backend dev. An unknown role name raises instead.
+A role is **one `config.toml`** — the config the agent's daemon loads. It is data, not
+code, and it is not shipped in the package. There is no lookup by name and no fallback:
+the config that was loaded *is* the agent.
 
 Copies to start from live in `examples/agents/`: `ba.toml`, `backend-dev.toml`,
 `frontend-dev.toml`, `devops.toml`.
@@ -34,12 +25,14 @@ forget.
 ```toml
 # agents/backend-dev.toml
 
-[defaults]
+[model.providers.anthropic]
 provider = "anthropic"
+api_key  = "${ANTHROPIC_API_KEY}"
 model    = "claude-sonnet-5"
 
 [team]
-role = "backend-dev"
+role        = "backend-dev"
+description = "Owns src/api/ and src/services/."
 
 [agent]
 difficulty = "medium"
@@ -75,15 +68,8 @@ A prompt long enough to want its own file gets `prompt_file = "backend-dev.md"`,
 **relative to the profile**, so the directory still moves as a unit. Setting both is an
 error rather than a precedence rule.
 
-!!! note "When the profile is looked up by name"
-
-    Mounted as the container's config, the whole file is the config — every section
-    applies.
-
-    Found by name (`--role backend-dev`, or `[team] role` in a shared config), **only
-    the prompt is read from it.** The model, the socket and the session directory come
-    from the config that was actually loaded. Two files both claiming to configure the
-    daemon is a support question about which one won.
+`[team] description` is the one line the other agents see when they call
+`find_teammate`. Write it for them: what you own, so they know when to hand off to you.
 
 ## One agent = one role = one checkout = one merge boundary
 
@@ -105,13 +91,13 @@ general advice about what to work on, and it costs nothing after the first turn.
 
 ## Solo mode and roles
 
-Naming a role gives the agent that prompt. It does **not** turn team mode on — that
+A config with a role and a prompt works solo too. It does **not** turn team mode on — that
 takes `[team] enabled`, or `STCODE_TEAM=1`, which is a deployment declaring that a shared
 volume is mounted. A solo session naming a role should not go looking for an inbox.
 
 ```bash
-uv run stcode --role backend-dev          # that prompt, solo
-uv run stcode --role backend-dev --team   # that prompt, and a mailbox on /team
+STCODE_CONFIG=agents/backend-dev.toml uv run stcode          # that agent, solo
+STCODE_CONFIG=agents/backend-dev.toml uv run stcode --team   # and joined to /team
 ```
 
 Team mode is off by default in both the config and the environment. The failure that

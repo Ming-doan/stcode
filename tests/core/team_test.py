@@ -3,8 +3,9 @@ Team tests — real files on a real volume.
 
 The mailbox is a filesystem convention, so mocking it would test the mock. What is
 worth catching here is the awkward half: that a reader never sees a half-written
-message, that draining twice does not deliver twice, and that the `send_message`
-docstring's rule about `refs` is actually enforced rather than merely requested.
+message, that draining twice does not deliver twice, that a hand-off can only go to a
+teammate that has joined, and that the `send_team_message` docstring's rule about `refs`
+is actually enforced rather than merely requested.
 """
 
 from __future__ import annotations
@@ -16,16 +17,34 @@ from typing import Any
 
 import pytest
 
+from stcode.core.configs import load_config, resolve_prompt
 from stcode.core.harness import Harness, HarnessContext
-from stcode.core.harness.prompts import available_agents, load_agent_prompt
-from stcode.core.team import Mailbox, make_send_message_tool
+from stcode.core.team import Mailbox, make_find_teammate_tool, make_send_team_message_tool
+
+DESCRIPTIONS = {
+    "ba": "Writes the spec into /team/knowledge/spec.md.",
+    "backend-dev": "Owns the API service and api-contract.md.",
+    "frontend-dev": "Owns the web UI.",
+}
+
 
 @pytest.fixture
 def volume(tmp_path: Path) -> Path:
-    """A `/team` with two roles on it."""
-    mailbox = Mailbox(tmp_path / "team", "ba")
-    mailbox.ensure("backend-dev", "frontend-dev")
-    return tmp_path / "team"
+    """A `/team` with three roles that have joined it."""
+    root = tmp_path / "team"
+    for role, description in DESCRIPTIONS.items():
+        Mailbox(root, role).join(description=description, team="shop")
+    return root
+
+
+def _team_harness(volume: Path, role: str = "ba") -> Harness:
+    """A bare harness holding only the two team tools, as `role`."""
+    mailbox = Mailbox(volume, role)
+    harness = Harness(HarnessContext(cwd=volume), approval_mode="full-auto", tools=[])
+    harness.registry.register(make_find_teammate_tool(mailbox))
+    harness.registry.register(make_send_team_message_tool(mailbox))
+    harness.allowed = ["find_teammate", "send_team_message"]
+    return harness
 
 
 # ---- the mailbox ---------------------------------------------------------------
@@ -80,46 +99,104 @@ def test_a_message_that_cannot_be_parsed_is_moved_aside(volume: Path) -> None:
     assert backend.pending() == []
 
 
-# ---- the tool ------------------------------------------------------------------
+# ---- joining ------------------------------------------------------------------
 
 
-def test_send_message_refuses_a_role_that_is_not_on_the_team(volume: Path, run: Any) -> None:
-    harness = Harness(HarnessContext(cwd=volume), approval_mode="full-auto", tools=[])
-    harness.registry.register(make_send_message_tool(Mailbox(volume, "ba")))
-    harness.allowed = ["send_message"]
+def test_joining_writes_a_member_card_and_an_inbox(volume: Path) -> None:
+    card = json.loads((volume / "members" / "backend-dev.json").read_text())
 
-    result = run(harness.invoke("send_message", {"to": "qa", "subject": "hi"}))
+    assert card["role"] == "backend-dev" and card["team"] == "shop"
+    assert card["description"] == DESCRIPTIONS["backend-dev"]
+    assert card["host"] and card["joined"]
+    assert (volume / "inbox" / "backend-dev").is_dir()
+
+
+def test_rejoining_replaces_the_card_rather_than_adding_one(volume: Path) -> None:
+    """A restarted container is the same teammate, not a second one."""
+    Mailbox(volume, "backend-dev").join(description="Owns the API, v2.")
+
+    cards = [m for m in Mailbox(volume, "ba").members() if m.role == "backend-dev"]
+    assert [card.description for card in cards] == ["Owns the API, v2."]
+
+
+def test_a_card_that_cannot_be_parsed_is_skipped(volume: Path) -> None:
+    """One broken file on a shared volume must not hide the whole team."""
+    (volume / "members" / "qa.json").write_text("{not json")
+
+    assert {m.role for m in Mailbox(volume, "ba").members()} == set(DESCRIPTIONS)
+
+
+# ---- find_teammate -------------------------------------------------------------
+
+
+def test_find_teammate_lists_everyone_but_the_caller(volume: Path, run: Any) -> None:
+    result = run(_team_harness(volume).invoke("find_teammate", {}))
+
+    assert not result.is_error
+    assert "backend-dev" in result.content and "frontend-dev" in result.content
+    assert DESCRIPTIONS["backend-dev"] in result.content
+    assert "ba —" not in result.content
+
+
+def test_find_teammate_filters_by_what_a_teammate_does(volume: Path, run: Any) -> None:
+    """The caller knows the work it is handing off, not who owns it."""
+    result = run(_team_harness(volume).invoke("find_teammate", {"query": "api"}))
+
+    assert "backend-dev" in result.content
+    assert "frontend-dev" not in result.content
+
+
+def test_find_teammate_sees_a_teammate_that_joined_after_it_started(
+    volume: Path, run: Any
+) -> None:
+    """The failure a list frozen into the system prompt has: a later container is
+    invisible for the whole life of this one."""
+    harness = _team_harness(volume)
+    Mailbox(volume, "devops").join(description="Merges branches and deploys.")
+
+    assert "devops" in run(harness.invoke("find_teammate", {"query": "deploy"})).content
+
+
+def test_find_teammate_with_no_match_says_who_there_is(volume: Path, run: Any) -> None:
+    result = run(_team_harness(volume).invoke("find_teammate", {"query": "kubernetes"}))
+
+    assert "No teammate matches" in result.content
+    assert "backend-dev" in result.content
+
+
+# ---- send_team_message ---------------------------------------------------------
+
+
+def test_send_team_message_refuses_a_role_that_has_not_joined(volume: Path, run: Any) -> None:
+    """A message to a role with no card would sit in an inbox nobody reads."""
+    result = run(_team_harness(volume).invoke("send_team_message", {"to": "qa", "subject": "hi"}))
+
     assert result.is_error and "no 'qa' on this team" in result.content
     assert "backend-dev" in result.content  # says who there is instead
+    assert "find_teammate" in result.content
+    assert not (volume / "inbox" / "qa").exists()
 
 
-def test_send_message_refuses_a_body_that_should_have_been_a_file(
+def test_send_team_message_refuses_a_body_that_should_have_been_a_file(
     volume: Path, run: Any
 ) -> None:
     """The rule that keeps a team's token cost from growing with the square of its
     size. A docstring asking nicely is not enough."""
-    harness = Harness(HarnessContext(cwd=volume), approval_mode="full-auto", tools=[])
-    harness.registry.register(make_send_message_tool(Mailbox(volume, "ba")))
-    harness.allowed = ["send_message"]
-
     result = run(
-        harness.invoke(
-            "send_message",
+        _team_harness(volume).invoke(
+            "send_team_message",
             {"to": "backend-dev", "subject": "the spec", "body": "x" * 3000},
         )
     )
     assert result.is_error and "refs" in result.content
 
 
-def test_send_message_refuses_a_ref_that_does_not_exist(volume: Path, run: Any) -> None:
+def test_send_team_message_refuses_a_ref_that_does_not_exist(volume: Path, run: Any) -> None:
     """A message pointing at nothing costs the recipient a whole turn to discover."""
-    harness = Harness(HarnessContext(cwd=volume), approval_mode="full-auto", tools=[])
-    harness.registry.register(make_send_message_tool(Mailbox(volume, "ba")))
-    harness.allowed = ["send_message"]
-
+    harness = _team_harness(volume)
     result = run(
         harness.invoke(
-            "send_message",
+            "send_team_message",
             {"to": "backend-dev", "subject": "spec", "refs": ["/team/knowledge/nope.md"]},
         )
     )
@@ -128,10 +205,12 @@ def test_send_message_refuses_a_ref_that_does_not_exist(volume: Path, run: Any) 
     (volume / "knowledge" / "spec.md").write_text("# spec")
     ok = run(
         harness.invoke(
-            "send_message", {"to": "backend-dev", "subject": "spec", "refs": ["knowledge/spec.md"]}
+            "send_team_message",
+            {"to": "backend-dev", "subject": "spec", "refs": ["knowledge/spec.md"]},
         )
     )
     assert not ok.is_error
+    assert [m.subject for m in Mailbox(volume, "backend-dev").drain()] == ["spec"]
 
 
 # ---- roles are data ------------------------------------------------------------
@@ -142,76 +221,31 @@ EXAMPLE_AGENTS = Path(__file__).resolve().parents[2] / "examples" / "agents"
 data — that is the point of the test below."""
 
 
-def _profile(directory: Path, name: str, prompt: str, **agent: object) -> Path:
-    """Write a minimal agent profile. What a deployment mounts, in three lines."""
-    directory.mkdir(parents=True, exist_ok=True)
-    keys = "".join(f"{key} = {value!r}\n" for key, value in agent.items())
-    path = directory / f"{name}.toml"
-    path.write_text(f'[agent]\n{keys}prompt = """\n{prompt}\n"""\n', encoding="utf-8")
-    return path
-
-
-def test_every_example_profile_is_a_valid_agent(monkeypatch: Any) -> None:
-    """A new agent must be a new file and nothing else.
-
-    Pointed at through `STCODE_AGENTS_DIR`, which is also how a container reaches them:
-    one directory and nothing else.
-    """
-    monkeypatch.setenv("STCODE_AGENTS_DIR", str(EXAMPLE_AGENTS))
-    names = sorted(path.stem for path in EXAMPLE_AGENTS.glob("*.toml"))
-    assert {"ba", "backend-dev", "frontend-dev", "devops"} <= set(names)
-    assert available_agents() == names
-    for name in names:
-        body = load_agent_prompt(name)
+def test_every_example_profile_is_a_valid_agent() -> None:
+    """A new agent must be a new file and nothing else — and each one loads as a config
+    on its own, because mounting it as `/config/config.toml` is how it is deployed."""
+    paths = sorted(EXAMPLE_AGENTS.glob("*.toml"))
+    assert {"ba", "backend-dev", "frontend-dev", "devops"} <= {path.stem for path in paths}
+    for path in paths:
+        config = load_config(path)
+        assert config.team.role == path.stem
+        # What its teammates see from `find_teammate`; empty is a teammate nobody finds.
+        assert config.team.description
+        body = resolve_prompt(config)
         assert body.startswith("# Role:")
         # Each one has to answer the three questions, or it is decoration.
         assert "## You own" in body and "## You read" in body and "## You report to" in body
 
 
-def test_a_profile_is_read_from_the_agents_directory(tmp_path: Path) -> None:
-    """Project `.stcode/agents/` first, then the user's config directory."""
-    _profile(tmp_path / ".stcode" / "agents", "tester", "# Role: tester\n\n## You own\nthe suite.")
-
-    assert "tester" in available_agents(tmp_path)
-    assert load_agent_prompt("tester", tmp_path).startswith("# Role: tester")
-
-
-def test_a_profile_can_keep_its_prompt_in_a_file(tmp_path: Path) -> None:
-    """`prompt_file` is relative to the profile, so a directory of agents moves whole."""
-    agents = tmp_path / ".stcode" / "agents"
-    agents.mkdir(parents=True)
-    (agents / "tester.md").write_text("# Role: tester\n\nYou run the suite.")
-    (agents / "tester.toml").write_text('[agent]\nprompt_file = "tester.md"\n')
-
-    assert load_agent_prompt("tester", tmp_path) == "# Role: tester\n\nYou run the suite."
-
-
-def test_a_profile_naming_both_prompts_refuses(tmp_path: Path) -> None:
-    """A precedence rule is one more thing to be wrong about at 3am."""
-    agents = tmp_path / ".stcode" / "agents"
-    agents.mkdir(parents=True)
-    (agents / "tester.toml").write_text(
-        '[agent]\nprompt = "inline"\nprompt_file = "tester.md"\n'
-    )
-    with pytest.raises(ValueError, match="one prompt"):
-        load_agent_prompt("tester", tmp_path)
-
-
-def test_an_unknown_agent_refuses_loudly(tmp_path: Path) -> None:
-    """A mount that did not happen must not degrade into a role-less agent."""
-    with pytest.raises(FileNotFoundError, match="No agent named"):
-        load_agent_prompt("backedn-dev", tmp_path)
-
-
 def test_the_role_reaches_the_system_prompt(tmp_path: Path, run: Any) -> None:
-    import shutil
-
-    agents = tmp_path / ".stcode" / "agents"
-    agents.mkdir(parents=True)
-    shutil.copy(EXAMPLE_AGENTS / "backend-dev.toml", agents / "backend-dev.toml")
+    config = load_config(EXAMPLE_AGENTS / "backend-dev.toml")
     harness = run(
         Harness.create(
-            tmp_path, role="backend-dev", load_mcp=False, load_repl=False, load_skills=False
+            tmp_path,
+            agent_prompt=resolve_prompt(config),
+            load_mcp=False,
+            load_repl=False,
+            load_skills=False,
         )
     )
     prompt = harness.system_prompt()
@@ -221,26 +255,6 @@ def test_the_role_reaches_the_system_prompt(tmp_path: Path, run: Any) -> None:
     assert "api-contract.md" in harness.for_subagent("worker").system_prompt()
 
 
-def test_a_mounted_profile_needs_no_agents_directory(tmp_path: Path, run: Any) -> None:
-    """The deployment shape: the profile *is* the config, so nothing is looked up.
-
-    `-v ./agents/backend-dev.toml:/config/config.toml` is one mount, and the container
-    has no agents directory at all. A harness that still went looking would refuse to
-    start on exactly the deployment the profile format exists for.
-    """
-    harness = run(
-        Harness.create(
-            tmp_path,
-            role="backend-dev",
-            agent_prompt="# Role: backend developer\n\nYou own the API.",
-            load_mcp=False,
-            load_repl=False,
-            load_skills=False,
-        )
-    )
-    assert "You own the API." in harness.system_prompt()
-
-
 def test_team_mode_is_off_until_it_is_switched_on(tmp_path: Path, run: Any) -> None:
     """Naming a role must not go looking for an inbox that is not mounted.
 
@@ -248,29 +262,33 @@ def test_team_mode_is_off_until_it_is_switched_on(tmp_path: Path, run: Any) -> N
     `/team` and refuse to run because the volume was not there.
     """
     from stcode.core.agent import Agent
-    from stcode.core.configs import GatewayConfig
+    from stcode.core.configs import Config
 
-    config = GatewayConfig()
+    config = Config()
     config.agent.prompt = "# Role: tester\n\nYou run the suite."
     config.team.role = "tester"
-    config.team.shared_dir = str(tmp_path / "not-mounted")
+    config.team.shared_dir = tmp_path / "not-mounted"
     config.supervisor.enabled = False
     config.mcp.enabled = False
 
     agent = run(Agent.create(config, cwd=tmp_path, gateway=_Scripted([])))  # type: ignore[arg-type]
     try:
         assert agent.mailbox is None, "a role alone turned team mode on"
-        assert "send_message" not in agent.harness.tool_names()
+        assert "send_team_message" not in agent.harness.tool_names()
         assert "You run the suite." in agent.harness.system_prompt()
     finally:
         run(agent.aclose())
 
-    # And with the switch thrown, it joins — the volume is created on the way in.
+    # And with the switch thrown, it joins — the volume is created on the way in, and
+    # its card is there before the first turn.
     config.team.enabled = True
+    config.team.description = "Runs the suite."
     agent = run(Agent.create(config, cwd=tmp_path, gateway=_Scripted([])))  # type: ignore[arg-type]
     try:
         assert agent.mailbox is not None
-        assert "send_message" in agent.harness.tool_names()
+        assert {"find_teammate", "send_team_message"} <= set(agent.harness.tool_names())
+        card = json.loads((tmp_path / "not-mounted" / "members" / "tester.json").read_text())
+        assert card["description"] == "Runs the suite."
     finally:
         run(agent.aclose())
 
@@ -278,14 +296,32 @@ def test_team_mode_is_off_until_it_is_switched_on(tmp_path: Path, run: Any) -> N
 def test_team_mode_with_no_role_refuses(tmp_path: Path, run: Any) -> None:
     """A mailbox with no owner would address every message to ""."""
     from stcode.core.agent import Agent
-    from stcode.core.configs import GatewayConfig
+    from stcode.core.configs import Config
 
-    config = GatewayConfig()
+    config = Config()
     config.team.enabled = True
     config.supervisor.enabled = False
     config.mcp.enabled = False
     with pytest.raises(ValueError, match="has to be somebody"):
         run(Agent.create(config, cwd=tmp_path, gateway=_Scripted([])))  # type: ignore[arg-type]
+
+
+def test_a_team_url_refuses_until_there_is_a_service(tmp_path: Path, run: Any) -> None:
+    """`url` is reserved for a team service. Quietly falling back to `shared_dir` would
+    leave an operator who set it on a volume they think they replaced."""
+    from stcode.core.agent import Agent
+    from stcode.core.configs import Config
+
+    config = Config()
+    config.team.enabled = True
+    config.team.role = "tester"
+    config.team.url = "http://teams:7720"
+    config.team.shared_dir = tmp_path / "team"
+    config.supervisor.enabled = False
+    config.mcp.enabled = False
+    with pytest.raises(ValueError, match="url"):
+        run(Agent.create(config, cwd=tmp_path, gateway=_Scripted([])))  # type: ignore[arg-type]
+    assert not (tmp_path / "team").exists()
 
 
 # ---- the agent side ------------------------------------------------------------
@@ -332,12 +368,10 @@ def test_joining_a_team_keeps_task(volume: Path, tmp_path: Path) -> None:
     own checkout. Different axes, so joining a team takes nothing away."""
     agent = _team_agent(volume, tmp_path, "backend-dev", [])
     agent.enable_task()
-    assert "send_message" in agent.harness.tool_names()
-    assert "task" in agent.harness.tool_names()
-    # But a sub-agent still cannot message another role: WORKER_TOOLS withholds it.
-    assert "send_message" not in agent.harness.for_subagent("worker").tool_names()
-    # And it knows who else is out there, without a registry.
-    assert "ba" in agent.harness.teammates
+    assert {"find_teammate", "send_team_message", "task"} <= set(agent.harness.tool_names())
+    # But a sub-agent still cannot message another role: WORKER_TOOLS withholds both.
+    worker = agent.harness.for_subagent("worker").tool_names()
+    assert "send_team_message" not in worker and "find_teammate" not in worker
 
 
 def test_waiting_messages_are_delivered_at_the_top_of_the_turn(

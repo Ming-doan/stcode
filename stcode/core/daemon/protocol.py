@@ -23,9 +23,8 @@ from typing import Annotated, Any, Literal, Union
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from stcode.core.agent.events import AgentEvent
-from stcode.core.harness.approvals import ApprovalMode
+from stcode.core.configs import ApprovalMode, ReasoningEffort
 from stcode.core.harness.tools.base import ApprovalRequest, Question
-from stcode.core.providers.types import ReasoningEffort
 
 
 class ProtocolError(Exception):
@@ -153,48 +152,33 @@ class Info(BaseModel):
 
 
 class GetConfig(BaseModel):
-    """Ask for the daemon's own `config.toml`, as it is holding it.
-
-    A `--daemonless` terminal shows settings that belong to the daemon's machine, so it
-    has to ask rather than read its own file — the local one describes a different
-    agent. Literal `api_key`s are redacted on the way out.
-    """
+    """Ask for the daemon's own config, as a `config` frame. Keys are never sent."""
 
     type: Literal["get_config"] = "get_config"
 
 
-CONFIGURABLE_DEFAULTS = ("provider", "model", "reasoning_effort", "approval_mode")
-"""The only keys `set_config` accepts, and the reason it is safe to accept any.
-
-Everything else in the file — a key, a `base_url`, a routing tier, a concurrency cap —
-is how the *operator* provisioned this daemon, usually from an environment variable
-rather than from the file at all. A terminal that could rewrite those means one `/model`
-on the wrong tab silently repoints a fleet at a different endpoint. So they travel one
-way: shown, redacted, and not accepted back.
-"""
-
-
 class SetConfig(BaseModel):
-    """Write `[defaults]` to the daemon's config file and reload the gateway.
+    """Change the daemon's persisted defaults, save them, and reload.
 
-    A patch, and a narrow one: anything outside `CONFIGURABLE_DEFAULTS` is dropped
-    rather than refused, because a client sending a whole config back is asking for the
-    four keys it is allowed to change and should not have to know which those are.
+    A patch: an unset field is left alone. `provider` names a `[model.providers]` entry
+    — or a library name, which creates that entry — and becomes the default; `model`
+    and `api_key` apply to that entry. `api_key` is accepted over the unix socket only.
 
-    Answered with the same `config` frame `get_config` sends, so a client never shows a
-    change it only asked for.
+    Answered with a `config` frame, whether or not the change was accepted.
     """
 
     type: Literal["set_config"] = "set_config"
-    defaults: dict[str, Any] = Field(default_factory=dict)
+    provider: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    approval_mode: ApprovalMode | None = None
 
-    def patch(self) -> dict[str, Any]:
-        """Just the keys this message is allowed to change, and only those that are set."""
-        return {
-            key: value
-            for key, value in self.defaults.items()
-            if key in CONFIGURABLE_DEFAULTS and value not in (None, "")
-        }
+
+class Shutdown(BaseModel):
+    """Stop the daemon. Accepted over the unix socket only."""
+
+    type: Literal["shutdown"] = "shutdown"
 
 
 ClientMessage = Annotated[
@@ -212,6 +196,7 @@ ClientMessage = Annotated[
         Info,
         GetConfig,
         SetConfig,
+        Shutdown,
     ],
     Field(discriminator="type"),
 ]
@@ -343,19 +328,25 @@ class InfoReply(BaseModel):
 class ConfigReply(BaseModel):
     """Answer to `get_config` and `set_config`: what this daemon is configured with.
 
-    `path` is where it lives **on the daemon's disk**, which is the field that makes the
-    difference visible in `--daemonless` — a client showing `~/.stcode/config.toml` while
-    driving a container is a client lying about which machine it is describing.
+    `path` is the file **on the daemon's disk**. `writable` says whether `set_config`
+    can land at all; `keys_editable` whether it may carry a key (unix socket only).
+    `provider` and `model` are the default entry, which is what `/model` edits.
 
-    `writable` says whether `set_config` would land. False for a daemon whose config
-    file it cannot write, so a client can grey the fields out instead of offering an
-    edit that will fail.
+    `providers` lists the configured entries without their keys — `has_key` says
+    whether one resolves. `libraries` is what a new entry can be: each library's
+    default model and conventional key variable.
     """
 
     type: Literal["config"] = "config"
     path: str = ""
-    config: dict[str, Any] = Field(default_factory=dict)
     writable: bool = True
+    keys_editable: bool = False
+    provider: str = ""
+    model: str = ""
+    reasoning_effort: str = ""
+    approval_mode: str = ""
+    providers: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    libraries: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class Progress(BaseModel):
@@ -453,7 +444,6 @@ def event_frame(session: str, event: AgentEvent, *, agent: str = "") -> dict[str
 
 
 __all__ = [
-    "CONFIGURABLE_DEFAULTS",
     "STREAM_LIMIT",
     "Answer",
     "Approval",
@@ -480,6 +470,7 @@ __all__ = [
     "SetConfig",
     "SetMeta",
     "SetMode",
+    "Shutdown",
     "decode",
     "encode",
     "event_frame",

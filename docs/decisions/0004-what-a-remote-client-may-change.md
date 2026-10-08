@@ -1,7 +1,8 @@
 # 0004 — What a remote client may change
 
-**Status: accepted.** Decided when `--daemonless` turned out to be showing the wrong
-machine's settings.
+**Status: accepted, partly superseded by [0006](0006-cli-and-core-are-separate-programs.md)**
+— a key may now be written over the unix socket, and `[defaults]` no longer exists.
+Decided when `--daemonless` turned out to be showing the wrong machine's settings.
 
 ## Context
 

@@ -2,12 +2,16 @@
 Mailbox — agent-to-agent messaging, with no protocol.
 
 Containers share a volume, so a message is a **file**: sending writes JSON into
-`/team/inbox/<role>/`, receiving is reading your own directory.
+`/team/inbox/<role>/`, receiving is reading your own directory. Joining writes a card
+to `/team/members/<role>.json`, and finding a teammate is reading those.
 
+    /team/members/backend-dev.json                 <- who it is, what it does
     /team/inbox/backend-dev/01HX…-from-ba.json     <- unread
     /team/inbox/backend-dev/.read/…                <- drained
 
-No registry, no routing table, no service discovery, no N² socket mesh.
+No registry service, no routing table, no N² socket mesh. Join, list members and send
+are the three operations a team service would also have to offer — see
+docs/architecture/team.md.
 
 **Messages carry `refs`, not content** — that one convention is what keeps a team's
 token cost from growing with the square of its size. Delivery is a write then a rename,
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -31,6 +36,7 @@ DEFAULT_TEAM_DIR = "/team"
 """Mounted into every container — see docs/architecture/team.md."""
 
 INBOX = "inbox"
+MEMBERS = "members"
 KNOWLEDGE = "knowledge"
 ARTIFACTS = "artifacts"
 READ_DIRNAME = ".read"
@@ -60,6 +66,21 @@ class TeamMessage(BaseModel):
         return "\n".join(lines)
 
 
+class TeamMember(BaseModel):
+    """One agent's card: who it is and what it does. What `find_teammate` reads."""
+
+    role: str
+    team: str = ""
+    description: str = ""
+    host: str = ""
+    joined: str = ""
+
+    def render(self) -> str:
+        """As a teammate looking for someone reads it."""
+        line = f"{self.role} — {self.description or '(no description)'}"
+        return f"{line} (on {self.host})" if self.host else line
+
+
 class Mailbox:
     """One role's view of the shared volume: its own inbox, and everyone else's."""
 
@@ -81,23 +102,53 @@ class Mailbox:
     def artifacts(self) -> Path:
         return self.root / ARTIFACTS
 
+    @property
+    def members_dir(self) -> Path:
+        return self.root / MEMBERS
+
     def inbox_of(self, role: str) -> Path:
         return self.root / INBOX / role
 
-    def roles(self) -> list[str]:
-        """Roles with an inbox on this volume — who there is to talk to."""
-        directory = self.root / INBOX
-        if not directory.is_dir():
-            return []
-        return sorted(entry.name for entry in directory.iterdir() if entry.is_dir())
-
     def ensure(self, *roles: str) -> None:
         """Create the volume layout. Safe to call repeatedly."""
-        for path in (self.knowledge, self.artifacts, self.root / INBOX):
+        for path in (self.knowledge, self.artifacts, self.members_dir, self.root / INBOX):
             path.mkdir(parents=True, exist_ok=True)
         for role in (self.role, *roles):
             if role:
                 self.inbox_of(role).mkdir(parents=True, exist_ok=True)
+
+    # ---- membership ----
+
+    def join(self, description: str = "", team: str = "") -> Path:
+        """Create this role's inbox and write its card. Returns the card's path.
+
+        A restart rewrites the card; stopping leaves it, because the inbox outlives the
+        process and mail sent while a role is down waits for it.
+        """
+        self.ensure()
+        member = TeamMember(
+            role=self.role,
+            team=team,
+            description=description.strip(),
+            host=socket.gethostname(),
+            joined=_now(),
+        )
+        path = self.members_dir / f"{self.role}.json"
+        _write_atomic(path, member.model_dump_json(indent=2))
+        return path
+
+    def members(self) -> list[TeamMember]:
+        """Every card on the volume, by role. One unreadable card is skipped, not fatal:
+        a broken file on a shared volume must not hide the whole team."""
+        if not self.members_dir.is_dir():
+            return []
+        found: list[TeamMember] = []
+        for path in sorted(self.members_dir.glob("*.json")):
+            try:
+                found.append(TeamMember.model_validate_json(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                continue
+        return found
 
     # ---- sending ----
 
@@ -119,12 +170,10 @@ class Mailbox:
             subject=subject,
             body=body,
             refs=list(refs or []),
-            ts=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            ts=_now(),
         )
         path = target / f"{message.id}-from-{self.role or 'unknown'}.json"
-        staging = target / f".{path.name}.partial"
-        staging.write_text(message.model_dump_json(indent=2), encoding="utf-8")
-        os.replace(staging, path)
+        _write_atomic(path, message.model_dump_json(indent=2))
         return path
 
     # ---- receiving ----
@@ -174,12 +223,27 @@ class Mailbox:
         return f"Mailbox({self.root}, role={self.role!r})"
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write-then-rename, so a reader at the same moment sees the old file or the new
+    one, never half of either. The staging name starts with a dot and ends in
+    `.partial`, so no reader's `*.json` matches it."""
+    staging = path.with_name(f".{path.name}.partial")
+    staging.write_text(text, encoding="utf-8")
+    os.replace(staging, path)
+
+
 __all__ = [
     "ARTIFACTS",
     "DEFAULT_TEAM_DIR",
     "INBOX",
     "KNOWLEDGE",
+    "MEMBERS",
     "READ_DIRNAME",
     "Mailbox",
+    "TeamMember",
     "TeamMessage",
 ]

@@ -17,8 +17,7 @@ import pytest
 
 from stcode.core.agent import Agent, ToolFinished, TurnFinished
 from stcode.core.common import trace
-from stcode.core.configs import GatewayConfig, TraceConfig
-from stcode.core.providers import ProviderConfig, RouteConfig
+from stcode.core.configs import Config, TraceConfig
 
 
 @pytest.mark.live
@@ -33,16 +32,16 @@ def test_real_agent_logs_a_read_tool_and_reply(provider, tmp_path):
 
     async def run():
         trace.shutdown()
-        config = GatewayConfig(trace=TraceConfig(enabled=True, provider=provider, content=True))
-        config.providers["openai"] = ProviderConfig(api_key_env="OPENAI_API_KEY", base_url_env="OPENAI_BASE_URL")
-        config.routing["high"] = RouteConfig(provider="openai", model=model)
+        config = Config.model_validate({"model": {"providers": {"openai": {
+            "provider": "openai", "model": model, "base_url": "${OPENAI_BASE_URL}"}}}})
+        config.trace = TraceConfig(enabled=True, provider=provider, content=True)
         config.agent.enable_task = False
         config.agent.tools = ["read"]
         config.agent.max_turns = 3
         config.agent.prompt = "Use the read tool to read the requested file, then reply with its contents."
         config.supervisor.enabled = False
         config.session.dir = tmp_path / "sessions"
-        config.retry.max_attempts = 1
+        config.model.retry.max_attempts = 1
         (tmp_path / "trace-smoke.txt").write_text("STCODE_HTTP_TRACE_OK\n")
         agent = await Agent.create(config, cwd=tmp_path, load_mcp=False)
         agent.harness.agent_name = f"stcode-http-acceptance-{provider}"

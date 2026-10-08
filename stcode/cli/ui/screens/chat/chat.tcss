@@ -1,0 +1,12 @@
+/* Page spacing. Reusable component appearance lives in DEFAULT_CSS. */
+#transcript {
+    padding: 0 2;
+}
+
+#cards, #prompt {
+    margin: 0 2;
+}
+
+#status {
+    padding: 0 3;
+}

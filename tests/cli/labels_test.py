@@ -28,12 +28,16 @@ def test_a_long_cell_keeps_its_head_and_its_tail() -> None:
 
 
 def test_a_short_cell_is_shown_whole() -> None:
-    body = labels.approval_summary("repl", "execute", {"code": "import os\nprint(os.getcwd())"})
+    body = labels.approval_summary(
+        "repl", "execute", {"code": "import os\nprint(os.getcwd())"}
+    )
     assert body == "repl (execute)\nimport os\nprint(os.getcwd())"
 
 
 def test_a_command_is_still_shown_as_a_command() -> None:
-    assert labels.approval_summary("bash", "execute", {"command": "ls -la"}).endswith("ls -la")
+    assert labels.approval_summary("bash", "execute", {"command": "ls -la"}).endswith(
+        "ls -la"
+    )
 
 
 # ---- skills as commands ----------------------------------------------------------
@@ -55,7 +59,10 @@ def test_a_skill_cannot_take_over_a_built_in_command() -> None:
 
 
 def test_a_skill_command_carries_the_rest_of_the_line_as_the_task() -> None:
-    assert labels.skill_request("pdf", "split page 3 out") == 'Use the "pdf" skill. split page 3 out'
+    assert (
+        labels.skill_request("pdf", "split page 3 out")
+        == 'Use the "pdf" skill. split page 3 out'
+    )
     assert labels.skill_request("pdf") == 'Use the "pdf" skill.'
 
 

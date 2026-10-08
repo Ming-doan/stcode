@@ -1,30 +1,39 @@
-# The config an integration test loads. Every route points at the `fake` provider,
-# which `tests/fakes.py` registers for the duration of a test — so `load_config` and
-# `Agent.create` run exactly as they do in production, and nothing leaves the machine.
+# The config an integration test loads. Its one provider entry, `fake`, uses the
+# `openai` library slot, which `tests/fakes.py` replaces for the duration of a test — so
+# `load_config` and `Agent.create` run exactly as they do in production, and nothing
+# leaves the machine.
 
-[defaults]
-provider = "fake"
-model = "fake-large"
-approval_mode = "auto-edit"
-
-[providers.fake]
+[model.providers.fake]
+provider = "openai"
 api_key = "not-a-real-key"
+model = "fake-large"
 
-[routing.low]
+[model.routing.low]
 provider = "fake"
 model = "fake-small"
 
-[routing.medium]
+[model.routing.medium]
 provider = "fake"
 model = "fake-medium"
 
-[routing.high]
-provider = "fake"
-model = "fake-large"
-
 [agent]
+approval_mode = "auto-edit"
 max_turns = 12
 difficulty = "high"
+# The fixture workspace's own agent: its role is this config. → docs/teams/roles.md
+prompt = """
+# Role: backend developer
+
+## You own
+`src/` — the ledger module and its helpers.
+
+## You do not own
+Deployment, CI, or anything under `infra/`. Message devops instead.
+
+## How you report
+When a change is ready, send the branch name and the paths you touched. Never paste
+file contents into a message.
+"""
 
 [supervisor]
 enabled = true

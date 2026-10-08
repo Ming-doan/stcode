@@ -3,13 +3,13 @@
 `core/providers/`. One adapter per SDK, and one gateway in front of them.
 
 ```py
-async with LLMGateway(providers={...}, routing={...}, retry={...}) as gw:
+async with LLMGateway(config.model) as gw:        # a ModelConfig, from core/configs.py
     async for event in gw.stream(messages, system=..., tools=..., difficulty="high"):
         ...
 ```
 
-The gateway knows nothing about sessions, tools, or the agent loop. It resolves a
-difficulty tier to a provider + model + credentials, retries transient failures, and
+The gateway knows nothing about sessions, tools, the agent loop, TOML or the environment.
+It asks its `ModelConfig` for a route and a provider entry's resolved key, then retries transient failures, and
 streams back unified events. One instance per configuration, not a singleton; provider
 clients are cached inside by `(provider, key, base_url)`, so a daemon holding eight
 sessions holds one connection pool.
@@ -22,27 +22,40 @@ one harness's shape into a "send this, stream that back" API.
 ## Difficulty routing
 
 ```toml
-[routing.low]     provider = "anthropic"   model = "claude-haiku-4-5"
-[routing.medium]  provider = "anthropic"   model = "claude-sonnet-5"
-[routing.high]    provider = "anthropic"   model = "claude-opus-5"
+[model]
+default = "anthropic"
+
+[model.providers.anthropic]
+provider = "anthropic"
+model    = "claude-sonnet-5"
+
+[model.routing.low]
+provider = "anthropic"
+model    = "claude-haiku-4-5"
 ```
 
-Three tiers, not model names at call sites. The caller says how hard the work is; the
-config says what that costs. `difficulty="low"` is what the supervisor spends and what a
+Tiers, not model names at call sites. The caller says how hard the work is; the config
+says what that costs. `difficulty="low"` is what the supervisor spends and what a
 mechanical sub-agent should be given; the main loop defaults to `high`.
 
-A tier may override `api_key_env` / `api_key` / `base_url` — for a higher-quota key
-reserved for `high` — and falls back to the provider's main entry when it does not.
-`resolve_secret` decides between an env var name and a literal, and **the env var wins
-when set**, so a config file in a repository never overrides the shell.
+`resolve(difficulty, provider, model)` decides one call:
 
-`stream(provider=..., model=...)` bypasses tier routing entirely, using that provider's
-main credentials. That is for `stcode config` and for tests, not for the loop.
+1. a session override (`/model`, a `set_meta` record) names a provider **entry** and/or
+   a model, and wins;
+2. otherwise the tier's `[model.routing.<tier>]` line;
+3. otherwise the default entry (`[model] default`, else the first) and its `model`;
+4. an empty model means the library's default (`registry.default_model_for`).
+
+An entry name is free, and `provider` inside it picks the library, so two keys for one
+library are two entries. Credentials are per entry; a route only names an entry. Keys are
+literals or `"${VAR}"` references, resolved by `configs.secret()` when the client is
+built. → [configuration](configuration.md#secrets)
 
 ## How many at once
 
 ```toml
-[providers.openai]
+[model.providers.local]
+provider       = "openai"
 base_url       = "http://10.0.0.3:11434/v1"
 max_concurrent = 1
 ```
@@ -77,9 +90,8 @@ iteration in `aclosing` for exactly this reason. → [the agent loop](agent-loop
 
 ## Changing the configuration under a running agent
 
-`reconfigure()` replaces the providers, routing and retry policy **in place** and closes
-the cached clients, because a client is built around the key and base URL being
-replaced.
+`reconfigure(model_config)` replaces the configuration **in place** and closes the
+cached clients, because a client is built around the key and base URL being replaced.
 
 In place rather than by building a new gateway, because of who holds the reference: a
 `/model` that pastes a new key has to reach the session that is already running, and
@@ -144,8 +156,9 @@ prompt section dynamic as a performance regression, because it is one.
    `list_models()`, `aclose()`.
 2. Convert `Message` → the SDK's shape on the way in, and the SDK's stream → `StreamEvent`
    on the way out. Nothing else in the codebase may learn the SDK's names.
-3. Register it in `registry.py` with its default model and its conventional key env var.
-4. It is now selectable from `[providers]` and any `[routing]` tier.
+3. Register it in `registry.py` with its default model, and add its name and
+   conventional key variable to `ProviderName` / `PROVIDER_KEY_ENV` in `core/configs.py`.
+4. It is now selectable as `provider = "<name>"` in any `[model.providers]` entry.
 
 An OpenAI-compatible endpoint needs none of that — point `base_url` at it.
 

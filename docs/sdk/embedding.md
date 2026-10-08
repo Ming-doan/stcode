@@ -25,7 +25,7 @@ asyncio.run(main())
 ```
 
 `Agent.create` is the assembly point: it builds the gateway, the harness (tools, skills,
-MCP servers, the prompt), and the session, from a loaded `GatewayConfig`.
+MCP servers, the prompt), and the session, from a loaded `Config` (`core/configs.py`).
 
 `async with` matters. `aclose()` releases MCP connections, kills background shells, and
 closes the transcript. Without it a subprocess can outlive the event loop and raise at

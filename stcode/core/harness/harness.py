@@ -37,7 +37,6 @@ from stcode.core.harness.outputs import OutputStore
 from stcode.core.harness.prompts import (
     PromptMode,
     build_system_prompt,
-    load_agent_prompt,
     mode_for,
 )
 from stcode.core.harness.skills import SkillRegistry
@@ -74,7 +73,6 @@ class Harness:
         project_instructions: str = "",
         extra_prompt: str = "",
         role: str = "",
-        teammates: Sequence[str] = (),
         outputs: MutableMapping[str, Any] | None = None,
         mcp_catalogue: str = "",
         on_progress: ProgressFn | None = None,
@@ -104,7 +102,6 @@ class Harness:
         """The agent's prompt body, already resolved. A string, not a name: `Harness`
         should not know where agent profiles live on disk."""
 
-        self.teammates = list(teammates)
         self.mcp = mcp
         self.mcp_catalogue = mcp_catalogue
         """Server and tool *names*, for the prompt. Empty in `tools` mode, where the
@@ -167,13 +164,7 @@ class Harness:
             # sessions never run one.
             context.repl = PyREPL(cwd=root, env=context.env)
 
-        # `agent_prompt` is the config's own `[agent] prompt` — an agent profile
-        # mounted as the config carries it, and then there is nothing to look up.
-        # Failing that, the role names a profile in the agents directory, and an
-        # unknown name raises: a container started with a typo'd role, or with its
-        # agents directory unmounted, should refuse rather than run an agent that owns
-        # nothing.
-        kwargs.setdefault("role", agent_prompt.strip() or load_agent_prompt(role, root))
+        kwargs.setdefault("role", agent_prompt.strip())
         kwargs.setdefault("project_instructions", read_project_instructions(root))
         harness = cls(context, approval_mode=approval_mode, **kwargs)
 
@@ -228,6 +219,7 @@ class Harness:
             skills=self.context.skills,
             session_ctx=self.context.session_ctx,
             env=dict(self.context.env),
+            tavily_key=self.context.tavily_key,
         )
         child = Harness(
             child_context,
@@ -239,7 +231,6 @@ class Harness:
             project_instructions=self.project_instructions,
             extra_prompt=self.extra_prompt,
             role=self.role,
-            teammates=self.teammates,
             outputs=self.outputs,
             # No `mcp_catalogue`: a sub-agent has no `repl`, so this would spend
             # tokens advertising a dead end.
@@ -284,7 +275,6 @@ class Harness:
             tool_names=self.tool_names(),
             skill_catalogue=skills.catalogue() if skills else "",
             role=self.role,
-            teammates=self.teammates,
             mcp_catalogue=self.mcp_catalogue,
             mcp_directory=MCP_CODE_DIRNAME,
             project_instructions=self.project_instructions,

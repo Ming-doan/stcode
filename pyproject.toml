@@ -34,6 +34,7 @@ dependencies = [
     "textual>=8.2.8",
     "tomli>=2.0.1; python_version < '3.11'",
     "tomli-w>=1.2.0",
+    "tomlkit>=0.15.1",
     "typer>=0.27.1",
 ]
 
@@ -45,6 +46,7 @@ Issues = "https://github.com/Ming-doan/stcode/issues"
 
 [project.scripts]
 stcode = "stcode.cli.main:run_cli"
+stcode-daemon = "stcode.core.daemon.main:main"
 
 [dependency-groups]
 dev = [

@@ -120,6 +120,9 @@ class HarnessContext:
     env: dict[str, str] = field(default_factory=dict)
     """Extra environment for spawned processes, layered over `os.environ`."""
 
+    tavily_key: str = ""
+    """`[tools] tavily_api_key`, resolved. Empty means `web_search` explains it is off."""
+
     # ---- paths ----
 
     def resolve(self, path: str | Path) -> Path:

@@ -68,8 +68,9 @@ and only a firing heuristic costs a model call. →
 [The supervisor](architecture/supervisor.md)
 
 **Agent-to-agent messaging with no protocol.** Containers share a volume, so a message
-is a file. No registry, no routing table, no service discovery. Messages carry paths,
-not payloads, which stops team token cost growing with N². →
+is a file. No registry service, no routing table — a teammate is found by reading
+`/team/members/`. Messages carry paths, not payloads, which stops team token cost
+growing with N². →
 [How a team works](teams/workflow.md)
 
 **Daemon-first.** Detach does not kill the agent. Approvals and questions are

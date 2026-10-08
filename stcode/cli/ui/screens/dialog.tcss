@@ -1,0 +1,40 @@
+TrustScreen, SessionsScreen {
+    align: center middle;
+    background: $background 70%;
+}
+
+#dialog {
+    width: 80;
+    max-width: 92%;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: round $primary;
+    background: $surface;
+}
+
+#dialog-title {
+    text-style: bold;
+    color: $text-primary;
+    margin-bottom: 1;
+}
+
+#dialog-body {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#dialog-buttons {
+    height: auto;
+    align-horizontal: right;
+}
+
+#dialog-buttons Button {
+    margin-left: 2;
+}
+
+#session-tree {
+    height: auto;
+    max-height: 16;
+    margin-bottom: 1;
+}

@@ -40,7 +40,6 @@ RUN uv sync --frozen --no-dev
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     STCODE_CONFIG=/config/config.toml \
-    STCODE_AGENTS_DIR=/agents \
     STCODE_SANDBOX=1
 # STCODE_TEAM is deliberately not set: team mode is off until the deployment says so.
 # STCODE_SANDBOX is what makes `full-auto` legal (rule 5). It is set here because this
@@ -48,21 +47,19 @@ ENV PATH="/app/.venv/bin:$PATH" \
 # anywhere else, and there is no override flag.
 
 # Mounts the contract expects:
-#   /team       shared volume — inbox/, knowledge/, artifacts/, repo.git
+#   /team       shared volume — members/, inbox/, knowledge/, artifacts/, repo.git
 #   /workspace  where this agent clones; one checkout per container
 #   /config     this agent's profile, as config.toml, read-only
-#   /agents     optional: a directory of <name>.toml profiles, read-only, for a host
-#               selecting one with --role. A missing one refuses to start, which is what
-#               you want when a mount silently did not happen.
 VOLUME ["/team", "/workspace"]
 WORKDIR /workspace
 
 EXPOSE 7717
 
-# Headless: the daemon alone, which is the whole point of daemon-first. It prints what
-# it became — workspace, mode, model, config, what it created — and logs every client
-# that connects, because `docker logs` is the only screen it has. Attach a TUI with
+# The daemon alone, which is the whole point of daemon-first — `stcode-daemon` is the
+# same program `stcode --headless` runs. It prints what it became — workspace, mode,
+# model, config, what it created — and logs every client that connects, because
+# `docker logs` is the only screen it has. It stops cleanly on SIGTERM. Attach a TUI with
 # `stcode --daemonless` and /connect, from anywhere that can reach the port; a
-# containerised daemon takes one client at a time.
-ENTRYPOINT ["stcode"]
-CMD ["--headless", "--transport", "tcp", "--host", "0.0.0.0", "--port", "7717"]
+# containerised daemon takes one client at a time, and accepts no API key over TCP.
+ENTRYPOINT ["stcode-daemon"]
+CMD ["--transport", "tcp", "--host", "0.0.0.0", "--port", "7717"]

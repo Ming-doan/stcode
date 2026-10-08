@@ -3,17 +3,16 @@
 JSONL over a socket — one message per line, UTF-8, flushed. The same framing on unix
 and TCP, so a third transport later is an adapter rather than a protocol change.
 
-Everything crossing the process boundary is shaped in `core/daemon/protocol.py` and
-nowhere else.
+The daemon shapes everything it sends and accepts in `core/daemon/protocol.py`. This
+page is the contract: a client needs nothing from `stcode.core`, only a socket and
+JSON — which is how `stcode/cli` talks to it.
 
 ## Using the client
 
 ```python
-from stcode.core.configs import load_config
-from stcode.core.daemon import DaemonClient
+from stcode.cli.services.client import Address, DaemonClient
 
-config = load_config()
-async with await DaemonClient.connect(config) as client:
+async with await DaemonClient.connect(Address()) as client:   # ~/.stcode/daemon.sock
     session = await client.create(cwd="/workspace", role="backend-dev")
     await client.push("Add rate limiting to /v1/search")
 
@@ -39,8 +38,9 @@ async with await DaemonClient.connect(config) as client:
 | `set_mode` | `mode` | reaches the **live** session, not just later ones |
 | `set_meta` | `model`, `provider`, `reasoning_effort` | appends a `meta` record; the agent reads it before the next model call |
 | `info` | — | skills, MCP servers, tool names, paths and this session's token totals, as the **daemon's** machine sees them |
-| `get_config` | — | the daemon's own `config.toml`, with every `api_key` redacted |
-| `set_config` | `defaults` | writes `[defaults]` to the daemon's config file and reconfigures the gateway. Only those four keys; everything else is ignored |
+| `get_config` | — | the daemon's config as a `config` frame. Keys are never sent |
+| `set_config` | `provider`, `model`, `api_key`, `reasoning_effort`, `approval_mode` | patches the daemon's `config.toml` and reloads. `api_key` over the unix socket only |
+| `shutdown` | — | stops the daemon. Unix socket only |
 
 `session` is optional on everything. A connection remembers the last session it created
 or attached to. The field exists because one connection may attach to several at once
@@ -56,7 +56,7 @@ and then has to say which it means.
 | `approval_request` | a tool is waiting on a human |
 | `question` | `ask_user_question` is waiting |
 | `info` | answer to `info`. `usage` on it is the session's totals, summed from its `usage` records — one per model call, which is what `turn_finished` cannot give you |
-| `config` | answer to `get_config` and `set_config`: `path`, the config itself, and `writable` |
+| `config` | answer to `get_config` and `set_config` — see below |
 | `progress` | a line from a long-running tool. Advisory; nothing is recorded |
 | `error` | a protocol- or daemon-level failure |
 
@@ -89,13 +89,22 @@ the change lands on the next call rather than the next session.
 ## Reading and writing the daemon's config
 
 ```python
-reply = await client.get_config()
-reply["path"]                        # "/config/config.toml", on the daemon's disk
-reply["config"]["defaults"]["model"] # what it will use for the next call
-reply["config"]["providers"]["anthropic"]["api_key"]   # "***", always
+frame = await client.get_config()
+frame["path"]              # "/config/config.toml", on the daemon's disk
+frame["writable"]          # False for a read-only mount
+frame["keys_editable"]     # True on the unix socket, False over TCP
+frame["provider"]          # the default entry, e.g. "anthropic"
+frame["model"]             # its model, or the library's default
+frame["reasoning_effort"], frame["approval_mode"]
+frame["providers"]         # {"anthropic": {"provider": "anthropic", "model": "", "has_key": True}}
+frame["libraries"]         # {"openai": {"default_model": "…", "key_env": "OPENAI_API_KEY"}, …}
 
-await client.set_config(provider="anthropic", model="claude-opus-5")
+await client.set_config(provider="anthropic", model="claude-opus-5", api_key="sk-…")
 ```
+
+A refused `set_config` — `full-auto` on the host, a key over TCP, a read-only file — is
+an `error` frame followed by the unchanged `config` frame, so a client never shows a
+change that did not happen.
 
 `set_config` persists; `set_meta` does not. The difference is which question is being
 answered:
@@ -103,14 +112,13 @@ answered:
 | | `set_meta` | `set_config` |
 | --- | --- | --- |
 | Scope | this session | this daemon |
-| Lands as | a `meta` record in the transcript | `[defaults]` in `config.toml` |
+| Lands as | a `meta` record in the transcript | keys in `config.toml` |
 | Survives | the rest of the session | a restart |
-| Touches the gateway | no | yes — routing tiers are repointed and reloaded in place |
+| Touches the gateway | no | yes — reloaded in place |
 
-The UI sends both for a `/model`, which is why the change is true for the turn you are
-in *and* for the next container start. Only `[defaults]` is accepted — credentials,
-`base_url` and routing are the operator's and travel one way.
-→ [why](../architecture/daemon.md#get_config-set_config-the-remote-half-of-model)
+The UI sends both for `/model` and `/effort`, which is why the change is true for the
+turn you are in *and* for the next start.
+→ [why](../architecture/daemon.md#configuration-over-the-socket)
 
 ## Request–response over a stream
 

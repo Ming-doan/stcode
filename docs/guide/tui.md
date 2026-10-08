@@ -315,14 +315,14 @@ the only way a session that used two models is readable afterwards.
 Sessions are append-only, so nothing is rewritten: a later `meta` record overrides an
 earlier one. → [Sessions](../architecture/session.md#meta-is-a-merged-view)
 
-`/effort` is also written to `[defaults] reasoning_effort`, so the choice survives the
-session. `/model` writes the whole provider block, and — when this terminal started the
-daemon — hands the new credentials to the gateway that the running agent is already
-holding, which is what makes a pasted key work without restarting.
+Both are also written to the **daemon's** config file — `/effort` as `[agent]
+reasoning_effort`, `/model` as the default provider entry, its model and, if you typed
+one, its key — so the choice survives the session. The daemon reloads the file and hands
+the new key to the gateway the running agent is already holding, which is what makes a
+pasted key work without restarting.
 
-In `--daemonless` it does not: the daemon reads its own config file, on its own machine,
-and this terminal has no business replacing the credentials a container was started
-with. The provider and model still reach the session, and the status line says as much.
+Keys are accepted only over the daemon's unix socket. Over TCP — a container — the key
+field is disabled: set the key where the container is deployed.
 
 Sub-agents do not inherit it. `task(difficulty="low")` is a routing decision the model
 made about its own work, and a `/model` override that silently upgraded every scout to

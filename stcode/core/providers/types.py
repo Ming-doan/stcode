@@ -36,26 +36,9 @@ __all__ = [
 
 Role = Literal["user", "assistant"]
 
-ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-"""Union of every provider's effort scale, widest first. Providers with a
-narrower scale (Anthropic has no `none`/`minimal`; Gemini's `thinking_level`
-tops out at `high`) clamp or remap at their boundary — see each provider's
-`stream()` docstring."""
-
-REASONING_EFFORTS: tuple[ReasoningEffort, ...] = (
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-)
-"""The same rungs as a value, in order, for anything that has to *offer* them.
-
-Here rather than in the UI because the scale is a provider fact: a list written out a
-second time in `cli/labels.py` is a list that drifts the next time a rung is added.
-"""
+# The effort scale is the union of every provider's; a provider with a narrower one
+# (Anthropic has no `none`/`minimal`, Gemini tops out at `high`) clamps at its boundary.
+from stcode.core.configs import REASONING_EFFORTS, ReasoningEffort  # noqa: E402
 
 StopReason = Literal[
     "end_turn",

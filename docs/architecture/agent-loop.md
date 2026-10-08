@@ -126,7 +126,7 @@ its own tools. All of it is the same three assignments plus `register` + `allow`
 is written once here instead of at every call site. Returns `self`, so it chains.
 
 A factory — `Callable[[Agent], Tool]` — is the shape a tool needs when it closes over
-the agent it was built for. `task` and `send_message` are exactly that shape.
+the agent it was built for. `task` and the team tools are exactly that shape.
 
 ## Sub-agents: `task`
 

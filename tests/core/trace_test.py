@@ -6,9 +6,11 @@ import json
 
 import httpx
 import pytest
+# Imported before any test patches `httpx.Client`: the provider SDKs subclass it at import.
+from fakes import calls_tool, fake_model_config, fake_provider, says
 
 from stcode.core.common import trace
-from stcode.core.configs import GatewayConfig, TraceConfig, load_config, redacted
+from stcode.core.configs import Config, TraceConfig, load_config
 
 
 @pytest.fixture(autouse=True)
@@ -145,7 +147,7 @@ def test_async_siblings_share_parent_without_leaking_context(requests):
     assert all(s["parentSpanId"] == parent[1] for s in records if s["name"].startswith("child"))
 
 
-def test_env_wins_and_tracing_never_imports_otel_or_a_provider_sdk(requests, monkeypatch):
+def test_env_references_resolve_and_tracing_never_imports_otel_or_a_provider_sdk(requests, monkeypatch):
     real_import = builtins.__import__
 
     def guarded(name, *a, **kw):
@@ -153,9 +155,10 @@ def test_env_wins_and_tracing_never_imports_otel_or_a_provider_sdk(requests, mon
         return real_import(name, *a, **kw)
 
     monkeypatch.setattr(builtins, "__import__", guarded)
-    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://env.example")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "env-secret")
-    assert trace.configure(settings())
+    monkeypatch.setenv("TRACE_URL", "https://env.example")
+    monkeypatch.setenv("TRACE_SECRET", "env-secret")
+    assert trace.configure(TraceConfig(enabled=True, url="${TRACE_URL}", public_key="public",
+                                       secret_key="${TRACE_SECRET}"))
     with trace.span("smoke"):
         pass
     trace.shutdown()
@@ -192,7 +195,7 @@ def test_export_failures_do_not_fail_agent_or_leak_responses(monkeypatch, caplog
     assert "export" in caplog.text.lower() and "secret" not in caplog.text
 
 
-def test_config_does_not_read_dotenv_and_redacts_trace_credentials(tmp_path, monkeypatch):
+def test_config_does_not_read_dotenv_and_hides_trace_credentials(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text("LANGFUSE_SECRET_KEY=file-secret\n")
     path = tmp_path / "config.toml"
@@ -200,20 +203,16 @@ def test_config_does_not_read_dotenv_and_redacts_trace_credentials(tmp_path, mon
     config = load_config(path)
     import os
     assert "LANGFUSE_SECRET_KEY" not in os.environ
-    data = redacted(config)["trace"]
-    assert data["api_key"] == "***" and data["secret_key"] == "***"
+    assert "config-key" not in repr(config) and "config-key" not in str(config.model_dump())
 
 
 def test_agent_request_exports_model_and_tool_under_one_turn(requests, tmp_path):
-    from fakes import calls_tool, fake_provider, says
     from stcode.core.agent import Agent, TurnFinished
-    from stcode.core.providers import ProviderConfig, RouteConfig
 
     async def run():
-        config = GatewayConfig(trace=settings(content=True))
+        config = Config.model_validate({"model": fake_model_config()})
+        config.trace = settings(content=True)
         config.session.dir = tmp_path / "sessions"
-        config.providers["fake"] = ProviderConfig()
-        config.routing["high"] = RouteConfig(provider="fake", model="fake-small")
         config.supervisor.enabled = False
         config.agent.enable_task = False
         (tmp_path / "hello.txt").write_text("hello tracing")
@@ -296,11 +295,11 @@ def test_exception_is_exported_and_original_error_propagates(requests):
     assert observation["status"] == {"code": 2, "message": "ValueError"}
 
 
-def test_phoenix_environment_selects_url_key_and_project(requests, monkeypatch):
+def test_phoenix_environment_fills_what_the_config_leaves_unset(requests, monkeypatch):
     monkeypatch.setenv("PHOENIX_COLLECTOR_ENDPOINT", "https://phoenix.example/proxy/")
     monkeypatch.setenv("PHOENIX_PROJECT_NAME", "environment")
     monkeypatch.setenv("PHOENIX_API_KEY", "env-key")
-    trace.configure(settings("phoenix", api_key="config-key", project_name="config-project"))
+    trace.configure(TraceConfig(enabled=True, provider="phoenix"))
     with trace.span("smoke"):
         pass
     assert trace.flush()

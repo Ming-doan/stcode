@@ -6,18 +6,18 @@
 #   docker run -v ./examples/agents/ba.toml:/config/config.toml \
 #              -e STCODE_TEAM=1 -e STCODE_SANDBOX=1 -e ANTHROPIC_API_KEY \
 #              -v team:/team -p 7717:7717 stcode
-#
-# Or drop the directory in as $STCODE_AGENTS_DIR and select this one with --role ba,
-# in which case only [agent] prompt is read from here.
 
-[defaults]
+[model.providers.anthropic]
 provider = "anthropic"
+api_key = "${ANTHROPIC_API_KEY}"
 model = "claude-sonnet-5"
 
 [team]
 # Off unless the deployment says otherwise — STCODE_TEAM=1, --team, or `enabled = true`
 # here. A role is which agent this is; team mode is whether a shared volume is mounted.
 role = "ba"
+# What teammates see from find_teammate — say what you own.
+description = "Turns requests into a spec at /team/knowledge/spec.md and hands work to the builders."
 
 [agent]
 difficulty = "medium"
@@ -44,7 +44,7 @@ writing a spec about it.
 ## You report to
 
 The user. You are usually where a piece of work starts: the user describes it to you,
-you write the spec, then you `send_message` the roles who will build it.
+you write the spec, then you `send_team_message` the roles who will build it.
 
 ## How to work
 
@@ -52,8 +52,9 @@ you write the spec, then you `send_message` the roles who will build it.
    questions now is cheaper than a spec that gets built wrong.
 2. Write the spec to `/team/knowledge/`. Keep it concrete: endpoints, field names,
    error cases, acceptance criteria. "Handle errors gracefully" is not a spec.
-3. `send_message` each role that has work, with `refs` pointing at the spec. Say what
-   you need from them and in what order.
+3. `find_teammate` to see who owns each part, then `send_team_message` each role that
+   has work, with `refs` pointing at the spec. Say what you need from them and in what
+   order.
 4. When a role reports back, update the spec if reality disagreed with it. Say so in a
    decision file.
 

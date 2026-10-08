@@ -3,7 +3,7 @@ Daemon — one process, **many sessions**, addressed by id.
 
     daemon = Daemon(config)
     await daemon.start()          # bind, then get on with your life
-    await daemon.serve_forever()  # or just block here
+    await daemon.serve_forever()  # or block until `stop()` / a `shutdown` message
 
     async with Daemon(config) as daemon: ...   # start + close
 
@@ -34,12 +34,13 @@ from typing import Any
 from stcode import __version__
 from stcode.core.agent import Agent
 from stcode.core.common import trace
-from stcode.core.common.paths import default_config_path
 from stcode.core.configs import (
-    GatewayConfig,
-    apply_provider_settings,
-    redacted,
-    save_config,
+    PROVIDER_KEY_ENV,
+    PROVIDER_NAMES,
+    ApprovalMode,
+    Config,
+    load_config,
+    update_config,
 )
 from stcode.core.daemon.autonomy import AutonomyRefused, guard_autonomy, in_container
 from stcode.core.daemon.protocol import (
@@ -63,13 +64,14 @@ from stcode.core.daemon.protocol import (
     SetConfig,
     SetMeta,
     SetMode,
+    Shutdown,
     decode,
     encode,
     parse_client_message,
 )
 from stcode.core.daemon.runner import SessionRunner
-from stcode.core.harness.approvals import ApprovalMode
 from stcode.core.providers.gateway import LLMGateway
+from stcode.core.providers.registry import default_model_for
 from stcode.core.session import Session
 
 log = logging.getLogger("stcode.daemon")
@@ -89,39 +91,42 @@ class Daemon:
 
     def __init__(
         self,
-        config: GatewayConfig,
+        config: Config,
         *,
         has_approver: bool = False,
         gateway: LLMGateway | None = None,
-        config_path: Path | None = None,
+        overrides: dict[str, Any] | None = None,
     ) -> None:
         """`has_approver` is False for everything stcode ships — `autonomy.py` says why
         an attached human is not one under `full-auto`. `gateway` is for tests and for
         embedding; left None, the daemon builds and owns one.
 
-        `config_path` is the file `set_config` writes and `info` reports. It defaults to
-        where the config *was read from*, and only then to the conventional location: a
-        container started with `STCODE_CONFIG=/config/backend-dev.toml` must not tell
-        its clients about a file it never opened.
+        `overrides` are the dotted keys `config` was loaded with (command-line flags),
+        reapplied whenever `set_config` reloads the file. `config.path` is the file
+        `set_config` writes; a config built in memory has none and cannot be changed.
         """
         self.config = config
-        self.config_path = config_path or config.source_path or default_config_path()
+        self.overrides = dict(overrides or {})
         self.has_approver = has_approver
         self.sessions: dict[str, SessionRunner] = {}
         self._connections: set["_Connection"] = set()
         self._gateway = gateway
         self._owns_gateway = gateway is None
         self._server: asyncio.base_events.Server | None = None
+        self._stopped = asyncio.Event()
 
     # ---- lifecycle ----
 
     @property
     def address(self) -> str:
-        """Where clients should look. Also what `stcode daemon` prints."""
-        settings = self.config.daemon
-        if settings.transport == "unix":
-            return str(socket_path(settings.socket))
-        return f"{settings.host}:{settings.port}"
+        """Where clients should look. Also what `--headless` prints."""
+        return self.config.daemon.address
+
+    @property
+    def local_only(self) -> bool:
+        """Whether every client is on this machine as this user — a unix socket is
+        chmod 0600. Keys and `shutdown` are accepted only then."""
+        return self.config.daemon.transport == "unix"
 
     @property
     def max_clients(self) -> int:
@@ -143,7 +148,7 @@ class Daemon:
         The guard runs *before* the bind: refusing after clients can connect makes the
         refusal a message rather than a refusal.
         """
-        guard_autonomy(self.config.defaults.approval_mode, self.has_approver)
+        guard_autonomy(self.config.agent.approval_mode, self.has_approver)
 
         settings = self.config.daemon
         if settings.transport == "unix":
@@ -164,11 +169,14 @@ class Daemon:
         log.info("listening on %s", self.address)
 
     async def serve_forever(self) -> None:
+        """Serve until `stop()`. The caller still owns `aclose()`."""
         if self._server is None:
             await self.start()
-        assert self._server is not None
-        async with self._server:
-            await self._server.serve_forever()
+        await self._stopped.wait()
+
+    def stop(self) -> None:
+        """End `serve_forever`. Safe from a signal handler."""
+        self._stopped.set()
 
     async def aclose(self) -> None:
         """Close the door, then everything behind it.
@@ -192,7 +200,7 @@ class Daemon:
         if self._gateway is not None and self._owns_gateway:
             await self._gateway.aclose()
             self._gateway = None
-        if self.config.daemon.transport == "unix":
+        if self.local_only:
             with contextlib.suppress(OSError):
                 socket_path(self.config.daemon.socket).unlink()
         # Last, and only here: spans are batched, so without a flush the final turn of
@@ -216,73 +224,82 @@ class Daemon:
 
     def gateway(self) -> LLMGateway:
         if self._gateway is None:
-            self._gateway = LLMGateway(
-                providers=self.config.providers,
-                routing=self.config.routing,
-                retry=self.config.retry,
-            )
+            self._gateway = LLMGateway(self.config.model)
         return self._gateway
 
-    async def reconfigure(self, config: GatewayConfig) -> None:
-        """Adopt a changed configuration without dropping the sessions it is holding.
-
-        What `/model` needs in the shape where the UI started this daemon: a key or a
-        base URL typed into the setup screen has to reach the agent already running, and
-        that agent holds a reference to the gateway object rather than to this daemon.
-        So the gateway is reconfigured in place and the sessions are untouched.
-
-        What it deliberately does not do is restart anything. `[daemon]` and `[session]`
-        describe a socket that is already bound and a directory transcripts are already
-        being written to; changing either is a restart, not a reload.
-        """
-        self.config = config
-        if self._gateway is not None:
-            await self._gateway.reconfigure(
-                providers=config.providers, routing=config.routing, retry=config.retry
-            )
-
     def config_frame(self) -> ConfigReply:
-        """This daemon's config, redacted, plus where it lives on **this** machine.
-
-        The path is the field that makes `--daemonless` honest: a client showing
-        `~/.stcode/config.toml` while driving a container is describing the wrong disk.
-        """
+        """This daemon's config as a client may see it: no keys, only whether one resolves."""
+        model = self.config.model
+        default = model.default_name()
+        entry = model.providers.get(default)
+        path = self.config.path
         return ConfigReply(
-            path=str(self.config_path),
-            config=redacted(self.config),
-            writable=_writable(self.config_path),
+            path=str(path or ""),
+            writable=path is not None and _writable(path),
+            keys_editable=self.local_only,
+            provider=default,
+            model=(entry.model or default_model_for(entry.provider)) if entry else "",
+            reasoning_effort=self.config.agent.reasoning_effort,
+            approval_mode=self.config.agent.approval_mode,
+            providers={
+                name: {"provider": item.provider, "model": item.model, "has_key": bool(item.key())}
+                for name, item in model.providers.items()
+            },
+            libraries={
+                name: {"default_model": default_model_for(name), "key_env": PROVIDER_KEY_ENV[name]}
+                for name in PROVIDER_NAMES
+            },
         )
 
-    async def write_defaults(self, patch: dict[str, Any]) -> None:
-        """Fold a `[defaults]` patch into this daemon's config, save it, and reload.
+    async def set_config(self, message: SetConfig) -> None:
+        """Write a `set_config` patch to the file, reload it, and reconfigure the gateway.
 
-        Three steps and all three matter. The fold repoints any routing tier that was
-        tracking the old default model, so `/model` cannot leave a session routing a new
-        model name at the old vendor. The save is what makes the change survive a
-        container restart. The reload is what makes it true for the agent that is
-        already holding the gateway.
-
-        Only `[defaults]` arrives here — `CONFIGURABLE_DEFAULTS` is the filter, and the
-        reason is in its docstring.
+        The gateway is reconfigured in place, so every live session picks up a new key
+        or default model on its next call. `[daemon]` is not re-read: the socket is
+        already bound.
         """
-        if not patch:
-            return
-        mode = patch.get("approval_mode")
-        if mode is not None:
-            # `set_mode` is not the only door a mode arrives through, and neither is
-            # this one. The guard goes on every door.
-            guard_autonomy(mode, self.has_approver)
+        if self.config.path is None:
+            raise OSError("this daemon's config was not read from a file")
+        changes: dict[str, Any] = {}
+        if message.approval_mode:
+            # `set_mode` is not the only door a mode arrives through. The guard goes on
+            # every door, and a default the daemon would refuse to start with is one.
+            guard_autonomy(message.approval_mode, self.has_approver)
+            changes["agent.approval_mode"] = message.approval_mode
+        if message.reasoning_effort:
+            changes["agent.reasoning_effort"] = message.reasoning_effort
 
-        updated = apply_provider_settings(
-            self.config,
-            provider=str(patch.get("provider") or self.config.defaults.provider),
-            model=patch.get("model"),
-            approval_mode=mode,
-            reasoning_effort=patch.get("reasoning_effort"),
-        )
-        save_config(updated, self.config_path)
-        await self.reconfigure(updated)
-        log.info("config updated from a client: %s", ", ".join(sorted(patch)))
+        providers = self.config.model.providers
+        name = message.provider or self.config.model.default_name()
+        if message.provider:
+            if name not in providers:
+                if name not in PROVIDER_NAMES:
+                    raise ValueError(f"unknown provider {name!r}")
+                changes[f"model.providers.{name}.provider"] = name
+            changes["model.default"] = name
+        if message.model is not None and name:
+            changes[f"model.providers.{name}.model"] = message.model.strip() or None
+        if message.api_key and name:
+            if not self.local_only:
+                raise PermissionError("keys can only be changed over the daemon's unix socket")
+            changes[f"model.providers.{name}.api_key"] = message.api_key.strip()
+
+        if not changes:
+            return
+        update_config(self.config.path, changes)
+        await self.reload()
+        log.info("config updated from a client: %s", ", ".join(sorted(changes)))
+
+    async def reload(self) -> None:
+        """Re-read the config file, keeping the bound `[daemon]` and this run's flags."""
+        assert self.config.path is not None
+        fresh = load_config(self.config.path, self.config.cwd, overrides=self.overrides)
+        fresh.daemon = self.config.daemon
+        self.config = fresh
+        if self._gateway is not None:
+            await self._gateway.reconfigure(fresh.model)
+        for runner in self.sessions.values():
+            runner.agent.reasoning_effort = fresh.agent.reasoning_effort
 
     async def create_session(
         self,
@@ -294,10 +311,10 @@ class Daemon:
     ) -> SessionRunner:
         """Build an agent and register it. The guard applies per session as well as per
         daemon — a `full-auto` session on a `suggest` daemon is the same hole."""
-        mode = approval_mode or self.config.defaults.approval_mode
+        mode = approval_mode or self.config.agent.approval_mode
         guard_autonomy(mode, self.has_approver)
 
-        resolved_cwd = None
+        resolved_cwd = self.config.cwd
         if cwd is not None:
             p = Path(cwd).expanduser()
             if p.is_dir():
@@ -308,7 +325,7 @@ class Daemon:
         agent = await Agent.create(
             self.config,
             cwd=resolved_cwd,
-            role=role or self.config.team.role,
+            role=role,
             approval_mode=mode,
             session=session,
             gateway=self.gateway(),
@@ -511,7 +528,7 @@ class _Connection:
                         daemon=self._daemon.address,
                         # The file this daemon actually read, not the conventional
                         # location — a container's is wherever STCODE_CONFIG pointed.
-                        config_path=str(self._daemon.config_path),
+                        config_path=str(self._daemon.config.path or ""),
                         session_dir=str(self._daemon.config.session.dir),
                     )
                 )
@@ -519,15 +536,19 @@ class _Connection:
                 self.send(self._daemon.config_frame())
             case SetConfig():
                 try:
-                    await self._daemon.write_defaults(message.patch())
-                except AutonomyRefused as refusal:
+                    await self._daemon.set_config(message)
+                except (AutonomyRefused, PermissionError, ValueError, OSError) as exc:
                     # Rule 5 has no back door, and a config file is not one either.
-                    self.send(ErrorMessage(message=str(refusal)))
-                except OSError as exc:
-                    self.send(ErrorMessage(message=f"could not write the config: {exc}"))
+                    self.send(ErrorMessage(message=str(exc)))
                 # Either way, say what the config now *is*: a client must never be left
                 # showing a change that was refused.
                 self.send(self._daemon.config_frame())
+            case Shutdown():
+                if not self._daemon.local_only:
+                    self.send(ErrorMessage(message="shutdown is accepted over the unix socket only"))
+                else:
+                    log.info("shutdown requested by a client")
+                    self._daemon.stop()
             case SetMode():
                 runner = self._runner(message.session)
                 # `create` is not the only door a mode arrives through, so the guard
@@ -597,7 +618,7 @@ def _peer(writer: asyncio.StreamWriter) -> str:
     return str(peer) if peer else "unix socket"
 
 
-def socket_path(value: str) -> Path:
+def socket_path(value: str | Path) -> Path:
     return Path(value).expanduser()
 
 

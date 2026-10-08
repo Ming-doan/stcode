@@ -16,21 +16,17 @@ from dotenv import load_dotenv
 from google.genai import errors as genai_errors
 
 import stcode.core.providers.gateway as gateway_module
+from stcode.core.configs import PROVIDER_KEY_ENV, ModelConfig
 from stcode.core.providers import (
-    PROVIDER_INFO,
+    DEFAULT_MODELS,
     PROVIDERS,
     AnthropicProvider,
     BaseModelProvider,
     GoogleGenAIProvider,
     LLMGateway,
     OpenAIProvider,
-    ProviderConfig,
-    RetryConfig,
-    RouteConfig,
     default_model_for,
     get_provider,
-    key_env_for,
-    resolve_secret,
 )
 from stcode.core.providers.anthropic_claude import DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL
 from stcode.core.providers.google_gemini import DEFAULT_MODEL as GOOGLE_DEFAULT_MODEL
@@ -60,12 +56,6 @@ EXPECTED_DEFAULT_MODELS = {
     "google": GOOGLE_DEFAULT_MODEL,
 }
 
-EXPECTED_KEY_ENVS = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "google": "GEMINI_API_KEY",
-}
-
 PROMPT = "Reply with exactly one word: ok"
 
 GREET_TOOL = ToolDefinition(
@@ -91,7 +81,7 @@ def anyio_backend():
 
 def test_registry_has_exactly_the_known_providers():
     assert set(PROVIDERS) == set(EXPECTED_CLASSES)
-    assert set(PROVIDER_INFO) == set(EXPECTED_CLASSES)
+    assert set(DEFAULT_MODELS) == set(EXPECTED_CLASSES)
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED_CLASSES))
@@ -100,21 +90,12 @@ def test_registered_class_matches_expected(name):
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED_CLASSES))
-def test_provider_info_matches_module_defaults(name):
-    info = PROVIDER_INFO[name]
-    assert info.default_model == EXPECTED_DEFAULT_MODELS[name]
-    assert info.key_env == EXPECTED_KEY_ENVS[name]
-
-
-@pytest.mark.parametrize("name", sorted(EXPECTED_CLASSES))
-def test_default_model_for_and_key_env_for(name):
+def test_default_model_for_matches_module_defaults(name):
     assert default_model_for(name) == EXPECTED_DEFAULT_MODELS[name]
-    assert key_env_for(name) == EXPECTED_KEY_ENVS[name]
 
 
-def test_default_model_for_and_key_env_for_unknown_provider():
+def test_default_model_for_unknown_provider():
     assert default_model_for("does-not-exist") == ""
-    assert key_env_for("does-not-exist") == ""
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED_CLASSES))
@@ -145,10 +126,10 @@ def test_get_provider_unknown_name_raises_value_error():
 async def test_provider_streams_a_reply(name):
     """Live connectivity check — skipped for any provider without a key in the
     environment (process env or .env)."""
-    info = PROVIDER_INFO[name]
-    api_key = os.environ.get(info.key_env)
+    key_env = PROVIDER_KEY_ENV[name]
+    api_key = os.environ.get(key_env)
     if not api_key:
-        pytest.skip(f"{info.key_env} not set")
+        pytest.skip(f"{key_env} not set")
 
     text = ""
     stop_event = None
@@ -175,10 +156,10 @@ async def test_provider_calls_a_tool(name):
     """Live connectivity check for the tool-calling path — same skip rule as
     test_provider_streams_a_reply. Exercises ToolCallStart/Delta/End end-to-end
     against each real provider's wire format, not just the text path."""
-    info = PROVIDER_INFO[name]
-    api_key = os.environ.get(info.key_env)
+    key_env = PROVIDER_KEY_ENV[name]
+    api_key = os.environ.get(key_env)
     if not api_key:
-        pytest.skip(f"{info.key_env} not set")
+        pytest.skip(f"{key_env} not set")
 
     tool_call_end: ToolCallEnd | None = None
     stop_event: MessageStop | None = None
@@ -203,26 +184,6 @@ async def test_provider_calls_a_tool(name):
     assert stop_event.stop_reason == "tool_use"
 
 
-# --------------------------------------------------------------------- resolve_secret
-
-
-def test_resolve_secret_env_wins_over_literal(monkeypatch):
-    monkeypatch.setenv("STCODE_TEST_KEY", "from-env")
-    assert resolve_secret("STCODE_TEST_KEY", "from-literal") == "from-env"
-
-
-def test_resolve_secret_falls_back_to_literal_when_env_unset(monkeypatch):
-    monkeypatch.delenv("STCODE_TEST_KEY", raising=False)
-    assert resolve_secret("STCODE_TEST_KEY", "from-literal") == "from-literal"
-
-
-def test_resolve_secret_no_env_name_uses_literal():
-    assert resolve_secret(None, "from-literal") == "from-literal"
-
-
-# --------------------------------------------------------------------- _is_retryable
-
-
 def test_is_retryable_classifies_known_transient_errors():
     req = httpx2.Request("POST", "http://example.invalid")
     assert gateway_module._is_retryable(anthropic.APIConnectionError(request=req))
@@ -240,7 +201,7 @@ def test_is_retryable_rejects_non_transient_errors():
 
 
 # The double and the registry swap both live in `tests/fakes.py`. `fake_provider`
-# registers itself in `PROVIDERS`, so the gateway's own `_get_provider` — its
+# stands in for the `openai` library in `PROVIDERS`, so the gateway's own `_get_provider` — its
 # credential resolution and its instance cache — runs for real; only the SDK is gone.
 
 
@@ -248,19 +209,27 @@ async def _drain(agen) -> list:
     return [event async for event in agen]
 
 
-def _gateway(**routing_kwargs) -> LLMGateway:
-    routing = routing_kwargs.pop("routing", {"low": RouteConfig(provider="fake", model="m")})
-    providers = routing_kwargs.pop("providers", {"fake": ProviderConfig(api_key="k")})
-    return LLMGateway(providers=providers, routing=routing, **routing_kwargs)
+def _model_config(*, providers=None, routing=None, retry=None) -> ModelConfig:
+    return ModelConfig.model_validate(
+        {
+            "providers": providers or {"fake": {"provider": "openai", "api_key": "k"}},
+            "routing": {"low": {"provider": "fake", "model": "m"}} if routing is None else routing,
+            **({"retry": retry} if retry else {}),
+        }
+    )
+
+
+def _gateway(**kwargs) -> LLMGateway:
+    return LLMGateway(_model_config(**kwargs))
 
 
 async def test_gateway_routes_by_difficulty_tier():
     with fake_provider() as fake:
         gateway = _gateway(
             routing={
-                "low": RouteConfig(provider="fake", model="fake-small"),
-                "medium": RouteConfig(provider="fake", model="fake-medium"),
-                "high": RouteConfig(provider="fake", model="fake-large"),
+                "low": {"provider": "fake", "model": "fake-small"},
+                "medium": {"provider": "fake", "model": "fake-medium"},
+                "high": {"provider": "fake", "model": "fake-large"},
             }
         )
         events = await _drain(
@@ -281,41 +250,42 @@ async def test_gateway_explicit_provider_and_model_bypasses_routing():
     assert fake.last.model == "explicit-model"
 
 
-async def test_gateway_falls_back_to_a_configured_tier():
-    """One missing line of TOML must not kill the turn."""
+async def test_a_tier_with_no_route_uses_the_default_entry():
+    """One missing line of TOML must not kill the turn: the default entry answers, with
+    the library's default model when the entry names none."""
     with fake_provider() as fake:
-        gateway = _gateway(routing={"medium": RouteConfig(provider="fake", model="fake-medium")})
+        gateway = _gateway(routing={"medium": {"provider": "fake", "model": "fake-medium"}})
         await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="high"))
-    assert fake.last.model == "fake-medium"
+    assert fake.last.model == OPENAI_DEFAULT_MODEL
 
 
-async def test_gateway_with_no_routes_at_all_raises_value_error():
-    gateway = LLMGateway(providers={}, routing={})
-    with pytest.raises(ValueError, match="No routes configured at all"):
+async def test_gateway_with_no_provider_at_all_raises_value_error():
+    gateway = LLMGateway(ModelConfig())
+    with pytest.raises(ValueError, match="No provider configured"):
         await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low"))
 
 
-async def test_gateway_unconfigured_provider_raises_value_error():
-    gateway = LLMGateway(
-        providers={}, routing={"low": RouteConfig(provider="missing", model="m")}
-    )
+async def test_a_session_override_naming_an_unknown_entry_raises():
+    gateway = _gateway()
     with pytest.raises(ValueError, match="not configured"):
-        await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low"))
+        await _drain(gateway.stream([Message(role="user", content="hi")], provider="missing"))
 
 
-async def test_gateway_prefers_tier_credentials_over_provider_credentials():
-    """A tier's key wins; a base URL it does not set still falls back to the provider's."""
+async def test_an_entry_key_and_base_url_reach_the_client(monkeypatch):
+    """`${VAR}` resolves when the client is built, not when the config is read."""
+    monkeypatch.setenv("STCODE_TEST_KEY", "from-env")
     with fake_provider() as fake:
         gateway = _gateway(
             providers={
-                "fake": ProviderConfig(
-                    api_key="provider-level-key", base_url="https://provider.example"
-                )
-            },
-            routing={"low": RouteConfig(provider="fake", model="m", api_key="tier-level-key")},
+                "fake": {
+                    "provider": "openai",
+                    "api_key": "${STCODE_TEST_KEY}",
+                    "base_url": "https://provider.example",
+                }
+            }
         )
         await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low"))
-    assert fake.credentials[-1] == ("tier-level-key", "https://provider.example")
+    assert fake.credentials[-1] == ("from-env", "https://provider.example")
 
 
 async def test_gateway_reuses_one_provider_instance_across_calls():
@@ -375,7 +345,7 @@ async def test_gateway_retries_transient_error_then_succeeds(monkeypatch):
     with fake_provider() as fake:
         fake.fail(RuntimeError("transient"), times=1)
         gateway = _gateway(
-            retry=RetryConfig(max_attempts=3, base_delay=0, max_delay=0, jitter=False)
+            retry={"max_attempts": 3, "base_delay": 0, "max_delay": 0, "jitter": False}
         )
         events = await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low"))
     assert len(fake.requests) == 2
@@ -397,7 +367,7 @@ async def test_gateway_gives_up_after_max_attempts(monkeypatch):
     with fake_provider() as fake:
         fake.fail(RuntimeError("still down"), times=-1)
         gateway = _gateway(
-            retry=RetryConfig(max_attempts=2, base_delay=0, max_delay=0, jitter=False)
+            retry={"max_attempts": 2, "base_delay": 0, "max_delay": 0, "jitter": False}
         )
         with pytest.raises(RuntimeError, match="still down"):
             await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low"))
@@ -574,15 +544,12 @@ class _CountingProvider(BaseModelProvider):
 @contextlib.contextmanager
 def _counting_provider():
     instance = _CountingProvider()
-    previous = PROVIDERS.get("counting")
-    PROVIDERS["counting"] = lambda api_key=None, base_url=None: instance  # type: ignore[assignment]
+    previous = PROVIDERS["openai"]
+    PROVIDERS["openai"] = lambda api_key=None, base_url=None: instance  # type: ignore[assignment]
     try:
         yield instance
     finally:
-        if previous is None:
-            PROVIDERS.pop("counting", None)
-        else:
-            PROVIDERS["counting"] = previous
+        PROVIDERS["openai"] = previous
 
 
 async def _five(gateway) -> None:
@@ -598,8 +565,8 @@ async def _five(gateway) -> None:
 async def test_max_concurrent_serialises_requests_to_one_endpoint():
     with _counting_provider() as provider:
         gateway = _gateway(
-            providers={"counting": ProviderConfig(api_key="k", max_concurrent=1)},
-            routing={"low": RouteConfig(provider="counting", model="m")},
+            providers={"counting": {"provider": "openai", "api_key": "k", "max_concurrent": 1}},
+            routing={"low": {"provider": "counting", "model": "m"}},
         )
         await _five(gateway)
     assert provider.peak == 1, f"{provider.peak} completions were open at once, not 1"
@@ -609,8 +576,8 @@ async def test_no_cap_means_no_cap():
     """0 is the default and has to stay free: a hosted API wants the parallelism."""
     with _counting_provider() as provider:
         gateway = _gateway(
-            providers={"counting": ProviderConfig(api_key="k")},
-            routing={"low": RouteConfig(provider="counting", model="m")},
+            providers={"counting": {"provider": "openai", "api_key": "k"}},
+            routing={"low": {"provider": "counting", "model": "m"}},
         )
         await _five(gateway)
     assert provider.peak > 1
@@ -621,8 +588,8 @@ async def test_an_abandoned_stream_releases_its_slot():
     is reading is a deadlock rather than a slow turn."""
     with _counting_provider() as provider:
         gateway = _gateway(
-            providers={"counting": ProviderConfig(api_key="k", max_concurrent=1)},
-            routing={"low": RouteConfig(provider="counting", model="m")},
+            providers={"counting": {"provider": "openai", "api_key": "k", "max_concurrent": 1}},
+            routing={"low": {"provider": "counting", "model": "m"}},
         )
         async with aclosing(
             gateway.stream([Message(role="user", content="hi")], difficulty="low")
@@ -638,13 +605,15 @@ async def test_reconfigure_reaches_a_gateway_someone_else_is_holding():
     """`/model` has to change the key an already-running agent uses, and that agent
     holds this object rather than the daemon that built it."""
     with fake_provider() as fake:
-        gateway = _gateway(providers={"fake": ProviderConfig(api_key="old")})
+        gateway = _gateway(providers={"fake": {"provider": "openai", "api_key": "old"}})
         await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low"))
         assert fake.last.api_key == "old"
 
         await gateway.reconfigure(
-            providers={"fake": ProviderConfig(api_key="new")},
-            routing={"low": RouteConfig(provider="fake", model="m2")},
+            _model_config(
+                providers={"fake": {"provider": "openai", "api_key": "new"}},
+                routing={"low": {"provider": "fake", "model": "m2"}},
+            )
         )
         await _drain(gateway.stream([Message(role="user", content="hi")], difficulty="low"))
 

@@ -191,10 +191,12 @@ class FakeProvider(BaseModelProvider):
 def fake_provider(
     script: Sequence[Sequence[StreamEvent]] = (),
     *,
-    name: str = "fake",
+    name: str = "openai",
     models: Sequence[str] = ("fake-small", "fake-large"),
 ) -> Iterator[FakeProvider]:
-    """Register `name` in the provider registry for the block, backed by one instance.
+    """Stand in for library `name` in the provider registry for the block, backed by one
+    instance. A config reaches it through an entry with `provider = "openai"` — see
+    `FAKE_MODEL_CONFIG`.
 
     `get_provider` calls `PROVIDERS[name](api_key=..., base_url=...)`, so what goes in
     the registry is a factory that hands back the same object every time and notes the
@@ -217,6 +219,12 @@ def fake_provider(
             PROVIDERS.pop(name, None)
         else:
             PROVIDERS[name] = previous
+
+
+def fake_model_config(**entry: Any) -> dict[str, Any]:
+    """A `[model]` section with one entry, `fake`, on the library `fake_provider`
+    replaces. Extra keyword arguments go into the entry."""
+    return {"providers": {"fake": {"provider": "openai", "model": "fake-small", **entry}}}
 
 
 # ---- the gateway ----------------------------------------------------------------
@@ -293,11 +301,11 @@ class RecordingGateway:
     async def aclose(self) -> None:
         self.closed = True
 
-    async def reconfigure(self, **settings: Any) -> None:
-        """Swallowed, and recorded. `Daemon.reconfigure` calls it whenever a client
-        changes the config — a double that did not have it turned "the daemon reloaded"
-        into an `AttributeError` reaching the client as a protocol error."""
-        self.reconfigured.append(settings)
+    async def reconfigure(self, config: Any) -> None:
+        """Swallowed, and recorded. `Daemon.reload` calls it whenever a client changes
+        the config — a double that did not have it turned "the daemon reloaded" into an
+        `AttributeError` reaching the client as a protocol error."""
+        self.reconfigured.append(config)
 
     @property
     def last(self) -> GatewayCall:

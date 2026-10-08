@@ -1,9 +1,8 @@
 """
 Prompt sections — the parts every system prompt is assembled from.
 
-Python constants rather than `.md` package data, for the same reason `cli/app.py`
-inlines its CSS: a prompt that goes missing at runtime is a session that behaves subtly
-differently with no error.
+Python constants rather than `.md` package data: a prompt that goes missing at runtime
+is a session that behaves subtly differently with no error.
 
 **Order is load-bearing.** Caching works on a byte-stable *prefix*, so the static
 sections come first and never vary within a session, and everything turn-varying goes
@@ -13,7 +12,6 @@ last. Adding a dynamic value to an early section silently doubles the cost of ev
 from __future__ import annotations
 
 from datetime import date
-from typing import Sequence
 
 IDENTITY = """\
 You are stcode, a coding agent working in a terminal alongside a software engineer.
@@ -196,23 +194,16 @@ def mcp_section(catalogue: str, directory: str) -> str:
     )
 
 
-def role_section(body: str, teammates: Sequence[str] = ()) -> str:
-    """This agent's role, plus who else there is to talk to.
+def role_section(body: str) -> str:
+    """This agent's role.
 
-    The body is `[agent] prompt` from an agent profile, passed through unchanged: a role is
-    data, and rewriting it here would make it code again.
+    The body is `[agent] prompt` from the agent's config, passed through unchanged: a
+    role is data, and rewriting it here would make it code again. Who else is on the
+    team is not here — it changes while this prompt is cached, so `find_teammate` asks.
     """
     if not body.strip():
         return ""
-    section = "## Your role on this team\n\n" + body.strip()
-    if teammates:
-        section += (
-            "\n\nOther roles you can `send_message`: "
-            + ", ".join(f"`{name}`" for name in teammates)
-            + ".\nShared files live in `/team/knowledge/` and `/team/artifacts/` — read and "
-            "write them with the ordinary file tools. Messages carry paths, not contents."
-        )
-    return section
+    return "## Your role on this team\n\n" + body.strip()
 
 
 def project_section(instructions: str) -> str:

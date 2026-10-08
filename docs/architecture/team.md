@@ -8,6 +8,9 @@ N containers, each one daemon and one agent with one role, sharing one volume.
 │   ├── architecture.md
 │   ├── api-contract.md
 │   └── decisions/2026-09-03-rate-limit.md
+├── members/                            # one card per agent, written as it starts
+│   ├── backend-dev.json
+│   └── frontend-dev.json
 ├── inbox/
 │   ├── backend-dev/01M2…-from-ba.json
 │   └── frontend-dev/
@@ -15,15 +18,14 @@ N containers, each one daemon and one agent with one role, sharing one volume.
 └── repo.git                            # the bare origin every role clones
 ```
 
-Team mode is **off unless `[team] role` is set**. Naming a role in a solo session only
-selects a prompt; declaring one in config is a container saying a shared volume is
-mounted.
+Team mode is **off until `[team] enabled`** (or `STCODE_TEAM=1`). A role alone is which
+agent this is; switching team mode on is a container saying a shared volume is mounted.
 
 ## The bet: messaging has no protocol
 
-Containers share a volume, so a message is a **file**. `send_message` writes JSON into
-`/team/inbox/<role>/`, and the receiver drains its own directory. No registry, no routing
-table, no service discovery, no N² socket mesh.
+Containers share a volume, so a message is a **file**. `send_team_message` writes JSON
+into `/team/inbox/<role>/`, and the receiver drains its own directory. No routing table,
+no service discovery, no N² socket mesh.
 
 Delivery is a write then a rename, so a reader draining at the same moment sees a whole
 message or nothing. Draining moves the file to `.read/` rather than deleting it — "who
@@ -37,21 +39,67 @@ mailbox.pending()      # what the daemon's watcher polls
 ```
 
 `core/team/mailbox.py` imports nothing from the harness, which keeps the arrow one-way:
-the `send_message` *tool* lives in `core/team/tools.py` and closes over a mailbox — the
-same shape `task` uses.
+the *tools* live in `core/team/tools.py` and close over a mailbox — the same shape `task`
+uses.
 
-**`refs`, not content — enforced, not requested.** `send_message` refuses a body over
+**`refs`, not content — enforced, not requested.** `send_team_message` refuses a body over
 2000 characters, and refuses a ref that does not exist. That single rule is what keeps a
 team's token cost from growing with the square of its size; a docstring asking nicely is
 not enough, and a message pointing at nothing costs the recipient a whole turn to
 discover.
+
+## Joining, and finding a teammate
+
+An agent that starts in team mode **joins** before its first turn: it creates its inbox
+and writes a member card to `/team/members/<role>.json`.
+
+```json
+{"role": "backend-dev", "team": "shop", "description": "Owns the API and api-contract.md.",
+ "host": "3f2a9c1b7d4e", "joined": "2026-10-08T09:12:44.120+00:00"}
+```
+
+`role`, `name` and `description` come from `[team]`; `host` is the machine it runs on.
+A restart rewrites the card. Stopping does not remove it — the inbox outlives the
+process, and mail sent while a role is down is waiting when it comes back.
+
+A hand-off is two tools:
+
+1. `find_teammate(query)` — the cards of everyone else, filtered by words in their role
+   or description. Asked when needed, so a container started after this one is still
+   found; a list frozen into the system prompt at start-up would miss it, and would
+   move the cached prefix the day it was refreshed.
+2. `send_team_message(to, subject, body, refs)` — `to` must be a role with a card.
+   A typo, or a role that has not started yet, is refused with the roles that *are*
+   there, rather than written into an inbox nobody reads.
+
+Sub-agents get neither: the discipline between roles stays with the roles.
+
+### Room for a team service
+
+The volume is one backend for three operations: **join**, **list members**, **deliver
+a message**. A future `stcode/teams` service — a small process holding the member cards
+and the shared knowledge, so containers need not share a disk or a machine — is a
+second backend for the same three, chosen by config:
+
+```toml
+[team]
+name        = "shop"                    # the team; a service hosts more than one
+description = "Owns the API and api-contract.md."
+shared_dir  = "/team"                   # today: the shared volume
+# url       = "http://teams:7720"       # later: the team service, instead of shared_dir
+```
+
+`url` is reserved: setting it today refuses to start, rather than quietly falling back
+to a directory the operator thought they had replaced. The tools' contract is what
+stays fixed — an agent calls `find_teammate` and `send_team_message` either way.
 
 ## Who dispatches
 
 **You do, per role.** No lead agent, no scheduler, no coordinator:
 
 1. Attach to the **BA** container and describe the work.
-2. BA writes the spec into `/team/knowledge/`, then `send_message`s the dev roles.
+2. BA writes the spec into `/team/knowledge/`, finds the dev roles with
+   `find_teammate`, and hands off with `send_team_message`.
 3. Switch to another container to watch, and push a message mid-run if it drifts.
 
 "BA is where you start" is a *convention* in `ba.md` — one English sentence, not a class.
@@ -76,17 +124,16 @@ No locks, no CRDT, no merge.
 
 **One `config.toml` per agent** — prompt in `[agent] prompt`, settings in the sections
 that were always there. Mounted at `/config/config.toml` it *is* the container's config,
-which makes deploying N agents N mounts of one path and nothing to keep in step. On a
-machine that holds several, they live in `~/.stcode/agents/` (or `.stcode/agents/`, or
-`$STCODE_AGENTS_DIR`) and `--role` picks one by name, contributing its prompt only.
+which makes deploying N agents N mounts of one path and nothing to keep in step. There
+is no lookup by name: the config that was loaded is the agent.
 → [agent profiles](harness.md#an-agent-profile-is-one-configtoml)
 
 **Not in the package** — a role is a deployment fact, and a build that carried four of
 them made adding a fifth a release. Copy a starting point from `examples/agents/`: `ba`,
 `backend-dev`, `frontend-dev`, `devops`.
 
-Each states what it owns, whose output it reads, and who it reports to. An unknown role
-name refuses to start, which is what you want when a volume failed to mount.
+Each states what it owns, whose output it reads, and who it reports to, and carries a
+one-line `[team] description` — what its teammates see from `find_teammate`.
 
 **Team mode is off until it is switched on.** `[team] enabled`, or `STCODE_TEAM=1`;
 naming a role is not enough. A role and a team are two facts — one says which agent this
@@ -95,7 +142,7 @@ them meant a profile copied to a laptop started polling an inbox that did not ex
 
 A sub-agent (`task`) is still available inside a role container: a team splits the
 product, `task` splits one role's work inside its own checkout. Sub-agents do **not** get
-`send_message` — the discipline between roles stays with the roles.
+the team tools — the discipline between roles stays with the roles.
 
 ## How work gets integrated
 
@@ -121,7 +168,7 @@ no k8s manifests: how you bring up N containers is yours.
 | Mounts | `/team` (shared volume), `/workspace` (where the agent clones), this agent's profile at `/config/config.toml` read-only |
 | Env | `STCODE_CONFIG`, `STCODE_SANDBOX=1` (unlocks `full-auto`), `STCODE_TEAM=1` (turns team mode on), provider keys |
 | Port | `[daemon] transport = "tcp"`, default 7717 |
-| Role | `[team] role` in the mounted profile, or `--role` / `STCODE_ROLE` with `STCODE_AGENTS_DIR` |
+| Role | `[team] role` in the mounted profile, or `--role` / `STCODE_ROLE` |
 | Clients | one at a time — `[daemon] max_clients` defaults to 1 in a container |
 | Credentials | none. The origin is a bare repo on the volume |
 

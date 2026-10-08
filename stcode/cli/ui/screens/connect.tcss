@@ -1,0 +1,49 @@
+ConnectScreen {
+    align: center middle;
+}
+
+#connect-dialog {
+    width: 72;
+    max-width: 96%;
+    height: auto;
+    padding: 1 2;
+    border: round $accent;
+    background: $surface;
+}
+
+#connect-title {
+    text-style: bold;
+    color: $accent;
+}
+
+#connect-intro {
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#connect-dialog Input, #connect-dialog Select, #connect-dialog SelectCurrent {
+    height: 1;
+    border: none;
+    padding: 0 1;
+    background: $boost;
+    margin-bottom: 1;
+}
+
+#connect-dialog Input:focus, #connect-dialog Select:focus SelectCurrent {
+    background: $primary 30%;
+}
+
+.field-label {
+    text-style: bold;
+    color: $accent;
+}
+
+#connect-buttons {
+    height: auto;
+    margin-top: 1;
+    align-horizontal: right;
+}
+
+#connect-buttons Button {
+    margin-left: 2;
+}

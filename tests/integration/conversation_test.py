@@ -20,7 +20,7 @@ from typing import Any
 from fakes import calls_tool, fake_provider, says
 
 from stcode.core.agent import Agent, TurnFinished
-from stcode.core.configs import GatewayConfig, load_config
+from stcode.core.configs import Config, load_config
 from stcode.core.providers.types import ToolResultBlock, ToolUseBlock
 from stcode.core.session import Session
 
@@ -34,7 +34,7 @@ INVESTIGATE = [
 ]
 
 
-def build(workspace: Path, config_path: Path, **overrides: Any) -> GatewayConfig:
+def build(workspace: Path, config_path: Path, **overrides: Any) -> Config:
     """The fixture project's config, with transcripts kept inside the copied workspace.
 
     The supervisor is off unless a test asks for it: it shares the agent's gateway, so

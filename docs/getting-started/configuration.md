@@ -10,77 +10,88 @@ you actually need on day one.
 | --- | --- |
 | Linux / macOS | `~/.stcode/config.toml` |
 | Windows | `%APPDATA%\stcode\config.toml` |
-| Override | `STCODE_CONFIG=/path/to/config.toml` |
+| Override | `STCODE_HOME=/dir` for the whole directory, `STCODE_CONFIG=/path/to/config.toml` for the file |
 
 ```bash
-uv run stcode config     # prints the path and what it selects
+uv run stcode config     # asks the daemon: the path and what it selects
 ```
 
-It is created on first run with a commented default. Saving from the UI rewrites it
-from the in-memory model, so **hand-written comments are not preserved** — keep
-anything you want to remember in version control, not in the file.
+The file belongs to the daemon, which creates a minimal one on first start. The UI
+never edits it directly: `/model`, `/mode` and `/effort` ask the daemon to change single
+keys, so **your comments and formatting survive**.
 
 The theme and the folders you have trusted are **not** in here — they live in
 `~/.stcode/ui.toml`, because they are facts about your terminal rather than about the
 agent. `?` in the TUI shows both paths.
 
-## The four keys that matter
+## The keys that matter
 
 ```toml
-[defaults]
-provider = "anthropic"
-model = "claude-opus-5"
-approval_mode = "suggest"
+[model.providers.anthropic]           # the name is yours
+provider = "anthropic"                # the library: openai | anthropic | google
+api_key  = "${ANTHROPIC_API_KEY}"     # a reference to a variable, or the key itself
+model    = "claude-opus-5"            # unset = the library's default
 
-[providers.anthropic]
-api_key_env = "ANTHROPIC_API_KEY"   # a variable NAME, not the key
-
-[routing.high]
-provider = "anthropic"
-model = "claude-opus-5"
+[agent]
+approval_mode    = "suggest"
+reasoning_effort = "medium"
 ```
 
-`[defaults]` is what the UI shows and edits. `[routing]` is what the gateway actually
-calls — three tiers, `low` / `medium` / `high`, so a cheap model can do cheap work.
+That is a complete, working config. With one provider entry, everything uses it.
 
-!!! tip "Prefer `api_key_env` to `api_key`"
+!!! tip "Prefer `"${VAR}"` to a literal key"
 
-    `api_key_env` names an environment variable read at request time; `api_key` is the
-    literal. The environment wins when set. A literal is honoured — the setup screen
-    writes one there — and is why the file is `chmod 0600`.
+    A `"${ANTHROPIC_API_KEY}"` reference is read from the daemon's environment when it
+    is used, so the key never touches disk. A literal is honoured — the setup screen
+    writes one when you paste a key — and is why the file is `chmod 0600`. Leave
+    `api_key` out entirely and the library's conventional variable is used.
 
-## Difficulty tiers
+## Two accounts, and cheaper models for cheap work
 
-Every call declares a difficulty, and the tier decides the model:
+```toml
+[model]
+default = "work"                      # which entry answers when no tier says otherwise
+
+[model.providers.work]
+provider = "openai"
+api_key  = "${WORK_OPENAI_KEY}"
+
+[model.providers.personal]
+provider = "openai"
+api_key  = "${OPENAI_API_KEY}"
+
+[model.routing.low]                   # optional, per difficulty tier
+provider = "personal"
+model    = "gpt-5-mini"
+```
+
+Every call declares a difficulty, and a `[model.routing]` line for it decides the
+model; with no line, the default entry answers.
 
 | Tier | Who asks for it |
 | --- | --- |
 | `high` | the agent's own turns, by default (`[agent] difficulty`) |
 | `low` | the [supervisor](../architecture/supervisor.md), when a heuristic fires |
-| `medium` | the fallback when a tier has no route configured |
 
-One missing tier is not a reason to refuse to work: an unrouted difficulty falls back
-to `medium`, then `high`, then `low`, and only a config with no routes at all raises.
+## Command-line flags
 
-## Useful overrides
-
-Command-line flags apply to **this run only** and are never written back — `--mode
-full-auto` once must not leave `full-auto` in the file forever.
+Flags apply to **this run only** and are never written to the file — `--mode full-auto`
+once must not leave `full-auto` there forever.
 
 ```bash
-uv run stcode --cwd ~/projects/api --mode auto-edit --model claude-sonnet-5
-uv run stcode --transport tcp --host 10.0.0.4 --port 7717
+uv run stcode ~/projects/api --mode auto-edit
+uv run stcode --transport tcp --host 10.0.0.4 --port 7717 --daemonless
 ```
 
-| Flag | What it overrides |
+| Flag | What it does |
 | --- | --- |
-| `--cwd` | the directory the agent works in |
-| `--mode` | `[defaults] approval_mode` |
-| `--model` | `[defaults] model` |
-| `--role` | `[team] role` — which agent this is, and so which profile supplies the prompt |
-| `--team` / `--no-team` | `[team] enabled`. Team mode is **off** unless this, `STCODE_TEAM=1`, or the config says otherwise |
-| `--config` | which file to load |
-| `--transport` `--socket` `--host` `--port` | `[daemon]` |
+| `--cwd` / a leading path | the directory the agent works in |
+| `--mode` | the approval mode of the sessions this run opens |
+| `--role` | which agent this is (`[team] role`). The prompt comes from `[agent] prompt` |
+| `--config` | the file a daemon started by this run reads |
+| `--restart` | stop the local daemon first and start a fresh one |
+| `--transport` `--socket` `--host` `--port` | where the daemon is (and where to start one) |
+| `--team` | `--headless` only: turn team mode on. Otherwise `STCODE_TEAM=1` or `[team] enabled` |
 
 ## Narrowing the tool set
 

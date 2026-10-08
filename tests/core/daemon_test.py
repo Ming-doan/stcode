@@ -30,8 +30,9 @@ import pytest
 from conftest import asynctest
 from fakes import FakeAgent, RecordingGateway, calls_tool, says
 
-from stcode.core.configs import REDACTED, GatewayConfig, load_config, save_config
-from stcode.core.daemon import Daemon, DaemonClient, SessionRunner
+from stcode.cli.services.client import Address, DaemonClient
+from stcode.core.configs import Config, load_config
+from stcode.core.daemon import Daemon, SessionRunner
 from stcode.core.daemon.runner import session_usage
 from stcode.core.daemon.autonomy import SANDBOX_ENV, AutonomyRefused, guard_autonomy
 from stcode.core.daemon.protocol import (
@@ -39,6 +40,7 @@ from stcode.core.daemon.protocol import (
     Create,
     ProtocolError,
     Push,
+    SetConfig,
     decode,
     encode,
     event_frame,
@@ -46,7 +48,6 @@ from stcode.core.daemon.protocol import (
 )
 from stcode.core.harness.tools.base import ApprovalRequest, Question
 from stcode.core.harness.approvals import ToolPermission
-from stcode.core.providers import ProviderConfig, RouteConfig
 from stcode.core.providers.types import Message, TextDelta, Usage
 from stcode.core.session import Session
 
@@ -59,16 +60,30 @@ from stcode.core.session import Session
 # `tests/fakes.py`, which is also what `tests/core/agent_test.py` uses.
 
 
-def config_for(tmp_path: Path, **daemon: Any) -> GatewayConfig:
+def config_for(tmp_path: Path, **daemon: Any) -> Config:
     """A config whose sessions and socket are inside `tmp_path` and nowhere else."""
-    config = GatewayConfig()
-    config.session.dir = str(tmp_path / "sessions")
+    config = Config()
+    config.session.dir = tmp_path / "sessions"
     config.daemon.transport = daemon.pop("transport", "unix")
-    config.daemon.socket = daemon.pop("socket", str(tmp_path / "d.sock"))
+    config.daemon.socket = Path(daemon.pop("socket", tmp_path / "d.sock"))
     for key, value in daemon.items():
         setattr(config.daemon, key, value)
-    config.defaults.approval_mode = "auto-edit"
+    config.agent.approval_mode = "auto-edit"
     return config
+
+
+def config_file(tmp_path: Path, text: str = "", **overrides: Any) -> Config:
+    """`config_for`'s settings, but read from a real file — what `set_config` writes."""
+    path = tmp_path / "daemon-config.toml"
+    path.write_text('[agent]\napproval_mode = "auto-edit"\n' + text)
+    return load_config(
+        path,
+        overrides={
+            "session.dir": str(tmp_path / "sessions"),
+            "daemon.socket": str(tmp_path / "d.sock"),
+            **overrides,
+        },
+    )
 
 
 @pytest.fixture
@@ -186,7 +201,7 @@ def test_a_daemon_refuses_to_bind_in_full_auto(
     """The refusal happens before the socket exists — after would make it a message."""
     monkeypatch.setattr("stcode.core.daemon.autonomy.in_container", lambda: False)
     config = config_for(tmp_path)
-    config.defaults.approval_mode = "full-auto"
+    config.agent.approval_mode = "full-auto"
     daemon = Daemon(config)
 
     with pytest.raises(AutonomyRefused):
@@ -197,7 +212,7 @@ def test_a_daemon_refuses_to_bind_in_full_auto(
 # ---- runner: approval correlation -----------------------------------------------
 
 
-async def build_runner(config: GatewayConfig, sandbox: Path, gateway: Any) -> SessionRunner:
+async def build_runner(config: Config, sandbox: Path, gateway: Any) -> SessionRunner:
     daemon = Daemon(config, gateway=gateway)
     return await daemon.create_session(cwd=sandbox)
 
@@ -301,17 +316,20 @@ async def test_an_open_request_is_replayed_to_whoever_attaches_next(
 class Harnessed:
     """A daemon on a real unix socket plus a connected client, torn down together."""
 
-    def __init__(self, config: GatewayConfig, gateway: RecordingGateway) -> None:
+    def __init__(self, config: Config, gateway: RecordingGateway, **overrides: Any) -> None:
         self.config = config
         self.gateway = gateway
-        self.daemon = Daemon(config, gateway=gateway)  # type: ignore[arg-type]
+        self.daemon = Daemon(config, gateway=gateway, overrides=overrides)  # type: ignore[arg-type]
 
     async def __aenter__(self) -> "Harnessed":
         await self.daemon.start()
         return self
 
     async def client(self) -> DaemonClient:
-        return await DaemonClient.connect(self.config)
+        settings = self.daemon.config.daemon
+        return await DaemonClient.connect(
+            Address(settings.transport, settings.socket, settings.host, settings.port)
+        )
 
     async def __aexit__(self, *_exc: Any) -> None:
         await self.daemon.aclose()
@@ -536,100 +554,98 @@ async def test_an_explicit_max_clients_beats_the_container_default(
 
 
 @asynctest
-async def test_get_config_answers_with_the_daemons_file_and_hides_the_key(
-    tmp_path: Path,
-) -> None:
-    """What `--daemonless` reads instead of the local file, which describes another machine."""
-    config = config_for(tmp_path)
-    config.providers["anthropic"] = ProviderConfig(api_key="sk-secret", api_key_env="ANTHROPIC_API_KEY")
-    config.defaults.model = "claude-sonnet-5"
-    path = tmp_path / "daemon-config.toml"
-    save_config(config, path)
-
+async def test_get_config_answers_with_the_daemons_file_and_hides_the_key(tmp_path: Path) -> None:
+    """What every client reads instead of a local file. A key is reported as present,
+    never sent."""
+    config = config_file(
+        tmp_path,
+        '[model.providers.anthropic]\nprovider = "anthropic"\napi_key = "sk-secret"\nmodel = "claude-sonnet-5"\n',
+    )
     async with Harnessed(config, RecordingGateway([])) as env:
-        env.daemon.config_path = path
         client = await env.client()
         reply = await client.get_config()
 
-        assert reply["path"] == str(path)
-        assert reply["config"]["defaults"]["model"] == "claude-sonnet-5"
-        assert reply["config"]["providers"]["anthropic"]["api_key"] == REDACTED
-        # The env var *name* is not the secret, and it is what diagnoses an
-        # unauthenticated daemon.
-        assert reply["config"]["providers"]["anthropic"]["api_key_env"] == "ANTHROPIC_API_KEY"
+        assert reply["path"] == str(config.path)
+        assert (reply["provider"], reply["model"]) == ("anthropic", "claude-sonnet-5")
+        assert reply["providers"]["anthropic"]["has_key"] is True
+        assert reply["keys_editable"] is True, "a unix socket is this user on this machine"
+        assert "sk-secret" not in str(reply)
+        assert set(reply["libraries"]) == {"openai", "anthropic", "google"}
         await client.aclose()
 
 
 @asynctest
-async def test_set_config_writes_the_daemons_file_and_repoints_routing(
-    sandbox: Path, tmp_path: Path
-) -> None:
-    """The persistent half of `/model`, which `set_meta` is not.
-
-    Three things have to happen together or the change is a lie: the file on the
-    daemon's disk changes (so it survives a restart), the routing tier that was
-    tracking the old default follows (so the session does not route a new model name at
-    the old vendor), and the reply says what the config now *is*.
-    """
-    config = config_for(tmp_path)
-    config.defaults.provider = "anthropic"
-    config.defaults.model = "claude-sonnet-5"
-    config.routing["high"] = RouteConfig(provider="anthropic", model="claude-sonnet-5")
-    path = tmp_path / "daemon-config.toml"
-    save_config(config, path)
-
-    async with Harnessed(config, RecordingGateway([])) as env:
-        env.daemon.config_path = path
+async def test_set_config_writes_the_daemons_file_and_reloads_the_gateway(tmp_path: Path) -> None:
+    """The persistent half of `/model`. Three things together or the change is a lie:
+    the file on the daemon's disk (it survives a restart), the gateway every live
+    session holds (the next call uses it), and a reply saying what the config now *is*."""
+    config = config_file(tmp_path, '[model.providers.openai]\nprovider = "openai"\n')
+    gateway = RecordingGateway([])
+    async with Harnessed(config, gateway) as env:
         client = await env.client()
-        reply = await client.set_config(model="claude-opus-5")
+        reply = await client.set_config(provider="anthropic", model="claude-opus-5", api_key="sk-new")
 
-        assert reply["config"]["defaults"]["model"] == "claude-opus-5"
-        assert reply["config"]["routing"]["high"]["model"] == "claude-opus-5"
-
-        written = load_config(path)
-        assert written.defaults.model == "claude-opus-5"
-        assert written.routing["high"].model == "claude-opus-5"
-        assert env.daemon.config.defaults.model == "claude-opus-5"
+        assert (reply["provider"], reply["model"]) == ("anthropic", "claude-opus-5")
+        written = load_config(config.path)
+        assert written.model.default == "anthropic"
+        assert written.model.providers["anthropic"].key() == "sk-new"
+        assert gateway.reconfigured[-1].default == "anthropic"
         await client.aclose()
 
 
 @asynctest
-async def test_set_config_accepts_only_the_four_defaults(tmp_path: Path) -> None:
-    """A terminal that could rewrite a key would repoint a fleet from the wrong tab."""
-    config = config_for(tmp_path)
-    config.providers["anthropic"] = ProviderConfig(api_key="sk-original")
-    path = tmp_path / "daemon-config.toml"
-    save_config(config, path)
-
-    async with Harnessed(config, RecordingGateway([])) as env:
-        env.daemon.config_path = path
-        client = await env.client()
-        # Sent by hand: the typed client has no way to express this, which is the point.
-        client._send(  # noqa: SLF001 — speaking the protocol is what is under test
-            {
-                "type": "set_config",
-                "defaults": {"model": "claude-opus-5", "api_key": "sk-stolen"},
-            }
-        )
-        reply = await client._request({"type": "get_config"}, "config")  # noqa: SLF001
-
-        assert reply["config"]["defaults"]["model"] == "claude-opus-5"
-        assert load_config(path).providers["anthropic"].api_key == "sk-original"
-        await client.aclose()
+async def test_a_key_is_refused_over_tcp(tmp_path: Path) -> None:
+    """A daemon reached over the network cannot tell who is asking. A typed key from
+    the wrong tab would repoint a fleet."""
+    config = config_file(
+        tmp_path, '[model.providers.openai]\nprovider = "openai"\napi_key = "sk-original"\n',
+        **{"daemon.transport": "tcp"},
+    )
+    daemon = Daemon(config, gateway=RecordingGateway([]))  # type: ignore[arg-type]
+    with pytest.raises(PermissionError, match="unix socket"):
+        await daemon.set_config(SetConfig(api_key="sk-stolen"))
+    assert load_config(config.path).model.providers["openai"].key() == "sk-original"
+    assert daemon.config_frame().keys_editable is False
 
 
 @asynctest
 async def test_set_config_cannot_smuggle_full_auto_past_the_guard(tmp_path: Path) -> None:
     """Rule 5 has no back door, and a config file is not one either."""
-    async with Harnessed(config_for(tmp_path), RecordingGateway([])) as env:
-        env.daemon.config_path = tmp_path / "daemon-config.toml"
-        save_config(env.daemon.config, env.daemon.config_path)
+    async with Harnessed(config_file(tmp_path), RecordingGateway([])) as env:
         client = await env.client()
-        client._send({"type": "set_config", "defaults": {"approval_mode": "full-auto"}})  # noqa: SLF001
+        await client._fire("set_config", approval_mode="full-auto")  # noqa: SLF001
         frame = await client.next_event(2)
 
         assert frame["type"] == "error" and "container" in frame["message"]
-        assert env.daemon.config.defaults.approval_mode == "auto-edit"
+        assert env.daemon.config.agent.approval_mode == "auto-edit"
+        assert "full-auto" not in env.daemon.config.path.read_text()  # type: ignore[union-attr]
+        await client.aclose()
+
+
+@asynctest
+async def test_a_reload_keeps_this_runs_flags(tmp_path: Path) -> None:
+    """`--mode plan` on the command line must outlive a `/effort` that reloads the file,
+    and must still never be written to it."""
+    flags = {"agent.approval_mode": "plan"}
+    config = config_file(tmp_path, **flags)
+    async with Harnessed(config, RecordingGateway([]), **flags) as env:
+        client = await env.client()
+        await client.set_config(reasoning_effort="high")
+
+        assert env.daemon.config.agent.approval_mode == "plan"
+        assert env.daemon.config.agent.reasoning_effort == "high"
+        assert "plan" not in config.path.read_text()  # type: ignore[union-attr]
+        await client.aclose()
+
+
+@asynctest
+async def test_shutdown_over_the_unix_socket_stops_the_daemon(tmp_path: Path) -> None:
+    """What `stcode --restart` sends to a daemon it did not start."""
+    async with Harnessed(config_for(tmp_path), RecordingGateway([])) as env:
+        serving = asyncio.create_task(env.daemon.serve_forever())
+        client = await env.client()
+        await client.shutdown()
+        await asyncio.wait_for(serving, 2)
         await client.aclose()
 
 
@@ -661,7 +677,7 @@ async def test_a_real_tool_gate_reaches_the_client_and_back(
     """The whole chain, not just the correlator: a `write` under `suggest` goes through
     `Tool.invoke` → `Runtime.request_approval` → the runner → the socket → back."""
     config = config_for(tmp_path)
-    config.defaults.approval_mode = "suggest"
+    config.agent.approval_mode = "suggest"
     gateway = RecordingGateway(
         [calls_tool("c1", "write", path="new.txt", content="written"), says("done")]
     )
@@ -693,7 +709,7 @@ async def test_a_real_tool_gate_reaches_the_client_and_back(
 @asynctest
 async def test_denying_reaches_the_tool_as_a_denial(sandbox: Path, tmp_path: Path) -> None:
     config = config_for(tmp_path)
-    config.defaults.approval_mode = "suggest"
+    config.agent.approval_mode = "suggest"
     gateway = RecordingGateway(
         [calls_tool("c1", "write", path="nope.txt", content="x"), says("understood")]
     )
@@ -977,7 +993,7 @@ async def test_info_reports_the_skills_and_paths_the_daemon_can_see(
 ) -> None:
     """In `--daemonless` the terminal cannot answer "which skills are there" for
     itself: the workspace is on the other machine."""
-    async with Harnessed(config_for(tmp_path), RecordingGateway([])) as env:
+    async with Harnessed(config_file(tmp_path), RecordingGateway([])) as env:
         client = await env.client()
         await client.create(cwd=workspace)
         reply = await client.info()
@@ -1105,7 +1121,7 @@ def test_session_usage_of_a_session_that_never_called_anything() -> None:
 
 @asynctest
 async def test_create_session_falls_back_when_cwd_does_not_exist(tmp_path: Path) -> None:
-    config = GatewayConfig()
+    config = Config()
     config.session.dir = tmp_path / "sessions"
     gateway = RecordingGateway([says("hello")])
     daemon = Daemon(config, gateway=gateway)

@@ -5,24 +5,31 @@
 That inversion — daemon first, UI second — is what makes the container story real rather
 than aspirational: moving the agent into a container is a config key, not a rewrite.
 
+The daemon is its own program, `stcode-daemon` (`python -m stcode.core`). `stcode/cli/`
+and `stcode/core/` never import each other: the UI knows the daemon only as a command it
+can start and a socket it can speak JSONL to, which is what lets `core/` be rewritten in
+another language without touching the UI. → [decision 0006](../decisions/0006-cli-and-core-are-separate-programs.md)
+
 ```py
 async with Daemon(config) as daemon:          # binds; `full-auto` refuses here
-    await daemon.serve_forever()
+    await daemon.serve_forever()              # until stop(), SIGTERM, or `shutdown`
 
-async with await DaemonClient.connect(config) as client:
+# stcode/cli/services/client.py — the other end, sharing only the wire format
+async with await DaemonClient.connect(Address()) as client:
     await client.create(cwd=Path.cwd())
     await client.push("Add rate limiting")
     async for frame in client.events(): ...
 ```
 
-Four modules, one job each:
+Five modules, one job each:
 
 | | |
 | --- | --- |
 | `protocol.py` | the JSONL message shapes — the only thing on the wire |
 | `runner.py` | `SessionRunner`: one live session, its watchers, its parked requests |
-| `server.py` | the socket, the registry, one connection object per client |
+| `server.py` | the socket, the registry, one connection object per client, config reloads |
 | `autonomy.py` | `guard_autonomy` / `in_container` — the `full-auto` rule, as code |
+| `main.py` | `stcode-daemon`: flags, the startup report, signals, exit codes |
 
 ## The three shapes
 
@@ -32,9 +39,21 @@ stcode --headless     # the daemon alone — what a container runs
 stcode --daemonless   # the UI alone, attached to a daemon elsewhere
 ```
 
-No implementation switches between them. `--daemonless` never starts an agent locally: if
-nothing answers it asks *which daemon?* rather than quietly running the work on your
-laptop. `/connect` moves a running UI to a different one.
+No implementation switches between them. `--headless` replaces the `stcode` process
+with `stcode-daemon`. Plain `stcode` connects to `~/.stcode/daemon.sock` (or the address
+its flags name); if nothing answers, `cli/services/launcher.py` starts `stcode-daemon` on that
+address as a subprocess, logging to `~/.stcode/daemon.log`, and stops it again when the
+UI exits. A daemon it *found* is left running — quitting is a detach. `stcode --restart`
+sends `shutdown` to whatever is listening first, for a daemon that is wedged or running
+old code.
+
+`--daemonless` never starts an agent locally: if nothing answers it asks *which
+daemon?* rather than quietly running the work on your laptop. `/connect` moves a running
+UI to a different one.
+
+`stcode-daemon` exits `0` when stopped, `2` when rule 5 refuses `full-auto`, and `1` for
+anything else that stopped it starting. The launcher shows the tail of the log in the
+last two cases, so the user reads the reason rather than "connection refused".
 
 ### Workspace and CWD ownership
 
@@ -63,8 +82,9 @@ Client → Daemon
 {"type":"set_mode","mode":"auto-edit"}
 {"type":"set_meta","model":"claude-opus-5","reasoning_effort":"high"}
 {"type":"info"}                                     → skills, MCP servers, paths
-{"type":"get_config"}                               → this daemon's config, keys redacted
-{"type":"set_config","defaults":{"model":"claude-opus-5"}}  → writes its config.toml
+{"type":"get_config"}                               → this daemon's config, no keys
+{"type":"set_config","provider":"work","model":"gpt-5","api_key":"…"}  → writes its config.toml
+{"type":"shutdown"}                                 # unix socket only
 {"type":"approval","execution_id":"ab12","approved":true}
 {"type":"answer","execution_id":"cd34","text":"Postgres"}
 
@@ -76,7 +96,7 @@ Daemon → Client
 {"type":"question","execution_id":"cd34","question":"…","options":[…]}
 {"type":"history","records":[…]}                    # replay on re-attach, raw records
 {"type":"info","skills":[…],"mcp":[…],"config_path":"…"}
-{"type":"config","path":"…","config":{…},"writable":true}  # answer to get/set_config
+{"type":"config","path":"…","provider":"…","model":"…","providers":{…},…}  # get/set_config
 {"type":"progress","text":"…"}                      # advisory; nothing is recorded
 {"type":"text_delta","text":"…","agent":"api-scout"} # a sub-agent's, same frame
 {"type":"turn_finished","usage":{…}}                # the full four-field Usage
@@ -158,54 +178,37 @@ abandoned session for as long as it runs. With it, a client that connects, looks
 and leaves holds nothing open. A session that has written a record is never dropped:
 detach does not kill the agent, and that rule has no exceptions.
 
-## Reconfiguring one that is already running
+## Configuration over the socket
 
-`Daemon.reconfigure(config)` swaps the config and hands the new providers, routing and
-retry policy to the gateway **in place**, leaving every session alone.
-
-In place matters because of who holds what: a `/model` that pastes a new key or points a
-base URL at a different endpoint has to reach the session that is running *now*, and
-that session's `Agent` holds the gateway object rather than this daemon. Building a
-fresh gateway here would leave the running turn streaming against the old credentials
-until it ended. → [providers.md](providers.md#changing-the-configuration-under-a-running-agent)
-
-What it deliberately does not do is restart anything. `[daemon]` and `[session]`
-describe a socket that is already bound and a directory transcripts are already being
-written to; changing either is a restart, not a reload.
-
-It is also called for a client that **started this daemon** — the TUI in its default
-shape, handing over a key typed into the setup screen — and by `set_config`, which is the
-same reload reached from a terminal somewhere else.
-
-## `get_config` / `set_config` — the remote half of `/model`
-
-A `--daemonless` terminal shows settings that belong to the daemon's machine, so it has
-to ask for them rather than read its own file. Two messages:
+The daemon is the only thing that reads or writes `config.toml`. Every client — the UI
+that started it as much as a terminal attached from elsewhere — asks for it:
 
 | | |
 | --- | --- |
-| `get_config` | the whole `GatewayConfig` as the daemon holds it, plus the path it was loaded from. Every `api_key` is replaced with `"***"` before it goes on the wire |
-| `set_config` | a patch, and **only `[defaults]`**: `provider`, `model`, `reasoning_effort`, `approval_mode`. Anything else in the frame is ignored |
+| `get_config` | a `config` frame: the file's path on **the daemon's** disk, whether it is writable, whether keys may be sent, the default provider entry and model, effort, mode, every provider entry with `has_key` instead of its key, and the libraries a new entry can use |
+| `set_config` | a patch of `provider`, `model`, `api_key`, `reasoning_effort`, `approval_mode`. Answered with a `config` frame whether or not it was accepted |
 
-`set_config` does three things, in order, and reports the result with the same `config`
-frame `get_config` answers with:
+`provider` names a `[model.providers]` entry, or a library name, which creates that
+entry; it becomes `[model] default`. `model` and `api_key` apply to that entry.
 
-1. folds the patch into `[defaults]`, and repoints any routing tier that was tracking
-   the old default model — the same rule `apply_provider_settings` uses locally, so
-   `/model` does not leave the session routing a new model name at the old vendor;
-2. `save_config()` to the daemon's own path, which is what makes the change survive a
-   container restart;
-3. `reconfigure()`, so the gateway the running agent is already holding gets the new
-   routing without a reconnect.
+`Daemon.set_config` does three things, in order:
 
-**Why `[defaults]` and nothing else.** The socket is the access control, and it is one
-boundary, not a graduated one: a client that can drive an agent with your privileges can
-already do most things. But a key, a `base_url` or a concurrency cap is not a property
-of the conversation — it is how the operator provisioned the container, and it is
-usually an environment variable rather than a value in the file at all. Letting a
-terminal rewrite those means a `/model` on the wrong tab silently repoints a fleet at a
-different endpoint. So they travel one way only: the daemon shows them, redacted, and
-does not accept them back.
+1. `update_config()` patches those keys in the file — comments survive, and a patch that
+   would not load is refused before anything is written;
+2. `reload()` re-reads the file with this process's command-line overrides on top,
+   keeping `[daemon]` as bound — the socket is already open;
+3. hands the new `[model]` to the gateway **in place** and the new default effort to
+   every live agent.
+
+In place matters because of who holds what: a key typed into `/model` has to reach the
+session that is running *now*, and that session's `Agent` holds the gateway object
+rather than this daemon. → [providers.md](providers.md#changing-the-configuration-under-a-running-agent)
+
+**Keys only over the unix socket.** A unix socket is chmod 0600: whoever connects is
+this user on this machine. A TCP client could be anyone who can reach the port, and a
+key typed into the wrong tab would repoint a fleet. So `api_key` — and `shutdown` — are
+refused over TCP, and `keys_editable` in the frame tells the UI to disable the field
+rather than offer an edit that will fail. Keys never travel the other way at all.
 
 `guard_autonomy` runs on an `approval_mode` arriving this way, exactly as it does on
 `set_mode`. A config file is not a door around rule 5.
@@ -257,10 +260,14 @@ control (the socket is chmod 0600; anyone who can open it can drive an agent wit
 privileges). `tcp` for a container, which has no host filesystem to put a socket on. Same
 JSONL framing either way, so a WebSocket adapter later is an adapter, not a protocol.
 
-**Transport is configuration, not architecture.** If a feature needs to know which one is
-in use, it is in the wrong layer.
+**Transport is configuration, not architecture.** The one thing that reads it is
+`Daemon.local_only`, which decides what only this machine's user may do — send a key,
+stop the daemon. Anything else that needs to know is in the wrong layer.
 
 ## Shutdown
+
+`serve_forever()` returns when `stop()` is called — by a SIGTERM or SIGINT handler, or by
+a `shutdown` message over the unix socket. `aclose()` then tears down.
 
 Order is load-bearing and not the obvious one: `Server.wait_closed()` waits for every
 *handler*, not just the listening socket, so closing the server while a client is

@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from stcode.core.harness.approvals import ApprovalMode
+from stcode.core.configs import ApprovalMode
 
 SANDBOX_ENV = "STCODE_SANDBOX"
 """Set to 1 in the image (§9.4). The escape hatch for a container runtime we cannot

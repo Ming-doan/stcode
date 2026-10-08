@@ -13,8 +13,10 @@ instead of rediscovering them.
 | [0001](0001-tool-search.md) | Load tool definitions on demand | **Rejected**, with a narrower alternative |
 | [0002](0002-file-and-image-input.md) | Files and images as model input | **Accepted**, not yet built |
 | [0003](0003-what-the-tui-owns.md) | What the TUI is allowed to own | **Accepted** |
-| [0004](0004-what-a-remote-client-may-change.md) | What a remote client may change | **Accepted** |
+| [0004](0004-what-a-remote-client-may-change.md) | What a remote client may change | **Accepted**, partly superseded by 0006 |
 | [0005](0005-an-agent-is-a-config-file.md) | An agent profile is a config file | **Accepted** |
+| [0006](0006-cli-and-core-are-separate-programs.md) | The UI and the engine are separate programs | **Accepted** |
+| [0007](0007-cli-layers.md) | Separate CLI presentation, workflows and I/O | **Accepted** |
 
 ## Writing one
 

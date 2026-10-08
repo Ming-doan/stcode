@@ -1,8 +1,7 @@
 """
 Approval modes — how much the agent may do without asking.
 
-Owns the *vocabulary* and its ordering, nothing about how it is shown; the help text and
-colours live in `stcode/cli/labels.py`.
+The vocabulary is `core/configs.py`'s; this module owns what each mode permits.
 
 `ToolPermission` and the policy below are the enforcement half: a tool declares its
 class of side effect once, at definition, and this module — not the tool — decides
@@ -12,32 +11,9 @@ whether that class runs unattended under the current mode.
 from __future__ import annotations
 
 from stcode.core.common.compat import StrEnum
-from typing import Literal
-
-ApprovalMode = Literal["plan", "suggest", "auto-edit", "full-auto"]
-
-# Ordered least- to most-permissive. `/mode` cycles through this tuple.
-APPROVAL_MODES: tuple[ApprovalMode, ...] = ("plan", "suggest", "auto-edit", "full-auto")
+from stcode.core.configs import APPROVAL_MODES, ApprovalMode  # noqa: F401 — re-exported
 
 DEFAULT_APPROVAL_MODE: ApprovalMode = "suggest"
-
-def next_approval_mode(current: ApprovalMode) -> ApprovalMode:
-    """The next mode in `APPROVAL_MODES`, wrapping around at the end."""
-    try:
-        index = APPROVAL_MODES.index(current)
-    except ValueError:
-        return DEFAULT_APPROVAL_MODE
-    return APPROVAL_MODES[(index + 1) % len(APPROVAL_MODES)]
-
-
-def parse_approval_mode(value: str) -> ApprovalMode | None:
-    """Resolve a user-typed mode name (`/mode auto`) to a mode, by exact name or unique
-    prefix. Returns None when it matches nothing or is ambiguous."""
-    normalized = value.strip().lower().replace("_", "-")
-    if normalized in APPROVAL_MODES:
-        return normalized  # type: ignore[return-value]
-    matches = [mode for mode in APPROVAL_MODES if mode.startswith(normalized)]
-    return matches[0] if len(matches) == 1 and normalized else None
 
 
 class ToolPermission(StrEnum):
