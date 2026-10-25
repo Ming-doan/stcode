@@ -1,72 +1,44 @@
 # Approval modes
 
-Four modes, one axis: **how much the agent may do without asking you.**
+Choose how much the agent can do without asking you. The default is `suggest`.
 
-| Mode | Reads | Edits | Commands |
-| --- | --- | --- | --- |
-| `plan` | yes | **forbidden** | **forbidden** |
-| `suggest` | yes | asks every time | asks every time |
-| `auto-edit` | yes | yes | asks every time |
-| `full-auto` | yes | yes | yes |
+| Mode | Read files | Edit files | Run commands or Python | Web access |
+| --- | --- | --- | --- | --- |
+| `plan` | Allowed | Unavailable | Unavailable | Asks |
+| `suggest` | Allowed | Asks | Asks | Asks |
+| `auto-edit` | Allowed | Allowed | Asks | Allowed |
+| `full-auto` | Allowed | Allowed | Allowed | Allowed |
 
-Change it with ++shift+tab++, `/mode <name>`, or `--mode` for one run. It takes effect
-on the **live** session — the harness holds the mode and the tool list is rebuilt for
-each request, so the next model call sees the new one.
+Use `plan` to explore a change, `suggest` to review proposed actions, or `auto-edit`
+when you want file edits to proceed while you approve execution. MCP calls follow
+the execution setting, including tools offered by remote servers.
 
-A tool already in flight is not affected. That call was gated under the mode in force
-when it started, and changing the rules underneath a running command is worse than
-waiting for it.
+## Change modes
 
-## `plan` is not just "suggest with more asking"
+Use `/mode` to choose, or set a mode directly:
 
-In `plan` the write tools are **not advertised at all**. Being offered a capability and
-then refused it wastes a turn and reads, to the model, like a bug to work around. The
-prompt changes too: `plan` mode gets a prompt about researching and proposing, not
-about making changes.
-
-The prompt and the permission gate derive the mode from the same function, so they
-cannot disagree.
-
-## `full-auto` and the container rule
-
-!!! danger "`full-auto` without an approver runs only inside a container"
-
-    The daemon **refuses to start**. There is no override flag. This is code
-    (`core/daemon/autonomy.py`), not a warning in a document.
-
-The reasoning is not about trust, it is about blast radius. `full-auto` means the agent
-runs commands with the daemon's privileges and nobody is asked. That is a reasonable
-thing to want — it is how team mode works at all — and an unreasonable thing to allow
-on a laptop with an SSH key in it.
-
-A container is a real boundary, so the rule is: prove the boundary exists.
-
-```bash
-docker run -e STCODE_SANDBOX=1 … stcode --headless --mode full-auto
+```text
+/mode plan
 ```
 
-`STCODE_SANDBOX=1` is what a container sets. The guard also runs **per session**, not
-just per daemon: a `full-auto` session on a `suggest` daemon is the same hole, so
-`/mode full-auto` on a host daemon is refused too, and the client is told the mode did
-not change rather than left showing one that was rejected.
+**Shift+Tab** cycles the available modes. You can also open a session with a mode:
 
-## Which mode to use
+```bash
+stcode --mode auto-edit
+```
 
-| Situation | Mode |
-| --- | --- |
-| A change you have not scoped yet | `plan` |
-| Normal work on code you care about | `suggest` |
-| A refactor across many files, tests you trust | `auto-edit` |
-| A container doing a job you already specified | `full-auto` |
+The change applies to subsequent operations. It does not cancel an operation
+already running; press **Esc** to interrupt the current turn.
 
-## When nobody is attached
+## Answer an approval
 
-A headless daemon in `suggest` mode with no client attached cannot ask anyone. Rather
-than claiming the user refused — which a model would believe and act on — the tool is
-told:
+Review the operation shown above the prompt. Press **y** to approve or **n** to
+deny. If you deny an action, you can send a follow-up explaining how to proceed.
 
-> No client is attached to this session, so there is nobody to approve `bash`. Continue
-> with what you can decide yourself and state the assumption you made.
+## Unattended work
 
-That distinction matters: "the user said no" and "there was no user" should not produce
-the same behaviour.
+The CLI requires a container environment for `full-auto`. Use the provided Docker
+image for unattended work; see [Local and remote work](shapes.md).
+
+A session using an approval-based mode needs an attached client to approve actions.
+Leaving the terminal does not grant permission to execute pending operations.

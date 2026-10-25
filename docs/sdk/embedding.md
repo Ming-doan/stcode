@@ -1,136 +1,100 @@
-# Embedding an agent
+# Python SDK
 
-Everything the TUI does is available in-process. There is no separate SDK — `Agent` is
-the API.
+Use stcode from Python to run coding tasks in a script, notebook, or application.
+Install the package in your application's environment:
 
-## One turn
+```bash
+pip install stcode
+```
+
+Set up a provider using the [configuration guide](../getting-started/configuration.md).
+The examples below use that same configuration and your exported API credentials.
+
+## Run a task
 
 ```python
 import asyncio
 
-from stcode.core.agent import Agent, TurnFinished
+from stcode.core.agent import Agent
 from stcode.core.configs import load_config
 
 
 async def main() -> None:
     config = load_config(create_if_missing=True)
-    async with await Agent.create(config, cwd="~/projects/api") as agent:
-        async for event in agent.run("What does src/util.py do?"):
-            if isinstance(event, TurnFinished):
-                print(event.text)
-                print(f"{event.usage.input_tokens} in, {event.usage.output_tokens} out")
+    async with await Agent.create(config, cwd=".", approval_mode="plan") as agent:
+        answer = await agent.result("Explain this project and suggest a first test to add.")
+        print(answer)
 
 
 asyncio.run(main())
 ```
 
-`Agent.create` is the assembly point: it builds the gateway, the harness (tools, skills,
-MCP servers, the prompt), and the session, from a loaded `Config` (`core/configs.py`).
+`cwd` selects the workspace. `plan` lets this example inspect files without making
+changes. The asynchronous context manager closes the agent's resources when the
+block exits.
 
-`async with` matters. `aclose()` releases MCP connections, kills background shells, and
-closes the transcript. Without it a subprocess can outlive the event loop and raise at
-interpreter shutdown.
+`result()` returns the final response as text. To distinguish completion from a
+failed or interrupted turn, consume `run()` events as shown in
+[Streaming and sessions](streaming.md).
 
-## Just the answer
+## Handle approvals and questions
 
-```python
-answer = await agent.result("Summarise the retry logic in src/")
-```
-
-## A long-running agent you steer
+Attach callbacks when your application needs a person to approve edits or command
+execution. This complete terminal example uses the `suggest` mode:
 
 ```python
-from stcode.core.agent import Agent, TextDelta, ToolStarted, TurnFinished
+import asyncio
+
+from stcode.core.agent import Agent, AgentFailed, TurnFinished
+from stcode.core.configs import load_config
+from stcode.core.harness.tools.base import ApprovalRequest, Question
+
+
+async def approve(request: ApprovalRequest) -> bool:
+    print(request.tool_name, request.arguments)
+    answer = await asyncio.to_thread(input, "Approve? [y/N] ")
+    return answer.strip().lower() == "y"
+
+
+async def ask(question: Question) -> str:
+    print(question.question)
+    for option in question.options:
+        print(f"- {option}")
+    return await asyncio.to_thread(input, "> ")
 
 
 async def main() -> None:
     config = load_config()
-    async with await Agent.create(config, cwd=".") as agent:
-        await agent.push("Add rate limiting to /v1/search")
+    async with await Agent.create(config, cwd=".", approval_mode="suggest") as agent:
+        agent.attach(on_approval=approve, on_ask=ask, on_progress=print)
+        async for event in agent.run("Add a test for the retry behavior."):
+            if isinstance(event, TurnFinished):
+                print(event.text)
+            elif isinstance(event, AgentFailed):
+                print(f"Task stopped: {event.message}")
 
-        async for event in agent.events():
-            match event:
-                case TextDelta():
-                    print(event.text, end="", flush=True)
-                case ToolStarted():
-                    print(f"\n[{event.name}]")
-                case TurnFinished():
-                    print()
+
+asyncio.run(main())
 ```
 
-`events()` runs queued messages **forever**. `run()` is `push()` then `events()` until
-the first terminal event.
+In a web application, these callbacks can await a reply from your own UI.
+An approval-based mode does not grant permission when no approval handler is
+attached.
 
-!!! warning "One consumer"
+## Add your own tools
 
-    Whoever iterates `events()` drives the loop. Two iterators race for the same queue.
-    Fan out from one, the way the daemon's `SessionRunner` does.
+Pass decorated tools to `agent.attach(tools=[...])`.
+See [Custom tools](custom-tools.md) for a runnable example.
 
-## The events
+## Tracing
 
-| Event | Meaning |
-| --- | --- |
-| `TextDelta` | assistant text, as it streams |
-| `ReasoningDelta` | the model's deliberation — never sent back as history |
-| `ToolStarted` / `ToolFinished` | a tool call, with a 240-char preview of its result (`todo_write` carries the full result) |
-| `SupervisorNudge` | a loop was spotted and the agent was redirected |
-| `TurnFinished` | **the only stop condition** — the model replied without calling a tool |
-| `AgentFailed` | the ceiling, a provider error, or an interrupt |
-
-## Steering and interrupting
+The SDK uses the same [tracing configuration](../guide/tracing.md) as the terminal.
+If you enable tracing in a short-lived script, flush pending exports before the
+process exits:
 
 ```python
-await agent.push("Actually, use a token bucket.")   # lands at the next tool boundary
-await agent.interrupt()                              # stops at the next checkpoint
+from stcode.core.common import trace
+
+# At the end of your async main(), after closing the agents:
+await asyncio.to_thread(trace.shutdown)
 ```
-
-A `push` arriving mid-turn is delivered after the current round of tool results and
-before the next request — never spliced into the model call in flight. That is the only
-place a `user` message is legal: a `tool_use` block without its matching `tool_result`
-is a 400 on the following request.
-
-## Wiring in callbacks and your own tools
-
-```python
-agent = (await Agent.create(config, cwd=".")).attach(
-    on_approval=my_approver,     # async (ApprovalRequest) -> bool
-    on_ask=my_question_handler,  # async (Question) -> str
-    on_progress=print,           # (str) -> None | Awaitable[None]
-    tools=[deploy, rollback],    # Tool objects, or factories taking the agent
-)
-```
-
-`attach` returns the agent, so it chains onto `Agent.create(...)`. It is the one method
-a host needs — a daemon supplies three callbacks, a notebook supplies none, an
-application supplies its own tools, and all of it is the same few assignments.
-
-## Driving the harness directly
-
-For tools without a model in the loop:
-
-```python
-from stcode.core.harness import Harness
-
-harness = await Harness.create(cwd=".", approval_mode="auto-edit")
-result = await harness.invoke("grep", {"pattern": "retry", "path": "src"})
-print(result.content)
-```
-
-Or make the runtime ambient, so tools can be called as plain functions:
-
-```python
-with harness.bind():
-    print(await read("src/util.py"))
-```
-
-## Resuming
-
-```python
-from stcode.core.session import Session
-
-session = Session.resume("01HXZ8Q2K3M4N5P6R7S8T9V0W1")
-agent = await Agent.create(config, cwd=".", session=session)
-```
-
-Opening a session file means **adopting** it. The agent's history is the conversation
-that happened, not an empty one appended to an old transcript.

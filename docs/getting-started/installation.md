@@ -1,27 +1,35 @@
 # Installation
 
-## Requirements
+You need Python 3.10 or newer, a terminal, and credentials for a supported model
+provider. Use Linux or macOS for local work; the container examples require Docker.
 
-| | |
-| --- | --- |
-| Python | 3.10 or newer |
-| [uv](https://docs.astral.sh/uv/) | used for everything — running, locking, syncing |
-| Docker | only for [team mode](../teams/setup.md) |
-
-`ripgrep` is **not** a system requirement. It arrives as a pip wheel that drops `rg`
-next to the interpreter, so `grep` works on a fresh checkout with nothing installed
-system-wide. `fd` is used if present and skipped if not.
-
-## Install
-
-From PyPI, as a standalone tool with its own environment:
+## Install with uv
 
 ```bash
-uv tool install stcode            # or: pipx install stcode
-stcode
+uv tool install stcode
+stcode --version
 ```
 
-From a checkout, to work on stcode itself:
+If you do not have uv, follow its [installation guide](https://docs.astral.sh/uv/getting-started/installation/).
+To try stcode without a permanent tool installation:
+
+```bash
+uvx stcode
+```
+
+## Install with pip
+
+In an activated Python environment:
+
+```bash
+pip install stcode
+stcode --version
+```
+
+The package includes the search dependency; you do not need to install ripgrep
+separately.
+
+## Run from source
 
 ```bash
 git clone https://github.com/Ming-doan/stcode
@@ -30,37 +38,15 @@ uv sync
 uv run stcode
 ```
 
-### Tracing
+When running from this checkout, prefix the `stcode` commands in these docs with
+`uv run`.
 
-Tracing uses the included HTTP client; no extra installation is needed.
-
-Tracing is off by default and starts its HTTP worker only when enabled. → [Tracing](../guide/tracing.md)
-
-Build the documentation with `uv sync --group docs` and `uv run mkdocs build`.
-
-## Credentials
-
-stcode reads an API key from the environment or from its config file, and the
-environment wins whenever it is set.
+## Update
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-…
-# or OPENAI_API_KEY, or GEMINI_API_KEY
+uv tool upgrade stcode
+# Or, in the environment where you installed with pip:
+pip install --upgrade stcode
 ```
 
-`.env` files are loaded too, most specific first: `./.env`, then `~/.stcode/.env`. Real
-process environment variables beat both.
-
-If you would rather not manage environment variables, the first-run setup screen will
-take a key and write it into `~/.stcode/config.toml`, which is created mode `0600` for
-that reason.
-
-## Check it worked
-
-```bash
-uv run stcode config     # where config lives and what it selects
-uv run pytest            # 240-odd tests, no network
-```
-
-The test suite does not call a real provider. The handful of tests that do are marked
-`live` and deselected by default. → [Testing](../contributing/testing.md)
+Continue with the [quickstart](quickstart.md) to choose a provider and open a project.

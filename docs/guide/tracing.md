@@ -1,20 +1,28 @@
 # Tracing
 
-Send agent turns, model calls and tool calls directly to Langfuse or Phoenix using
-HTTP JSON APIs. No OpenTelemetry collector, exporter, or provider SDK is required.
-Tracing is off by default.
+Review agent turns, model calls, tool activity, and token usage in Langfuse or
+Phoenix. Tracing is optional and off by default. No extra Python package is needed.
+
+## Connect Langfuse
+
+Add this to `config.toml`:
 
 ```toml
 [trace]
 enabled = true
 provider = "langfuse"
 url = "https://cloud.langfuse.com"
-# public_key = "pk-lf-..."
-# secret_key = "sk-lf-..."
+public_key = "${LANGFUSE_PUBLIC_KEY}"
+secret_key = "${LANGFUSE_SECRET_KEY}"
 content = false
 ```
 
-Or use Phoenix (the project must already exist):
+Export the keys from your Langfuse project before starting stcode. Use your own
+base URL for a regional or self-hosted deployment.
+
+## Connect Phoenix
+
+Create a project in Phoenix, then use its name and base URL:
 
 ```toml
 [trace]
@@ -22,78 +30,42 @@ enabled = true
 provider = "phoenix"
 url = "http://localhost:6006"
 project_name = "stcode"
-# api_key = "..."  # omit for a local server without authentication
+api_key = "${PHOENIX_API_KEY}"
 content = false
 ```
 
-`url` is the application base URL, including any deployment path prefix, without an
-ingestion path. Credentials can be literal values in `config.toml` or process
-environment variables. Nonempty environment values take precedence over config:
+A local Phoenix instance without authentication does not need `api_key`. Your
+Phoenix server must support its project spans REST API.
 
-| Provider | Environment variables |
+## Environment configuration
+
+Configured values take precedence. When a setting is omitted, these variables
+provide defaults:
+
+| Provider | Variables |
 | --- | --- |
-| Langfuse | `LANGFUSE_BASE_URL` (or `LANGFUSE_HOST`), `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` |
+| Langfuse | `LANGFUSE_BASE_URL` or `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` |
 | Phoenix | `PHOENIX_COLLECTOR_ENDPOINT`, `PHOENIX_API_KEY`, `PHOENIX_PROJECT_NAME` |
 
-The default URLs are `https://cloud.langfuse.com` and `http://localhost:6006`.
-Phoenix defaults to project `default`. `service_name` defaults to `stcode`.
-The application never loads `.env` files. Export variables in the launching process
-or put values in `config.toml`. Test runners may explicitly read test credentials.
+Export variables in the process that starts stcode. `.env` files are not loaded
+automatically. After changing tracing settings, restart the service to apply them;
+wait for current work to finish first.
 
-## What you get
+## Choose what to record
 
-Each `agent.turn <name>` is a trace containing `chat <model>` generations and
-`execute_tool <name>` spans. Model names, input/output token counts, timestamps,
-parent IDs and errors are mapped to each provider's JSON schema. Session
-`usage` records contain the same `trace_id` so the dashboard and transcript can be joined.
+With `content = false`, traces include activity metadata, model names, timing,
+token usage, and error types. Prompt text, replies, and tool inputs and results
+are omitted. Set `content = true` to include them when you want to inspect a
+conversation in detail. This sends that content to your chosen tracing service.
 
-`content = true` includes agent inputs/replies, model messages and tool inputs/results.
-The default `false` leaves that content out. Error descriptions include only the
-exception type when content recording is disabled.
+## Review a run
 
-A bounded background queue sends completed spans without blocking the agent loop.
-Retryable HTTP failures and connection failures are attempted up to three times.
-Langfuse requests with an ambiguous transport failure (such as a read timeout) are
-not replayed: v4 does not guarantee deduplication. Partial rejections are not retried.
-Permanent failures and queue overflow log warnings without failing the agent. Warnings never include keys or response bodies.
-For embedded use, call `trace.shutdown()` at process exit (or
-`await asyncio.to_thread(trace.shutdown)` from async code) to drain pending spans.
-`trace.flush()` returns whether all exports since configuration succeeded; this confirms
-HTTP ingestion, while dashboard visibility may follow shortly afterward.
+Run a task, then open your tracing dashboard. Find the agent turn and inspect its
+model calls and tools. In Langfuse's observations view, filter to root observations
+to find individual turns, then open one to explore its activity.
 
-## API compatibility
+If nothing appears, check the service URL, credentials, project, and network
+access from the machine running stcode. Trace export problems are reported in
+service logs and do not stop coding tasks.
 
-Langfuse uses `POST /api/public/otel/v1/traces` with OTLP/HTTP JSON, Basic
-authentication, and `x-langfuse-ingestion-version: 4`. This selects Langfuse's
-[real-time v4 ingestion path](https://langfuse.com/integrations/native/opentelemetry).
-The existing `httpx` client sends the JSON directly; no collector or SDK is needed.
-The application base URL and credential settings above remain the same.
-
-Each turn has exactly one root `agent` observation, with `generation` and `tool`
-children sharing its trace ID. Overall input/output live on the root. Trace name,
-session ID and turn metadata are included on the children for v4 filtering. The
-[observations table](https://langfuse.com/faq/all/explore-observations-in-v4) shows
-all spans as rows; set **Is Root Observation = true** to see one row per turn and
-open it to inspect the hierarchy. Legacy records already stored in Langfuse are
-not rewritten by this change.
-
-Phoenix uses `POST /v1/projects/{project_name}/spans` with Bearer authentication and
-native JSON spans ([server API contract](https://github.com/Arize-ai/phoenix/blob/main/src/phoenix/server/api/routers/v1/spans.py)).
-The server must provide this REST endpoint and the project must exist.
-Old `[trace] endpoint/headers` OTLP settings must be replaced with the provider
-configuration above.
-
-→ [Tracing (architecture)](../architecture/tracing.md)
-
-## Live acceptance test
-
-Export the variables above plus `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`, and
-`STCODE_TRACE_TEST_MODEL` (a tool-capable model served by that endpoint). Run:
-
-```bash
-uv run pytest -m live tests/integration/trace_live_test.py -s
-```
-
-This makes an agent read a synthetic file in a temporary workspace and reply with its
-contents. Each provider's trace ID and session ID are printed for dashboard review.
-The test deliberately enables content recording and never reads `.env` itself.
+For local usage totals without a tracing service, use `/token` in the terminal.

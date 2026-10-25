@@ -1,137 +1,89 @@
-# Writing a tool
+# Custom tools
+
+Give an embedded agent a Python function it can call. The `@tool` decorator uses
+your type hints and docstring to describe the function and its arguments.
+
+## Create and attach a tool
+
+This example adds a project-specific service lookup:
 
 ```python
-from typing import Annotated
+import asyncio
 
-from pydantic import Field
-
+from stcode.core.agent import Agent
+from stcode.core.configs import load_config
 from stcode.core.harness.approvals import ToolPermission
-from stcode.core.harness.context import HarnessContext
-from stcode.core.harness.tools.base import Runtime, ToolError, tool
+from stcode.core.harness.tools.base import ToolError, tool
+
+SERVICES = {"api": "Handles search requests", "worker": "Processes background jobs"}
 
 
-@tool(permission=ToolPermission.EXECUTE)
-async def deploy(
-    service: str,
-    environment: str = "staging",
-    wait: Annotated[int, Field(ge=0, le=600)] = 120,
-    runtime: Runtime[HarnessContext] = None,  # type: ignore[assignment]
-) -> str:
-    """Deploy one service and wait for it to come up.
-
-    Deploys the current `main` of `service`. There is no rollback in this tool — if the
-    deploy is bad, use `rollback`.
+@tool(permission=ToolPermission.READ)
+async def service_info(name: str) -> str:
+    """Look up a service in the project's service catalog.
 
     Args:
-        service: The service to deploy, as named in `infra/services.yaml`.
-        environment: `staging` or `production`.
-        wait: Seconds to wait for health checks. 0 returns immediately.
+        name: Service name, such as api or worker.
     """
-    await runtime.progress(f"deploying {service} to {environment}…")
-    ...
-    return f"{service} is up in {environment}."
+    if name not in SERVICES:
+        raise ToolError(f"Unknown service {name!r}. Choose from: {', '.join(SERVICES)}.")
+    return SERVICES[name]
+
+
+async def main() -> None:
+    config = load_config()
+    async with await Agent.create(config, cwd=".", approval_mode="plan") as agent:
+        agent.attach(tools=[service_info])
+        print(await agent.result("Use service_info to explain what the worker does."))
+
+
+asyncio.run(main())
 ```
 
-## Three rules
+Use a specific name and explain when the tool is useful. Add an `Args:` section
+for parameters. Raise `ToolError` for a problem the agent can respond to, such as
+an unknown service or unavailable record.
 
-### The signature is the schema; the docstring is the description
+## Choose a permission
 
-Both are read off the function, so a tool's interface cannot drift from its code. The
-`Args:` section becomes each parameter's description, and `Annotated[..., Field(...)]`
-becomes its JSON Schema constraints.
-
-!!! important "The docstring is the prompt"
-
-    Write it for the model: imperative, concrete, no rationale. Say what it does, when
-    to use it, and what it will refuse. Rationale — why this tool exists, why it works
-    this way — goes in comments, where the model does not pay for it every turn.
-
-### `Runtime` is the parameter the model cannot see
-
-cwd, approval mode, cancellation, progress callbacks, the output store. It is injected
-at call time and filtered out of the schema. A model that can see `approval_mode` is a
-model that will try to set it.
-
-```python
-runtime.context.cwd                     # the session's working directory
-runtime.context.resolve(path)           # scope-checked absolute path
-runtime.raise_if_cancelled()            # cooperate with ++esc++
-await runtime.progress("still going…")  # a line for the UI; nothing is recorded
-await runtime.ask(Question(...))        # up to four options, put to the human
-```
-
-### A tool never decides its own permissions
-
-It declares a `ToolPermission` once. [Approval modes](../guide/approval-modes.md)
-decide what that means.
-
-Under-claiming asks too often; over-claiming writes without asking. If risk lives in
-the *argument* rather than the tool — `cat x.py` and `rm -rf build/` both arrive through
-`bash` — narrow it per call:
-
-```python
-@tool(permission=ToolPermission.EXECUTE, permission_for=classify_command)
-async def run(command: str, runtime: ...) -> str:
-    ...
-```
-
-## Failing
-
-Raise `ToolError` with something the model can act on.
-
-```python
-raise ToolError(
-    f"{target} changed on disk since you read it. Read it again, then decide whether "
-    "your change still applies."
-)
-```
-
-A tool-level failure is a **normal outcome**, not an exception in the loop:
-`Harness.invoke` never raises for one. It comes back as a `ToolResult` with
-`is_error=True`, the model reads it, and the turn continues. An exception escaping
-`invoke` means the harness is broken.
-
-Error text is part of the prompt too. "Invalid argument" tells the model nothing;
-"`old_string` appears 3 times — add surrounding lines until it is unique, or pass
-`replace_all=True` if you mean all of them" tells it exactly what to do next.
-
-## Options
-
-| | |
+| Permission | Appropriate for |
 | --- | --- |
-| `permission` | `READ`, `WRITE` or `EXECUTE`. Default `READ`. |
-| `timeout` | Seconds. `None` inherits the turn's remaining deadline. |
-| `max_output` | Chars the model sees before elision. Default 8192. |
-| `spill` | Whether an over-long result is parked in `tool_out`. Default on. |
-| `permission_for` | Narrows `permission` per call, from validated arguments. |
-| `name` / `description` | Overrides. Prefer renaming the function and writing the docstring. |
+| `READ` | Observing local data |
+| `WRITE` | Creating or changing files |
+| `EXECUTE` | Running commands or arbitrary code |
+| `NETWORK` | Sending requests outside the machine |
+| `INTERACTIVE` | Asking the user for input |
 
-Turn `spill` off only when the output is worthless truncated — a progress echo, a
-confirmation.
+The agent's [approval mode](../guide/approval-modes.md) determines whether a call
+proceeds, asks, or is unavailable. Attach an approval callback for tools that need
+review in your chosen mode; see [Python SDK](embedding.md#handle-approvals-and-questions).
 
-## Registering it
+## Report progress and use the workspace
 
-```python
-agent.attach(tools=[deploy, rollback])
-```
-
-Or, if the tool needs to close over the agent itself, pass a factory that takes it —
-the shape `task` uses.
-
-## Testing it
+A `Runtime` parameter gives the tool access to the workspace and progress reporting.
+It is supplied by stcode rather than requested from the model:
 
 ```python
-from stcode.core.harness import Harness
+from stcode.core.harness.context import HarnessContext
+from stcode.core.harness.tools.base import Runtime
 
-harness = await Harness.create(cwd=tmp_path, approval_mode="full-auto")
-harness.registry.register(deploy)
-harness.allow("deploy")
 
-result = await harness.invoke("deploy", {"service": "api"})
-assert not result.is_error
+@tool(permission=ToolPermission.READ)
+async def project_file_size(
+    path: str,
+    runtime: Runtime[HarnessContext] = None,  # type: ignore[assignment]
+) -> str:
+    """Return the size of a workspace file.
+
+    Args:
+        path: A path inside the current workspace.
+    """
+    target = runtime.context.resolve(path)
+    runtime.raise_if_cancelled()
+    await runtime.progress(f"Checking {path}")
+    size = await asyncio.to_thread(lambda: target.stat().st_size)
+    return f"{path}: {size} bytes"
 ```
 
-Registering is not advertising: `allowed` is a fixed list, so a tool nobody adds to it
-stays registered and invisible.
-
-→ [Testing](../contributing/testing.md)
+Attach this tool with `agent.attach(tools=[project_file_size])`. Use asynchronous
+I/O or `asyncio.to_thread` when a tool performs blocking work.

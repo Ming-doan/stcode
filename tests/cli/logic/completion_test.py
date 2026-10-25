@@ -71,6 +71,15 @@ def test_filtering_ignores_case() -> None:
     assert filter_rows(rows, "mod") == rows
 
 
+def test_unicode_file_mentions_can_be_filtered_without_escaping() -> None:
+    from stcode.cli.labels import file_rows
+
+    text = "Read @tài-liệu"
+    assert token_trigger(text, len(text)) == ("@", "tài-liệu")
+    path = "tài-liệu/日本語.md"
+    assert filter_rows(file_rows([path, "README.md"]), "TÀI-LIỆU") == [(path, "")]
+
+
 def test_every_documented_command_exists_exactly_once() -> None:
     """The guide lists twelve and says they are the whole surface. A thirteenth that
     only exists in code is a command nobody can find."""

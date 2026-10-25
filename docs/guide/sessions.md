@@ -1,87 +1,50 @@
 # Sessions
 
-Every session is one append-only JSONL file.
+A session keeps a conversation and its work history so you can return to it later.
 
-```
-~/.stcode/sessions/01HXZ8Q2K3M4N5P6R7S8T9V0W1.jsonl
-```
+## Resume a conversation
 
-One line per event — including the events the model never sees. It is the model's
-history, the trajectory log and the supervisor's input, all from the same file. There
-is no second logger to keep in sync.
-
-## Working with them
+Open `/sessions` in the terminal, or use the command line:
 
 ```bash
-uv run stcode sessions          # recent sessions, newest first
-uv run stcode --resume 01HX…    # attach live, or read back from disk
+stcode sessions
+stcode --resume SESSION_ID
 ```
 
-In the TUI, `/sessions` shows the same list as a tree — a sub-agent's session sits under
-the session that spawned it, and only a parent can be selected. `/clear` ends the current
-one and starts a fresh one; nothing is erased.
-→ [The TUI](tui.md#sessions-shows-a-tree)
+Use a full ID from the list. If work is still running, you rejoin it. Otherwise,
+stcode restores the conversation so you can continue with a new prompt.
+Sub-agent conversations are grouped beneath their parent in the session picker.
 
-The id is a monotonic ULID: millisecond timestamp, then randomness, base32. It sorts by
-creation time as a plain string, which is why listing sessions needs no index and no
-database — the newest N are the last N filenames.
+## Start fresh
 
-**The file appears on the first message.** Start stcode in the wrong directory and close
-it again and there is nothing to list: the id was minted, the file never was. So the
-sessions you see are the sessions you used.
+Use `/clear` to start a new conversation in the same workspace. Your previous
+session stays available. A session is saved once you send a message; opening and
+closing an empty conversation does not add an entry to the list.
 
-Keeping them with the project instead of in your home directory:
+## Leave and return
+
+`/quit`, **Ctrl+Q**, or closing the terminal disconnects the UI. The background
+service keeps running while the machine is on. Actions that need your approval
+still require an attached client. Restarting the service or shutting down the
+machine stops active work; resume the saved session to continue.
+
+A remote workspace follows the lifecycle of its host or container. Reconnect to
+that same service to find its sessions.
+
+## Storage
+
+Sessions are stored under `~/.stcode/sessions` by default. To use another directory:
 
 ```toml
 [session]
-dir = "./.stcode/sessions"
-keep = 100
+dir = "/path/to/stcode-sessions"
 ```
 
-## Append-only, and that is load-bearing
+The session list belongs to the service you are connected to. In remote mode,
+these files are on the remote machine.
 
-Records are never rewritten. No branch pointer, no fork, no leaf. Not even `/clear` —
-that starts a new session, and the old transcript stays exactly as it was.
+## Review usage
 
-```bash
-cp ~/.stcode/sessions/01HX….jsonl ~/.stcode/sessions/01HY….jsonl
-```
-
-**That is the branching feature.** It is also what makes appending one line safe to do
-synchronously from the agent loop — the single deliberate exception to "no blocking I/O
-in the loop", because ~20µs of buffered write beats the machinery required to avoid it.
-
-## What is in the file
-
-| Record | Seen by the model | Why it exists |
-| --- | --- | --- |
-| `meta` | no | cwd, role, model — what `sessions` lists |
-| `user` | yes | what you asked |
-| `assistant` | yes | what it said |
-| `tool_call` / `tool_result` | yes | folded into the wire format for the next request |
-| `supervisor` | yes | a nudge, rendered as a prefixed user message |
-| `inbox` | yes | a teammate's message, in team mode |
-| `usage` | **no** | token counts, including cache hits |
-| `error` | **no** | a turn that ended badly |
-
-Sending the model its own token counts would be paying to tell it something it cannot
-act on — so `usage` stays for you, and for the supervisor.
-
-## Reading a trajectory
-
-Agent → tool → sub-agent leaves no natural stack trace. This file *is* the stack trace,
-which is why the events the model never sees are kept.
-
-```bash
-jq -r 'select(.type=="tool_call") | "\(.name) \(.arguments)"' session.jsonl
-jq -r 'select(.type=="usage") | .input_tokens, .cache_read_input_tokens' session.jsonl
-```
-
-A non-zero `cache_read_input_tokens` on the second turn is the evidence that prompt
-caching held. That claim is otherwise unverifiable, which is exactly why the number is
-written down. → [Sessions (architecture)](../architecture/session.md)
-
-## Cleaning up
-
-`[session] keep` bounds how many are retained; the oldest beyond it are deleted. Since
-ULID filenames sort by time, "the newest 100" is a slice of a directory listing.
+Use `/token` to see input, output, and cache token usage for the conversation.
+For a visual history of turns, model calls, and tools, enable
+[Langfuse or Phoenix tracing](tracing.md).

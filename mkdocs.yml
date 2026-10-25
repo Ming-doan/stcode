@@ -8,12 +8,11 @@
 #   2. `strict: true`. A broken internal link fails the build. Docs drift silently;
 #      this is the one kind of drift a machine can catch.
 #
-# The contributor pages (architecture, decisions, contributing) are built but kept out
-# of `nav`: user pages still link into them, but a reader browsing the site is not
-# walked through them. `not_in_nav` below is what lets strict mode accept that.
+# Internal engineering notes stay in the repository. `exclude_docs` keeps them out
+# of the published HTML, sitemap and search index, not just the navigation.
 
 site_name: stcode
-site_description: A coding agent that lives in a daemon, and a UI that is a client of it.
+site_description: An open source coding agent for your terminal, remote workspaces, and Python workflows.
 # Served under /docs/ — the landing page (landing/) owns the root. See .github/workflows/pages.yml.
 site_url: https://ming-doan.github.io/stcode/docs/
 repo_url: https://github.com/Ming-doan/stcode
@@ -87,25 +86,26 @@ nav:
       - Quickstart: getting-started/quickstart.md
       - Configuration: getting-started/configuration.md
   - Guide:
-      - The three shapes: guide/shapes.md
-      - The TUI: guide/tui.md
+      - Local and remote work: guide/shapes.md
+      - Terminal UI: guide/tui.md
       - Approval modes: guide/approval-modes.md
       - Sessions: guide/sessions.md
       - Tools: guide/tools.md
       - Skills: guide/skills.md
       - MCP servers: guide/mcp.md
-      - The REPL and tool_out: guide/repl.md
+      - Working with data: guide/repl.md
       - Tracing: guide/tracing.md
   - Teams:
       - Setting one up: teams/setup.md
       - Roles: teams/roles.md
       - How a team works: teams/workflow.md
-  - In code:
-      - Embedding an agent: sdk/embedding.md
-      - Writing a tool: sdk/custom-tools.md
-      - The daemon protocol: sdk/daemon-protocol.md
+  - Python SDK:
+      - Getting started: sdk/embedding.md
+      - Streaming and sessions: sdk/streaming.md
+      - Custom tools: sdk/custom-tools.md
 
-not_in_nav: |
+exclude_docs: |
   /architecture/
   /decisions/
   /contributing/
+  /sdk/daemon-protocol.md

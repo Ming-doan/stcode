@@ -1,510 +1,98 @@
-# The TUI
+# Terminal UI
 
-A [textual](https://textual.textualize.io/) app that is, architecturally, just a client
-of the daemon. Everything it can do is a protocol message.
+Run `stcode` inside a project to open the terminal UI. The conversation occupies
+the main area, with your prompt and a status line below it. The status line shows
+the model, provider, approval mode, and reasoning effort. A working indicator
+appears while the agent is responding.
 
-## The screen
+## Write a prompt
 
-```
-                ███████╗████████╗ ██████╗ ██████╗ ██████╗ ███████╗
-                ██╔════╝╚══██╔══╝██╔════╝██╔═══██╗██╔══██╗██╔════╝
-                ███████╗   ██║   ██║     ██║   ██║██║  ██║█████╗
-                ╚════██║   ██║   ██║     ██║   ██║██║  ██║██╔══╝
-                ███████║   ██║   ╚██████╗╚██████╔╝██████╔╝███████╗
-                ╚══════╝   ╚═╝    ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
-
-────────────────────── session in ~/w/stcode ───────────────────────
-
- you  Add rate limiting to /v1/search
-
- │ The middleware is probably under src/api. Grep before reading.
-
- I'll start with the middleware.
-
-╭──────────────────────────────────────────────────────────────────╮
-│ grep │ pattern=middleware path=src                               │
-│      │ src/api/mw.py:12:def middleware(request):                 │
-╰──────────────────────────────────────────────────────────────────╯
-
-╭─ commands ───────────────────────────────────────────────────────╮
-│ /model      provider, key and model                              │
-│ /effort     reasoning effort                                     │
-╰──────────────────────────────────────────────────────────────────╯
-> Ask stcode…
-  model claude-opus-5   provider anthropic   mode suggest
-```
-
-Four rows, top to bottom: **banner**, **transcript**, a **card** when one is open, the
-**input**, and the **status line** under it.
-
-The status line is under the input, not above it, because that is the order you read in:
-you look at what you are typing, and the model and mode are the footnote to it. In
-`--daemonless` it also carries the daemon's address — the one shape where *which agent
-am I talking to* is a live question.
-
-### The banner
-
-Shown centred on an empty transcript and **hidden the moment the transcript is long
-enough to scroll**. It is a greeting, not furniture: once there is a conversation, the
-conversation is what the screen is for. No tagline under it.
-
-## Themes
-
-Two themes, both with `#78b032` as the primary colour: `stcode-dark` and `stcode-light`.
-
-The default is **auto**: stcode asks the terminal for its background colour (an `OSC 11`
-query) before the app starts, and picks the theme that matches. A terminal that does not
-answer within 200 ms, or a redirected stdout, falls back to dark. `COLORFGBG` is read
-first when it is set, since terminals that export it answer faster than they answer a
-query.
-
-`/theme` overrides it with `auto`, `dark` or `light`, and the choice is remembered in
-`~/.stcode/ui.toml` — see [what the TUI owns](#what-the-tui-owns).
-
-## Trusting a folder
-
-The first time stcode runs in a directory it asks:
-
-```
-╭─ trust this folder? ─────────────────────────────────────────────╮
-│                                                                  │
-│  /home/you/work/some-repo                                        │
-│                                                                  │
-│  The agent will read, write and run commands here with your       │
-│  privileges.                                                     │
-│                                                                  │
-│                                      [ Cancel ]   [ Trust ]      │
-╰──────────────────────────────────────────────────────────────────╯
-```
-
-**Cancel exits.** There is no "continue untrusted" — the agent's whole job is running
-things in this directory, so a session you have not trusted is a session with nothing to
-do. Trusted paths are remembered in `~/.stcode/ui.toml`.
-
-`--daemonless` skips it. The workspace belongs to the daemon's machine, not this one, so
-there is nothing here to trust; you get the `/connect` modal first instead.
-
-## Reading the transcript
-
-Eight shapes, each one because it has to be told apart from the others at a glance.
-
-| | |
+| Key | Action |
 | --- | --- |
-| `───── attached to ~/.stcode/daemon.sock ─────` | **the platform acted** — connected, mode changed, session cleared. Full width, dim italic, centred. Not the model talking |
-| a tinted block | **what you said.** Tinted so that scrolling back to find where you asked something is looking rather than reading |
-| `│ the middleware is probably in src/api` | **thinking.** Quoted and dim, so reasoning never reads as an answer. Capped at six lines while it streams — the last six — and scrollable afterwards |
-| dim, unquoted | **a running tool's output**, while it is still running: a REPL cell printing, a URL being fetched. Last six lines, advisory, never in the session |
-| plain text | **the model's answer** |
-| a gray block with a green left border | **a tool call and its result.** Failures are labelled |
-| a rule down the left | **a `!` command you ran.** Never in the session |
-| `▌ no API key for anthropic` | **a warning or an error.** Full-width box, yellow or red |
+| **Enter** | Send the prompt |
+| **Ctrl+J** | Insert a newline |
+| **Shift+Enter** or **Alt+Enter** | Insert a newline in terminals that support these keys |
+| **Esc** | Interrupt a turn or close a dismissible card |
+| **Shift+Tab** | Cycle approval modes |
+| **Ctrl+Q** | Leave the UI |
 
-Nothing else is announced. There is no `Config: /home/you/...` line and no
-`Connecting…` — a config path you did not ask for is noise on every start, and a
-connection that worked does not need a sentence. One rule when the daemon answers is
-enough, and `?` has the paths when you want them.
+You can send a follow-up while work is in progress. The agent receives it as it
+continues. Interrupt first if you want the current work to stop.
 
-### Tool calls
+## Mention a file
 
-```
-│ read
-│ path=src/api/mw.py
-│ 1  from fastapi import Request
-│ 2  from .limits import Bucket
+Type `@` at the start of a prompt or after a space. Continue typing to filter
+workspace paths, use the arrow keys to select a file, and press **Enter** to insert
+its path.
 
-│ bash · failed
-│ command=pytest -q
-│ 3 failed, 12 passed
-│ …
+```text
+Explain @src/api.py and suggest how to test it.
 ```
 
-Tool calls use a light gray fill and a thin primary-color left border. The name uses
-primary-colored text, arguments use normal foreground text trimmed to one display
-line, and results use gray text trimmed to two display lines. An ellipsis marks
-omitted content; a failed call is labelled `failed`. Full results remain in the session.
+Unicode filenames keep their original characters, including accented letters and
+non-Latin scripts. In a Git project, discovery includes tracked and untracked files
+while respecting Git ignore patterns. With a remote connection, the list comes
+from the remote workspace.
 
-`todo_write` is the only exception to the result preview limit: its full task list and
-completion count are shown, including wrapped lines, both live and in resumed sessions.
-
-Warnings and errors use a light status-colored background, a thin left border, and
-one row of vertical padding with two columns of horizontal padding. Vivid amber and
-red accents distinguish the statuses; body text keeps the theme's readable foreground.
-
-Event dividers use light gray lines and text on one terminal row. Terminal font size
-is controlled by your terminal, so individual event rows cannot use a smaller font.
-The input has a thick primary-colored left border and one row of padding above and
-below its text. Tool blocks and user messages also have one row of vertical padding.
-Cards above the input have no border and retain their horizontal padding. Modal
-dialogs (sessions, trust, connection, and settings) also have no outer border and
-keep their existing padding.
-
-### Sub-agents
-
-A `task` sub-agent renders in exactly the same shapes, with its name in a left gutter and
-its content indented:
-
-```
-api-scout │ Three handlers, all in src/api/mw.py.
-api-scout │ grep
-          │ pattern=Bucket
-          │ src/api/mw.py:12: class Bucket:
-```
-
-The colour is picked from the name, not at random: the same sub-agent is the same colour
-in every session and after every restart, which is the only way the colour tells you
-anything.
-
-Its events are **observational**. A sub-agent's transcript is its own file
-([sessions](sessions.md)), and what you are watching here is a live window onto it —
-nothing in the parent's history changes because you watched.
-
-## Typing
-
-The input is a text area, not a single line.
-
-| | |
-| --- | --- |
-| ++enter++ | send |
-| ++ctrl+j++ | **newline** |
-| ++shift+enter++ / ++alt+enter++ | newline, on terminals that report them — see below |
-| ++shift+tab++ | cycle the approval mode — takes effect on the **live** session |
-| ++escape++ | interrupt the turn in flight, or close the open card |
-| ++up++ / ++down++ | move through a card's options when one is open |
-
-++escape++ and ++backspace++ close a card that is *offering* you something. A card that
-is **asking** you something — an approval, a question — does not close. → [Approvals and
-questions](#approvals-and-questions)
-
-!!! note "Why ++ctrl+j++ and not ++shift+enter++"
-
-    ++shift+enter++ and ++alt+enter++ only exist on the wire when your terminal speaks
-    the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/).
-    stcode asks for it on start-up; a terminal that does not answer sends plain `CR` for
-    shift+enter and `ESC CR` for alt+enter, and **both of those are indistinguishable
-    from a bare ++enter++** — so on those terminals the obvious newline keys send your
-    half-written message instead.
-
-    ++ctrl+j++ is `LF`. It is a different byte from `CR` on every terminal there is, so
-    it always works. Both spellings are wired up; this is the one to reach for.
-
-### Symbol aliases
-
-Four characters do something instead of being an ordinary line of text:
-
-| | |
-| --- | --- |
-| `?` | on an empty input: the help card |
-| `/` | at the start, or after a space: the command list |
-| `@` | at the start, or after a space: files in the workspace, to mention |
-| `!` | at the start of the line: run the rest of it in your shell — see [`!`](#running-a-command-yourself) |
-
-The first three **filter as you keep typing** — `/mo` narrows to `/model` and `/mode`, `@mw`
-to `src/api/mw.py`. Six rows are visible and the list scrolls.
-
-The first `@` of a session requests the daemon workspace listing, so it can open a beat before
-it has anything to show. It says `listing the workspace…` and fills itself in when the
-listing arrives — there is nothing to retype.
-
-`/` and `@` are inserted as you type them — they are the start of a token, and `/mo` is
-what is in the input. `?` is not: it is a toggle on an empty input, so it opens the card
-and inserts nothing. **Typing it again inserts it** — `?` then `?` gives you a literal
-question mark, which is what you wanted the second time, and the card gets out of the way
-as soon as there is text.
-
-++backspace++ on an empty input closes any of the three cards. For `/` and `@` it also
-does the obvious thing: delete back past the symbol and the token is no longer a token,
-so the card goes.
-
-Filtering matches the **name**, not the description. Typing `/mod` offers `/model` and
-`/mode` and not `/effort`, whose description happens to say "how hard the model should
-think" — what you are typing is a name. `?` is where you look when you do not know the
-name.
+A mention inserts a path into your request; it does not upload a local file to a
+remote machine. To work on an image, this release currently supports text and file
+paths as input, rather than image attachments.
 
 ## Commands
 
-| | |
+Type `/` to browse and filter commands. Available skills also appear in this list.
+
+| Command | Use it to |
 | --- | --- |
-| `/model` | provider, key, model **and routing**. Applies to the live session as well as the next one |
-| `/effort` | reasoning effort: `none` … `max`. Live session, and remembered |
-| `/mode` | approval mode, as a card |
-| `/theme` | `auto`, `dark`, `light`, as a card |
-| `/token` | what this session has spent, as a card |
-| `/sessions` | earlier sessions, as a tree |
-| `/connect` | point this client at a different daemon (`--daemonless` only) |
-| `/mcp` | the MCP servers this session connected to, and their tools |
-| `/skills` | the skills this session found. Choosing one writes its name into the input |
-| `/<skill>` | run a skill: `/pdf split page 3 out` |
-| `/clear` | end this session and start a fresh one |
-| `/help` | the help card — same as `?` |
-| `/quit` | leave. The agent keeps working |
+| `/model` | Configure providers, credentials, models, and routing |
+| `/effort` | Choose reasoning effort supported by your provider |
+| `/mode` | Choose an approval mode |
+| `/theme` | Select `auto`, `dark`, or `light` |
+| `/token` | Review the current session's model usage |
+| `/sessions` | Resume a saved conversation |
+| `/mcp` | Inspect connected MCP servers |
+| `/skills` | Browse discovered skills |
+| `/clear` | Start a fresh conversation |
+| `/help` | Open the help card |
+| `/quit` | Leave the terminal UI |
+| `/connect` | Change connections when running with `--daemonless` |
 
-There is no command palette. ++ctrl+p++ does nothing, and the commands above are the
-whole surface — a second, fuzzy way to reach the same twelve things is a second place for
-them to drift.
-
-### Skills are commands
-
-Every skill this session found is on the `/` list under the built-in commands, so `/pdf`
-is one keystroke and one enter rather than a sentence to compose. `/skills` is the same
-set with the descriptions, and **choosing one writes `/name` into the input rather than
-sending it** — a skill usually needs a sentence after it saying what to do, and a card
-that fired on enter would leave nowhere to put it.
-
-```
-/agent-browser check that the login page still works on mobile
-```
-
-What reaches the agent is an ordinary message naming the skill, so everything after the
-name is the task, passed through untouched. A skill cannot shadow a built-in command: if
-you install one called `clear`, `/clear` still ends the session.
-
-A name that is neither a command nor a skill is still an error — skills joining the list
-does not turn a typo into a message to the model.
-
-### `/model` sets the routing too
-
-The setup screen is where `[routing]` lives now, under the credentials:
-
-```
-Model              claude-opus-5
-Difficulty         high  —  the best model you configured
-Routing
-  low              claude-haiku-4-5
-  medium           claude-sonnet-5
-  high
-Requests at once   0 — no cap. Set 1 for Ollama or another local endpoint.
-```
-
-A blank tier follows the Model field, which is what the screen did before any of these
-fields existed — so you never have to fill them in to keep what you had. **Difficulty**
-is which tier the main agent itself runs at; sub-agents and the supervisor choose their
-own. → [Providers and the gateway](../architecture/providers.md)
-
-**Requests at once** is the one to change if you run a local model. Five parallel
-sub-agents are five simultaneous completions against the same server, and a machine
-holding one 27b model on one GPU answers that with a 503 rather than five answers. `1`
-makes them run one after another.
-
-### `/token`
-
-```
-╭─ tokens ─────────────────────────────────────────────────────────╮
-│ input        48,113                                              │
-│ output       6,204                                               │
-│ cache read   31,900 — charged at a fraction of input             │
-│ total        54,317                                              │
-│ model calls  19                                                  │
-╰──────────────────────────────────────────────────────────────────╯
-```
-
-Summed from the session's own `usage` records — one per model call — and asked for
-fresh each time, which is the only way it can be right. A turn with six tool calls made
-seven requests, `turn_finished` carries the last of them, and a terminal that attached
-halfway through watched half a conversation. The daemon has all of it; nothing else
-does.
-
-Cache reads are shown when there are any, because "turn two is cheaper" is otherwise a
-claim you have to take on faith.
-
-A sub-agent's spending is in **its** session, not here — the same boundary that keeps
-its tool output out of the parent's context. → [Sessions](sessions.md)
-
-### `/model` and `/effort` reach the running agent
-
-Both write a `meta` record into the session file, and the agent reads its own meta before
-every model call. So a model or an effort chosen mid-conversation applies to the **next
-model call**, not the next session — and the transcript says when it changed, which is
-the only way a session that used two models is readable afterwards.
-
-Sessions are append-only, so nothing is rewritten: a later `meta` record overrides an
-earlier one. → [Sessions](../architecture/session.md#meta-is-a-merged-view)
-
-Both are also written to the **daemon's** config file — `/effort` as `[agent]
-reasoning_effort`, `/model` as the default provider entry, its model and, if you typed
-one, its key — so the choice survives the session. The daemon reloads the file and hands
-the new key to the gateway the running agent is already holding, which is what makes a
-pasted key work without restarting.
-
-Keys are accepted only over the daemon's unix socket. Over TCP — a container — the key
-field is disabled: set the key where the container is deployed.
-
-Sub-agents do not inherit it. `task(difficulty="low")` is a routing decision the model
-made about its own work, and a `/model` override that silently upgraded every scout to
-Opus would make difficulty tiers meaningless.
-
-### `/clear` starts a new session
-
-It does not erase anything. The current session is left as it is on disk and a new one
-begins — and because a session file is not created until its first message, `/clear`
-twice in a row leaves no debris at all.
-
-This is the one thing in the UI that people expect to be destructive and is not.
-→ [decision 0003](../decisions/0003-what-the-tui-owns.md)
-
-### `/sessions` shows a tree
-
-```
-╭─ sessions ───────────────────────────────────────────────────────╮
-│ 01M2QF…  2m ago   ~/w/stcode      rate limiting                  │
-│   └ api-scout    01M2QG4KX8ZB1T…                                 │
-│   └ test-writer  01M2QG4M02PN7R…                                 │
-│ 01M2Q8…  1h ago   ~/w/stcode      fix the flaky daemon test      │
-│ 01M2NN…  yesterday  ~/w/other     (no messages)                  │
-╰──────────────────────────────────────────────────────────────────╯
-```
-
-Built from each file's `meta` line — `parent` and `agent_name` are already in there, so
-the tree is a group-by and not an index. A sub-agent's row carries its **id** beside its
-name, because the name is not unique — two turns can each spawn an `api-scout` — and the
-id is what you need in order to open the transcript. **Only a parent is selectable.** A sub-agent's
-session is a transcript to read, not a conversation to continue: it has no user on the
-other end of it, and pushing a message into one would be talking to something that was
-built to answer exactly one question.
-
-## Running a command yourself
-
-`!` at the start of the line runs the rest of it in your shell:
-
-```
-▌ ! git status
-▌ On branch main
-▌ nothing to commit, working tree clean
-```
-
-**None of it touches the agent.** It is not a tool call, it is not approved, and it is
-not written to the session — so `!git diff` before describing a change costs no context
-and leaves nothing the model will later read back as something it did. The rule down the
-left is there for that reason: it must be impossible to mistake for the agent's work.
-
-It runs on the **daemon's machine**, in the attached session's workspace. `@` file
-completion also lists files there, never on the CLI's machine. Shell output occupies
-a fixed six-row scrollable block with a thin left border.
-
-Ten seconds, then it is killed. Raise it in `~/.stcode/ui.toml`:
-
-```toml
-shell_timeout = 30    # seconds; clamped to 1–120
-```
-
-The ceiling is low on purpose. `!` runs on the UI's budget rather than the agent's, and
-a command that needs two minutes belongs in a second terminal — or in a `bash` tool call
-where the agent can watch it and act on the result.
-
-Cycling to `full-auto` outside a supported container shows a warning and keeps the
-current mode. The daemon and connection remain available.
+Some commands accept a choice directly, for example `/mode plan`, `/effort high`,
+and `/theme dark`. Type `?` in an empty prompt for shortcuts and active file paths.
 
 ## Approvals and questions
 
-Both arrive as a **card above the input**, not a modal:
+An approval appears in a card above the prompt. Read the proposed operation and
+press **y** to approve or **n** to deny. Approval cards remain open until answered.
 
-```
-╭─ approve? ───────────────────────────────────────────────────────╮
-│ bash (execute)                                                   │
-│ rm -rf build/                                                    │
-│                                         n deny      y approve    │
-╰──────────────────────────────────────────────────────────────────╯
-```
+When the agent asks a question, select an option with the arrow keys and **Enter**,
+or type your own response. See [Approval modes](approval-modes.md) for the available
+permission settings.
 
-A modal covers the transcript, which is exactly the thing you need to read in order to
-answer — *why* is it running this? A card leaves it on screen.
+## Read the transcript
 
-**What you are approving is bounded at ten lines**, head and tail, with a count of what
-is between them:
+Your messages are labeled **you**. Assistant responses stream as plain text.
+Tool calls appear in shaded blocks with a colored left border, their arguments,
+and a short result. Failures are labeled, and progress appears while commands run.
+When a sub-agent contributes, its name appears beside its messages.
 
-```
-╭─ approve? ───────────────────────────────────────────────────────╮
-│ repl (execute)                                                   │
-│ import asyncio                                                   │
-│ from mcp_servers.context7 import resolve_library_id              │
-│ … 31 more lines …                                                │
-│ asyncio.run(main())                                              │
-│                                         n deny      y approve    │
-╰──────────────────────────────────────────────────────────────────╯
+## Run a command yourself
+
+Start a prompt with `!` to run a shell command in the connected workspace:
+
+```text
+!git status --short
 ```
 
-The card is laid out top to bottom, so a body that grows without limit pushes **deny**
-and **approve** off the bottom of the screen — a card that asks a question and shows no
-way to answer it. Elided rather than summarised, like any other output: the head says
-what the cell is about to do, the tail says what it leaves behind, and the count says how
-much you are not being shown.
+This is a command you execute directly. Its output appears in the terminal but is
+not added to the agent's conversation. With a remote connection, the command runs
+on the remote machine. Paste relevant output into a prompt if you want the agent
+to use it.
 
-Parallel tool calls can raise two requests at once. They **queue**, one card at a time,
-answered oldest first; the rest of the turn keeps streaming behind them — and the next
-one appears the moment you answer the one in front of it.
+## Sessions
 
-Everything else is unchanged and still true:
+`/sessions` opens saved conversations. Child tasks appear beneath their parent;
+select the parent to resume it. `/clear` starts a new conversation and keeps the
+previous one available in the list.
 
-- **Whoever answers first decides.** If two terminals are watching, either can approve.
-- **A denial is a denial, not a failure.** The tool is told the user declined, and the
-  model is expected to adapt rather than retry.
-- **The safe answer is the default.** ++enter++ picks the highlighted row, and the
-  highlighted row is **deny** — a reflex on a card you have not read must not be how an
-  `rm -rf` gets run.
-
-### An asking card cannot be dismissed
-
-++escape++ and ++backspace++ do nothing while an approval or a question is up. Neither
-does closing it by any other route: there is none.
-
-This is not strictness for its own sake. A request that is on screen has already been
-taken out of the queue, and the turn behind it is parked on an answer that only this
-card can give. Dismissing it left the session waiting on a reply that no longer had
-anywhere to come from — a hung agent with a working keyboard — and the keystroke that
-did it was usually ++backspace++ on an already-empty input, aimed at a character that
-was not there.
-
-So an asking card keeps the floor until it is answered:
-
-| | |
-| --- | --- |
-| ++y++ / ++n++ | approve / deny, on an approval |
-| ++up++ / ++down++ then ++enter++ | pick a row |
-| type, then ++enter++ | answer a question in your own words |
-| ++escape++, ++backspace++ | nothing |
-
-Deny **is** the way out, and it costs one turn: the tool is told you declined and the
-model adapts. Walking away is still the same as denying — nothing runs until you say
-so — but it now leaves the request on screen, waiting, instead of silently gone.
-
-Questions (`ask_user_question`) come as the same card with up to four options and a free
-text field that stays open, because the tool's own docstring promises the model that the
-user can always answer something else.
-
-## What the TUI owns
-
-Two files, and the split matters:
-
-| | |
-| --- | --- |
-| `~/.stcode/config.toml` | the **agent's** configuration: providers, keys, routing, limits. Read by the daemon, including one in a container |
-| `~/.stcode/ui.toml` | the **terminal's** preferences: the theme, the folders you have trusted, and the `!` timeout |
-
-```toml
-# ~/.stcode/ui.toml
-theme = "auto"                       # auto | dark | light
-trusted = ["/home/you/work/stcode"]
-shell_timeout = 10                   # seconds a `!` command may run; clamped to 1–120
-```
-
-A headless daemon has no theme, trusts nothing and never runs a `!`; putting any of the
-three in `config.toml` would put a fact about your terminal into the file a container
-reads.
-→ [decision 0003](../decisions/0003-what-the-tui-owns.md)
-
-Neither path is something to memorise — `?` shows both, along with the session file the
-current conversation is writing to.
-
-## Streaming and steering
-
-```
-⠹ working   model claude-opus-5   provider anthropic   mode suggest
-```
-
-The status line spins from the moment you press ++enter++, not from the first token. The
-gap between them can be seconds — a cold local model, a long prompt, a retry — and until
-something moves, a screen where the message landed looks exactly like one where it did
-not. The spinner answers the only question anybody has in that gap.
-
-Text streams as the model produces it. You can type while it works — a message sent
-mid-turn is delivered at the next tool-call boundary, never spliced into the model call
-in flight. → [The agent loop](../architecture/agent-loop.md)
+See [Sessions](sessions.md) for command-line resume and storage settings.

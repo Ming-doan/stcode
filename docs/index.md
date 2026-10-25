@@ -1,97 +1,28 @@
-# stcode
+# Meet stcode
 
-A coding agent for the terminal, built the other way round: **the agent lives in a
-daemon, and the UI is a client of it.**
+stcode is an open source coding agent for your terminal. Ask it to explain a
+codebase, make a change, or investigate a failing test. Follow its work as it
+reads files, edits code, and runs commands, with approvals you control.
 
-Closing the window does not stop the work. Several terminals can watch the same
-session. Moving the agent into a container is a config key — `transport = "tcp"` — not
-a rewrite. And because a container is a real boundary, `full-auto` can exist without
-being a foot-gun: the daemon refuses to start in that mode anywhere its blast radius is
-not contained.
+Work in a local project or connect to a remote workspace. Leave a conversation
+and resume it later, add your own tools and skills, or use the Python SDK to
+bring an agent into your application.
 
-```bash
-uv tool install stcode
-stcode
-```
+## Start here
 
-## Where to go
+- **[Getting started](getting-started/quickstart.md)** — install stcode, connect a
+  model, and try your first task.
+- **[Guide](guide/tui.md)** — file mentions, commands, approvals, and sessions.
+- **[Teams](teams/setup.md)** — give agents roles and coordinate work across them.
+- **[Python SDK](sdk/embedding.md)** — run an agent and stream its responses in Python.
 
-<div class="grid cards" markdown>
+## Make it yours
 
-- **Just installed it**
+Connect an OpenAI, Anthropic, or Google model using your own API credentials.
+Add [MCP servers](guide/mcp.md) for external tools and
+[skills](guide/skills.md) for reusable workflows. Enable
+[Langfuse or Phoenix tracing](guide/tracing.md) when you want to review agent activity.
 
-    [Installation](getting-started/installation.md) ·
-    [Quickstart](getting-started/quickstart.md) ·
-    [Configuration](getting-started/configuration.md)
-
-- **Using it day to day**
-
-    [The three shapes](guide/shapes.md) ·
-    [The TUI](guide/tui.md) ·
-    [Approval modes](guide/approval-modes.md) ·
-    [Sessions](guide/sessions.md)
-
-- **Extending it**
-
-    [Tools](guide/tools.md) ·
-    [Skills](guide/skills.md) ·
-    [MCP servers](guide/mcp.md) ·
-    [Writing a tool](sdk/custom-tools.md)
-
-- **Running a team**
-
-    [Setting one up](teams/setup.md) ·
-    [Roles](teams/roles.md) ·
-    [How a team works](teams/workflow.md)
-
-- **Building on it**
-
-    [Embedding an agent](sdk/embedding.md) ·
-    [The daemon protocol](sdk/daemon-protocol.md)
-
-</div>
-
-## What it does differently
-
-Four things, each traceable to a measurement.
-
-**MCP tools as code, not tool definitions.** Most agents ship MCP schemas in the prompt
-prefix every turn: 10–30k tokens, forever. stcode writes them to
-`.stcode/mcp_servers/<server>/<tool>.py` and lets the agent `grep` and import what it
-needs. Measured on three servers and twelve tools: **9,869 → 0 chars per turn.** →
-[MCP servers](guide/mcp.md)
-
-**A supervisor that watches the trajectory.** The session JSONL is already the
-trajectory, so the supervisor is just a reader. Free counting heuristics run first —
-the same call three times, over half the calls failing, no file written in N turns —
-and only a firing heuristic costs a model call. →
-[The supervisor](architecture/supervisor.md)
-
-**Agent-to-agent messaging with no protocol.** Containers share a volume, so a message
-is a file. No registry service, no routing table — a teammate is found by reading
-`/team/members/`. Messages carry paths, not payloads, which stops team token cost
-growing with N². →
-[How a team works](teams/workflow.md)
-
-**Daemon-first.** Detach does not kill the agent. Approvals and questions are
-request–response correlated by `execution_id` over the same JSONL framing as everything
-else. → [The daemon](architecture/daemon.md)
-
-## Honest comparison
-
-| | Claude Code | Cline / Kilo | **stcode** |
-| --- | --- | --- | --- |
-| Tool quality (read/edit/grep/bash) | excellent | good | comparable |
-| MCP cost | tool defs per turn | tool defs per turn | as code, 9.9k → 0 chars/turn |
-| Runs headless in a container | partial | no | **yes** |
-| Multi-agent team across containers | no | no | **yes** |
-| Stagnation detection | no | no | **yes** |
-| Maturity, polish, ecosystem | **far ahead** | ahead | behind, and will stay behind |
-
-We are not competing on polish.
-
-!!! warning "One open question"
-
-    The ~20 team-mode evaluation tasks in
-    [Team mode](architecture/team.md) are written and **have not been run**. Until they
-    are, whether team mode helps or merely spends 15× the tokens is unanswered.
+stcode is available under the Apache-2.0 license. Visit the
+[repository](https://github.com/Ming-doan/stcode) for releases and source code,
+or [report an issue](https://github.com/Ming-doan/stcode/issues).

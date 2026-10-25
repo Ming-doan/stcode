@@ -1,62 +1,77 @@
 # Quickstart
 
-```bash
-uv run stcode              # work in this directory
-uv run stcode ~/code/api   # or in that one
-```
-
-The first run opens a one-time setup screen. Pick a provider, paste an API key — or
-leave it blank if you exported one — choose a model, and you are in.
-
-## Your first task
-
-Type a request and press enter. Nothing about the phrasing is special; there is no
-command language.
-
-```
-Add rate limiting to the /v1/search endpoint.
-```
-
-What happens next, in order:
-
-1. The agent reads the repository's own instructions if it has any — `CLAUDE.md`,
-   `AGENTS.md`, or `.stcode/instructions.md`, first hit wins.
-2. It looks around with `grep`, `glob` and `read` before changing anything.
-3. The first time it wants to write a file or run a command, **you are asked**. The
-   default mode is `suggest`, which asks every time.
-4. It verifies — usually by running your tests — and then says what it did.
-
-Press ++shift+tab++ to cycle the approval mode if you get tired of being asked, or
-++esc++ to stop the turn in flight.
-
-## While it is working
-
-You do not have to wait for it to finish before typing. A message sent mid-turn is
-delivered at the next **tool-call boundary** — after the current round of results,
-before the next request to the model. That is what makes steering possible: your
-correction changes what it is about to do, instead of being lost or corrupting the
-conversation.
-
-```
-Actually, use a token bucket, not a fixed window.
-```
-
-## Picking up where you left off
-
-Closing the terminal does not stop the agent — the work is in a daemon.
+## Install and open a project
 
 ```bash
-uv run stcode sessions        # recent sessions, newest first
-uv run stcode --resume 01HX…  # attach to one, live or from disk
+uv tool install stcode
+cd your-project
+stcode
 ```
 
-If the session is still running in the daemon, you join it live. If it finished, the
-transcript is read back off disk and you continue it. Same command either way. →
-[Sessions](../guide/sessions.md)
+You can also open a directory directly with `stcode ~/projects/api`.
 
-## Where to next
+## Connect a model
 
-- The agent asks too much, or too little → [Approval modes](../guide/approval-modes.md)
-- You want it in a container → [The three shapes](../guide/shapes.md)
-- You want it to know about your internal tools → [MCP servers](../guide/mcp.md)
-- You want a repeatable procedure it can load → [Skills](../guide/skills.md)
+On your first visit, confirm that you trust the project directory. If no provider
+credential is configured, stcode opens the setup screen. Choose OpenAI, Anthropic,
+or Google, add your API key, and choose a model available to your account.
+
+You can export a key before launching instead:
+
+```bash
+export OPENAI_API_KEY="your-api-key"
+stcode
+```
+
+For Anthropic use `ANTHROPIC_API_KEY`; for Google use `GEMINI_API_KEY`.
+Use `/model` to select the provider, key, model, and routing at any time.
+See [Configuration](configuration.md) for compatible endpoints and multiple accounts.
+
+## Try a first task
+
+Start with a question about the project:
+
+```text
+Explain how requests reach the API handlers. Point me to the relevant files.
+```
+
+Then give the agent a scoped change:
+
+```text
+Add input validation to the search endpoint and run the relevant tests.
+```
+
+Type `@` to find a file and include its path in your request. The transcript shows
+the agent's replies, tool calls, and results as it works.
+
+The default `suggest` mode asks you before edits and command execution. Respond to
+an approval card with **y** to approve or **n** to deny. Use `/mode plan` when you
+want to explore an approach before making changes.
+
+## Steer the work
+
+Send a follow-up while the agent is working:
+
+```text
+Keep the existing response format so callers do not need to change.
+```
+
+Press **Esc** to interrupt the turn. Use **Ctrl+J** to add a newline to your prompt
+and **Enter** to send it. Type `?` in an empty prompt for help.
+
+## Return to a conversation
+
+Use `/sessions` inside the terminal, or list sessions from your shell:
+
+```bash
+stcode sessions
+stcode --resume SESSION_ID
+```
+
+Replace `SESSION_ID` with an ID from the list. Leaving the UI keeps the local
+background service running; work that needs an approval still needs an attached
+client. A machine shutdown or service restart stops active work, but saved sessions
+can be resumed.
+
+Next, explore the [terminal UI](../guide/tui.md),
+[approval modes](../guide/approval-modes.md), or [MCP servers](../guide/mcp.md).

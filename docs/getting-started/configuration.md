@@ -1,105 +1,104 @@
 # Configuration
 
-The essentials for getting a working setup. Every section and every key is documented
-in the [configuration reference](../architecture/configuration.md); this page is what
-you actually need on day one.
+Use `/model`, `/mode`, and `/effort` in the terminal to change your setup.
+For a reusable configuration, edit `~/.stcode/config.toml`.
+Run `stcode config` or open the `?` help card to find the active configuration.
 
-## Where the file is
+Set `STCODE_HOME` to choose a different settings directory, or `STCODE_CONFIG` to
+choose a configuration file. You can also start with `stcode --config path/to/config.toml`.
+If a local service is already running, use `--restart` to load a different file;
+this interrupts its active work.
 
-| | |
-| --- | --- |
-| Linux / macOS | `~/.stcode/config.toml` |
-| Windows | `%APPDATA%\stcode\config.toml` |
-| Override | `STCODE_HOME=/dir` for the whole directory, `STCODE_CONFIG=/path/to/config.toml` for the file |
+## Providers and credentials
 
-```bash
-uv run stcode config     # asks the daemon: the path and what it selects
-```
-
-The file belongs to the daemon, which creates a minimal one on first start. The UI
-never edits it directly: `/model`, `/mode` and `/effort` ask the daemon to change single
-keys, so **your comments and formatting survive**.
-
-The theme and the folders you have trusted are **not** in here — they live in
-`~/.stcode/ui.toml`, because they are facts about your terminal rather than about the
-agent. `?` in the TUI shows both paths.
-
-## The keys that matter
+A minimal OpenAI configuration:
 
 ```toml
-[model.providers.anthropic]           # the name is yours
-provider = "anthropic"                # the library: openai | anthropic | google
-api_key  = "${ANTHROPIC_API_KEY}"     # a reference to a variable, or the key itself
-model    = "claude-opus-5"            # unset = the library's default
+[model.providers.openai]
+provider = "openai"
+api_key = "${OPENAI_API_KEY}"
 
 [agent]
-approval_mode    = "suggest"
+approval_mode = "suggest"
 reasoning_effort = "medium"
 ```
 
-That is a complete, working config. With one provider entry, everything uses it.
+| Provider | `provider` value | Default credential variable |
+| --- | --- | --- |
+| OpenAI | `openai` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` |
+| Google Gemini | `google` | `GEMINI_API_KEY` |
 
-!!! tip "Prefer `"${VAR}"` to a literal key"
+Add `model = "your-model-id"` to choose a model available from that provider.
+When omitted, stcode uses the provider adapter's default. `/model` shows the active
+selection.
 
-    A `"${ANTHROPIC_API_KEY}"` reference is read from the daemon's environment when it
-    is used, so the key never touches disk. A literal is honoured — the setup screen
-    writes one when you paste a key — and is why the file is `chmod 0600`. Leave
-    `api_key` out entirely and the library's conventional variable is used.
+An `api_key` can contain a literal key or a whole-value reference such as
+`"${WORK_API_KEY}"`. A configured key takes precedence; the provider's default
+environment variable is the fallback. Export variables in the process that starts
+stcode; `.env` files are not loaded automatically. Keep credentials out of version control.
 
-## Two accounts, and cheaper models for cheap work
+## Compatible endpoints
+
+Set `base_url` on an OpenAI provider entry for an endpoint that supports the API
+used by stcode. Model and tool support depend on that endpoint.
+
+```toml
+[model.providers.local]
+provider = "openai"
+base_url = "http://localhost:11434/v1"
+model = "your-served-model"
+api_key = "${LOCAL_MODEL_KEY}"
+```
+
+## Multiple accounts and models
+
+Provider entry names are yours to choose. Set `[model] default` to the entry you
+want to use. Optional routing entries choose a different model for a difficulty tier.
 
 ```toml
 [model]
-default = "work"                      # which entry answers when no tier says otherwise
+default = "work"
 
 [model.providers.work]
 provider = "openai"
-api_key  = "${WORK_OPENAI_KEY}"
+api_key = "${WORK_OPENAI_KEY}"
 
 [model.providers.personal]
-provider = "openai"
-api_key  = "${OPENAI_API_KEY}"
+provider = "anthropic"
+api_key = "${ANTHROPIC_API_KEY}"
 
-[model.routing.low]                   # optional, per difficulty tier
+[model.routing.high]
 provider = "personal"
-model    = "gpt-5-mini"
+model = "your-anthropic-model-id"
 ```
 
-Every call declares a difficulty, and a `[model.routing]` line for it decides the
-model; with no line, the default entry answers.
+Use `/model` to review or edit routing for `low`, `medium`, and `high` tasks.
 
-| Tier | Who asks for it |
-| --- | --- |
-| `high` | the agent's own turns, by default (`[agent] difficulty`) |
-| `low` | the [supervisor](../architecture/supervisor.md), when a heuristic fires |
+## Preferences and permissions
 
-## Command-line flags
+`/theme` selects automatic, dark, or light appearance. Theme and trusted-folder
+preferences are saved in `~/.stcode/ui.toml`.
 
-Flags apply to **this run only** and are never written to the file — `--mode full-auto`
-once must not leave `full-auto` there forever.
+Use `/mode` for [approval modes](../guide/approval-modes.md), or pass a mode when
+opening a session:
 
 ```bash
-uv run stcode ~/projects/api --mode auto-edit
-uv run stcode --transport tcp --host 10.0.0.4 --port 7717 --daemonless
+stcode ~/projects/api --mode auto-edit
 ```
 
-| Flag | What it does |
-| --- | --- |
-| `--cwd` / a leading path | the directory the agent works in |
-| `--mode` | the approval mode of the sessions this run opens |
-| `--role` | which agent this is (`[team] role`). The prompt comes from `[agent] prompt` |
-| `--config` | the file a daemon started by this run reads |
-| `--restart` | stop the local daemon first and start a fresh one |
-| `--transport` `--socket` `--host` `--port` | where the daemon is (and where to start one) |
-| `--team` | `--headless` only: turn team mode on. Otherwise `STCODE_TEAM=1` or `[team] enabled` |
+Command-line overrides apply to that run. Changes made through the settings UI are
+saved. When connected remotely, model and agent settings apply to the connected
+service; appearance settings apply to your terminal.
 
-## Narrowing the tool set
+## Optional features
+
+Enable the supervisor to help the agent reconsider work that appears stuck:
 
 ```toml
-[agent]
-tools = ["read", "grep", "glob", "ls"]   # an allow-list, replacing the default set
-exclude_tools = ["web_search"]           # subtracted from whatever is left
+[supervisor]
+enabled = true
 ```
 
-A name that matches no tool **refuses to start**. A config that quietly produced a
-smaller tool set would be diagnosed as "the model is ignoring its tools", weeks later.
+For other integrations, see [MCP servers](../guide/mcp.md),
+[skills](../guide/skills.md), [tracing](../guide/tracing.md), and [team profiles](../teams/roles.md).

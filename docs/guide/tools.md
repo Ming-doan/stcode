@@ -1,94 +1,58 @@
 # Tools
 
-What the agent can do. Each one is a Python function whose **signature is the schema**
-and whose **docstring is the prompt the model reads**.
+stcode can explore a project, change files, run checks, and use external services.
+You describe the task; the agent selects tools and shows their activity in the
+transcript. [Approval modes](approval-modes.md) control which actions need your review.
 
-## The built-in set
+## Built-in capabilities
 
-| Tool | Permission | What it does |
-| --- | --- | --- |
-| `read` | read | a file, with line numbers |
-| `write` | write | replace a file entirely |
-| `edit` | write | replace an exact, unique string |
-| `bash` | execute | one command, in a fresh process |
-| `bash_output` | read | drain a backgrounded command |
-| `glob` | read | filenames by pattern |
-| `grep` | read | content search, via `ripgrep` |
-| `ls` | read | a directory |
-| `todo_write` | read | keep the plan in the context window |
-| `web_search` | read | needs `TAVILY_API_KEY` |
-| `ask_user_question` | read | up to four options, put to the human |
-| `skill` | read | load a procedure's instructions |
-| `repl` | execute | a persistent Python namespace |
-| `task` | execute | a sub-agent, added by the agent layer |
-| `find_teammate` | read | team mode only |
-| `send_team_message` | execute | team mode only |
+| Task | Tools |
+| --- | --- |
+| Find and read code | `ls`, `glob`, `grep`, `read` |
+| Create and update files | `write`, `edit` |
+| Run commands and collect background output | `bash`, `bash_output` |
+| Search and fetch web content | `web_search` |
+| Inspect data with Python | `repl` |
+| Keep a task plan | `todo_write` |
+| Ask you for a decision | `ask_user_question` |
+| Load a reusable workflow | `skill` |
+| Delegate a focused task | `task` |
+| Find and message teammates | `find_teammate`, `send_team_message` in team mode |
 
-A sub-agent gets a narrower set: no `task` (one that can spawn is one for which
-`max_depth` bounds nothing) and no `repl` (a persistent namespace is the parent's job).
+For example:
 
-## Read before write
-
-`write` and `edit` both **refuse a file this session has not read**, and warn when it
-changed on disk underneath them.
-
-The cost is deliberately asymmetric. A refused edit costs one turn. An overwritten file
-the agent never read costs work that no longer exists.
-
-## `edit` matches a string, not a line range
-
-```python
-edit(path="src/util.py", old_string="RETRY_LIMIT = 3", new_string="RETRY_LIMIT = 5")
+```text
+Find where retries are configured, explain the current behavior, and add a test
+for a failed request.
 ```
 
-The match must be **unique** unless `replace_all=True`. Line numbers go stale the
-moment anything above them moves, and a fuzzy match silently edits the wrong place,
-while a unique literal either matches once or fails loudly.
+The available tools depend on your configuration and approval mode.
 
-When it fails, it says *why* — indentation differs, or the first line matched and the
-mismatch is further down — because a failure you can act on in one step is worth more
-than a correct error message.
+## Web search
 
-!!! tip "The line-number prefix is not part of the file"
+Set `TAVILY_API_KEY` in the environment that starts stcode to enable web search.
+You can also reference a key in your configuration:
 
-    `read` prefixes every line with a number and a tab. Including that prefix in
-    `old_string` is the most common reason an edit finds no match.
-
-## Output is elided, never summarised
-
-Every tool has a character cap — 8192 by default, 32768 for `read`, because file
-contents are the ground truth an agent reasons from and a half-seen function is worse
-than a slow turn.
-
-Over the cap, the **head and tail are kept and the middle is dropped**:
-
-```
-… [41,203 chars elided — the whole value is in tool_out["grep_a1b2"] — slice it with `repl`] …
+```toml
+[tools]
+tavily_api_key = "${TAVILY_API_KEY}"
 ```
 
-The beginning says what ran; the end says how it went. Summarising with a model would
-lose information; eliding does not — *provided the whole value is somewhere the model
-can reach*. That proviso is the entire rule, so the hint is only allowed to name
-`tool_out[...]` when a REPL really holds it. → [The REPL and `tool_out`](repl.md)
+## Choose available tools
 
-## Background commands
+To restrict a profile to a chosen set, use `tools`. To remove individual tools
+from the default set, use `exclude_tools`:
 
-`bash` can background a long command and hand back a handle; `bash_output` drains it.
-Each `bash` call is a **fresh process** — there is no shell whose state persists
-between calls, because stateful shells make every failure irreproducible.
+```toml
+[agent]
+exclude_tools = ["web_search"]
+```
 
-For state that should persist, use `repl`.
+Changes apply when a new agent is created. Use [plan mode](approval-modes.md) for
+read-only exploration during a conversation.
 
-## Permissions
+## Add capabilities
 
-A tool declares a `ToolPermission` once — `READ`, `WRITE` or `EXECUTE` — and never
-decides its own gating. [Approval modes](approval-modes.md) map that class onto
-"allowed", "ask", or "forbidden".
-
-One refinement: a call may *narrow* its class. `cat x.py` and `rm -rf build/` arrive
-through the same `bash` tool, so a read-only command is recognised as read-only and
-skips the approval a write would need.
-
-## Adding your own
-
-→ [Writing a tool](../sdk/custom-tools.md)
+- Connect an [MCP server](mcp.md) for external tools and services.
+- Install a [skill](skills.md) for a reusable procedure.
+- Write a [custom Python tool](../sdk/custom-tools.md) for an embedded agent.

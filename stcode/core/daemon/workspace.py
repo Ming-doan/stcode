@@ -15,15 +15,16 @@ def list_files(root: Path, limit: int = FILE_LIMIT) -> list[str]:
     """Workspace paths for `@`, relative to `root`, newest convention first: git."""
     try:
         finished = subprocess.run(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             cwd=root,
             capture_output=True,
-            text=True,
             timeout=5,
             check=False,
         )
-        if finished.returncode == 0 and finished.stdout.strip():
-            return sorted(set(finished.stdout.splitlines()))[:limit]
+        if finished.returncode == 0 and finished.stdout:
+            # -z disables Git's C-style quoting and preserves whitespace in names.
+            paths = finished.stdout.rstrip(b"\0").split(b"\0")
+            return sorted({os.fsdecode(path) for path in paths})[:limit]
     except (OSError, subprocess.SubprocessError):
         pass
     return _walk(root, limit)

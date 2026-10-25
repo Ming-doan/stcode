@@ -1,115 +1,64 @@
-# How a team works
+# Team workflow
 
-## A message is a file
+Start by giving each agent a clear task and an expected result. Agents can find
+teammates, send handoffs, and share notes while you follow their work in separate
+terminal sessions.
 
-There is no protocol, no registry, no routing table, no service discovery and no N²
-socket mesh. Containers share a volume, so:
+## Plan a handoff
 
-```
-/team/inbox/backend-dev/01HXZ8Q2K3M4N5P6R7S8T9V0W1.json
-```
+For an API and frontend change, a useful sequence is:
 
-`send_team_message` writes a JSON file into the recipient's directory. The recipient
-drains its own directory at the top of every turn. That is the whole mechanism.
+1. Ask the API agent to define the response and save a contract in the shared directory.
+2. Ask it to notify the frontend agent when the contract is ready.
+3. Let each agent implement and test its part in its own checkout.
+4. Review the branches and integrate the changes using your usual Git workflow.
 
-## Finding who to hand off to
+For example:
 
-Every agent writes a card to `/team/members/<role>.json` as it starts — its role and a
-one-line `[team] description`. Before handing off, an agent asks:
-
-```python
-find_teammate("api")
-# backend-dev — Owns the API service and /team/knowledge/api-contract.md. (on 3f2a9c1b7d4e)
+```text
+Find the teammate responsible for the frontend. Let them know that the search
+contract is ready at /team/knowledge/search.md and ask them to check the fields.
 ```
 
-and then sends to the role it found. `send_team_message` refuses a role with no card,
-naming the ones there are — a message to a typo would sit in an inbox nobody reads.
+## Find teammates
 
-Messages are written **write-then-rename**, so a reader draining at the same moment
-sees either nothing or a complete message. Filenames are ULIDs, so an inbox drains
-oldest-first with no index.
+The agent uses `find_teammate` to discover roles and their descriptions.
+Open a session for each role before asking agents to find one another. If a role
+is missing, check that its team configuration is enabled and uses the same
+shared directory.
 
-## Messages carry refs, not content
+## Share useful context
 
-```python
-send_team_message(
-    to="devops",
-    subject="Rate limiting ready on branch feat/ratelimit",
-    body="Config lives in the new [ratelimit] section. Needs REDIS_URL set.",
-    refs=["src/api/middleware/ratelimit.py", "config/example.toml"],
-)
+Use the shared directory for contracts, design notes, or reports. Ask agents to
+send a short message with paths to the relevant files. The `send_team_message`
+tool sends the handoff to a named role.
+
+A path in one private checkout may not exist for another role. Put shared material
+in `/team`, or provide a branch and commit that the recipient can fetch.
+
+## Continue when a message arrives
+
+Idle teammates can start working when they receive a message. This is enabled by
+default; turn it off if you want to start each turn yourself:
+
+```toml
+[team]
+wake_on_message = false
 ```
 
-`refs` are paths. Both agents can already read the volume and the repository with the
-ordinary `read` and `grep` tools, so pasting a file into a message pays for it twice —
-once in the sender's context and once in the recipient's.
+A busy agent receives team messages when it begins its next turn. You can always
+connect to its terminal to clarify a task or interrupt active work. The agent's
+approval mode still applies to work triggered by a message.
 
-**This is enforced, not requested.** A message that tries to carry a file body is
-refused, because "please keep messages short" is advice a model under pressure will
-reasonably ignore.
+## Choose the right scope
 
-The consequence is the one that matters at scale: team token cost grows with the number
-of *messages*, not with the size of the work.
+Teams are useful for work with distinct responsibilities and clear handoffs.
+For a focused change, a single agent may be enough. Each active agent makes its
+own model calls, so review usage with `/token` or [tracing](../guide/tracing.md).
 
-## Git is the real coordination
+## Protocol availability
 
-Messages coordinate attention. **Git coordinates code.**
-
-```mermaid
-flowchart LR
-    origin["/team/repo.git<br/>(bare, on the volume)"]
-    be["backend-dev<br/>/workspace"]
-    fe["frontend-dev<br/>/workspace"]
-    ops["devops<br/>/workspace"]
-
-    origin -->|clone| be
-    origin -->|clone| fe
-    origin -->|clone| ops
-    be -->|push feat/api| origin
-    fe -->|push feat/ui| origin
-    ops -->|merges| origin
-```
-
-Each role clones, works in its own checkout, and pushes a branch. **Exactly one role
-merges** — devops, by convention in its role file. That is the merge boundary rule
-made concrete: one role owns integration, so integration has an owner.
-
-## Shared knowledge is a directory
-
-`/team/knowledge/` is read and written with `read`, `write` and `grep`. There is no
-knowledge API, because there does not need to be one — the tools that already exist
-work on a mounted directory.
-
-## Waking up
-
-A role's daemon polls its inbox once a second. When a message has landed and the agent
-is **idle**, it starts a turn with a short push:
-
-> A message arrived while you were idle. It is above this line. Deal with it, or say
-> why it is not yours to deal with.
-
-Short on purpose: the message itself is already in the history as an `inbox` record, and
-repeating it would pay for it twice.
-
-A message arriving **mid-turn** does not interrupt. The agent drains its inbox at the
-top of the next turn regardless, and interrupting would break the rule that a push
-never splices into a turn in flight.
-
-## Sub-agents still exist
-
-`task` survives in team mode. The two split different things:
-
-| | splits | creates |
-| --- | --- | --- |
-| a **team** | a product, into roles | one checkout and one merge boundary each |
-| a **sub-agent** | one role's task, inside its own checkout | no boundary at all |
-
-A sub-agent gets no team tools, so the messaging discipline between roles is
-untouched. `[agent] enable_task = false` is the off switch if you want one.
-
-## Does it actually help?
-
-Unknown, and said plainly: the ~20 evaluation tasks in
-[Team mode](../architecture/team.md) are written and **have not been run**. They
-deliberately include tasks team mode should *lose*. Until they run, "does team mode
-help or merely spend 15× the tokens" is an open question rather than a rhetorical one.
+Built-in team messaging currently connects stcode agents through a shared
+directory. Broader agent-to-agent protocol support is planned; native A2A and ACP
+adapters are not available in this release. [MCP servers](../guide/mcp.md) can
+connect external tools, including an agent service if it exposes an MCP interface.

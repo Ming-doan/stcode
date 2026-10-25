@@ -13,6 +13,7 @@ them is invisible in code review.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 import pytest
 from typing import Any, Callable
@@ -242,6 +243,35 @@ async def test_an_at_sign_offers_the_workspace_files(tmp_path: Path, workspace: 
             await pilot.press("enter")
             await pilot.pause()
             assert "app.py" in app.chat.prompt.text
+            assert card_of(app) is None
+
+
+@asynctest
+async def test_a_unicode_git_filename_is_selected_and_inserted_unchanged(
+    tmp_path: Path, workspace: Path
+) -> None:
+    path = "tài-liệu/日本語.md"
+    target = workspace / path
+    target.parent.mkdir()
+    target.write_text("Unicode file contents", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "core.quotePath", "true"], cwd=workspace, check=True)
+    subprocess.run(["git", "add", "--", path], cwd=workspace, check=True)
+
+    async with Harnessed(tmp_path, workspace, RecordingGateway([])) as env:
+        app = env.app()
+        async with app.run_test() as pilot:
+            await connected(app)
+            await pilot.press("at")
+            assert await until(lambda: bool(app.chat.files))
+            await pilot.press(*"tài-liệu")
+            await pilot.pause()
+
+            card = card_of(app)
+            assert card is not None and card.rows == [(path, "")]
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.chat.prompt.text == f"{path} "
             assert card_of(app) is None
 
 
