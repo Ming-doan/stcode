@@ -17,6 +17,7 @@ A leaf: imports nothing from `stcode`, so anything in `core/` may import it.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from pathlib import Path
@@ -103,13 +104,16 @@ class DaemonConfig(BaseModel):
     """Where the daemon listens.
     Args:
         transport: `unix` — socket via `socket` path, `tcp` — socket via `host` and `port`.
+            Defaults to `tcp` when asyncio has no Unix socket support (Windows).
         socket: Path to the Unix socket file. Ignored if `transport` is `tcp`.
         host: Hostname to bind to. Ignored if `transport` is `unix`.
         port: Port to bind to. Ignored if `transport` is `unix`.
         max_clients: How many clients may be connected at once. 0 = unlimited. Unset =
             1 in a container, unlimited on the host.
     """
-    transport: Literal["unix", "tcp"] = "unix"
+    transport: Literal["unix", "tcp"] = Field(
+        default_factory=lambda: "unix" if hasattr(asyncio, "start_unix_server") else "tcp"
+    )
     socket: Path = Field(default_factory=lambda: home_dir() / "daemon.sock")
     host: str = "127.0.0.1"
     port: int = 7717

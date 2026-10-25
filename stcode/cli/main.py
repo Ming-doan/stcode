@@ -178,7 +178,9 @@ def main(
 def _address(
     transport: str | None, socket: str | None, host: str | None, port: int | None
 ) -> Address:
-    address = Address(transport=transport or "unix")
+    address = Address()
+    if transport:
+        address.transport = transport
     if socket:
         address.socket = Path(socket).expanduser()
     address.host = host or address.host

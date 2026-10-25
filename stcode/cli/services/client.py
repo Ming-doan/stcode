@@ -44,7 +44,9 @@ rather than hung on."""
 class Address:
     """Where a daemon listens."""
 
-    transport: str = "unix"
+    transport: str = field(
+        default_factory=lambda: "unix" if hasattr(asyncio, "open_unix_connection") else "tcp"
+    )
     socket: Path = field(default_factory=lambda: stcode_home() / "daemon.sock")
     host: str = "127.0.0.1"
     port: int = 7717
@@ -91,6 +93,10 @@ class DaemonClient:
         """Open the transport. `OSError` when nothing is listening — the caller's cue to
         start a daemon or ask for another address, not an error to hide."""
         if address.transport == "unix":
+            if not hasattr(asyncio, "open_unix_connection"):
+                raise OSError(
+                    "Unix sockets are unavailable on this platform; use --transport tcp."
+                )
             reader, writer = await asyncio.open_unix_connection(
                 str(address.socket.expanduser()), limit=STREAM_LIMIT
             )

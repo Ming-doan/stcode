@@ -127,14 +127,14 @@ project) and `keep`, the number of session files `prune` leaves behind.
 
 | Key | Default | |
 | --- | --- | --- |
-| `transport` | `"unix"` | `unix` on your machine, `tcp` in a container |
+| `transport` | `"unix"` on Unix, `"tcp"` on Windows | `tcp` also works in a container |
 | `socket` | `~/.stcode/daemon.sock` | `unix` only |
 | `host` / `port` | `127.0.0.1` / `7717` | `tcp` only |
 | `max_clients` | *unset* | concurrent connections. **Unset = 1 in a container, unlimited on the host**; `0` is unlimited everywhere |
 
-Read by the daemon only. The UI connects to `~/.stcode/daemon.sock` unless given
-`--socket` or `--transport tcp --host --port`, and starts the daemon on that same
-address. → [daemon.md](daemon.md#one-client-in-a-container)
+Read by the daemon only. The UI connects to `~/.stcode/daemon.sock` on Unix or
+`127.0.0.1:7717` over TCP on Windows unless given address flags, and starts the daemon
+on that same address. → [daemon.md](daemon.md#one-client-in-a-container)
 
 ### `[mcp]`
 

@@ -155,6 +155,10 @@ class Daemon:
 
         settings = self.config.daemon
         if settings.transport == "unix":
+            if not hasattr(asyncio, "start_unix_server"):
+                raise OSError(
+                    "Unix sockets are unavailable on this platform; use --transport tcp."
+                )
             path = socket_path(settings.socket)
             path.parent.mkdir(parents=True, exist_ok=True)
             _clear_stale_socket(path)

@@ -63,11 +63,11 @@ difficulty = "high"
 # dir = "./.stcode/sessions"
 # keep = 100
 
-# Where the daemon listens. `unix` on your own machine, `tcp` inside a container.
-# The UI does not read this: it connects to ~/.stcode/daemon.sock unless told otherwise
-# with --socket / --transport tcp --host --port, and starts the daemon on that address.
+# Where the daemon listens. Default: `unix` on Unix, loopback `tcp` on Windows.
+# Use `tcp` inside a container. The UI does not read this: it uses the same platform
+# default unless given --transport / --socket / --host / --port flags.
 [daemon]
-transport = "unix"
+# transport = "unix"     # use "tcp" on Windows or inside a container
 # socket = "~/.stcode/daemon.sock"
 # host = "0.0.0.0"       # when transport = "tcp"
 # port = 7717

@@ -41,9 +41,10 @@ stcode --daemonless   # the UI alone, attached to a daemon elsewhere
 ```
 
 No implementation switches between them. `--headless` replaces the `stcode` process
-with `stcode-daemon`. Plain `stcode` connects to `~/.stcode/daemon.sock` (or the address
-its flags name); if nothing answers, `cli/services/launcher.py` starts `stcode-daemon` on that
-address as a subprocess, logging to `~/.stcode/daemon.log`, and stops it again when the
+with `stcode-daemon`. Plain `stcode` connects to `~/.stcode/daemon.sock` on Unix or
+`127.0.0.1:7717` over TCP on Windows (or the address its flags name); if nothing answers,
+`cli/services/launcher.py` starts `stcode-daemon` on that address as a subprocess,
+logging to `daemon.log` in the stcode home directory, and stops it again when the
 UI exits. A daemon it *found* is left running — quitting is a detach. `stcode --restart`
 sends `shutdown` to whatever is listening first, for a daemon that is wedged or running
 old code.
@@ -260,16 +261,23 @@ the container is the mitigation.
 
 ```toml
 [daemon]
-transport = "unix"            # "tcp" inside a container
+# transport = "unix"          # default on Unix; "tcp" on Windows
 socket    = "~/.stcode/daemon.sock"
 host      = "127.0.0.1"
 port      = 7717
 ```
 
-`unix` for solo — no port to collide with, and filesystem permissions are the access
-control (the socket is chmod 0600; anyone who can open it can drive an agent with your
+`unix` for solo on Unix — no port to collide with, and filesystem permissions are the
+access control (the socket is chmod 0600; anyone who can open it can drive an agent with your
 privileges). `tcp` for a container, which has no host filesystem to put a socket on. Same
 JSONL framing either way, so a WebSocket adapter later is an adapter, not a protocol.
+
+Both the client and daemon default to loopback TCP when asyncio's Unix socket APIs
+are unavailable, as on Windows. Explicitly requesting `unix` on such a platform
+reports an unsupported transport with a hint to use `--transport tcp`.
+On Windows, set provider keys in the daemon's config file or environment: TCP still
+refuses API key updates and protocol shutdown, including `--restart` of a running
+daemon. The launcher can stop a daemon it started when the UI exits.
 
 **Transport is configuration, not architecture.** The one thing that reads it is
 `Daemon.local_only`, which decides what only this machine's user may do — send a key,

@@ -1,6 +1,6 @@
 [project]
 name = "stcode"
-version = "0.0.1a1"
+version = "0.0.1a2"
 description = "A coding agent that lives in a daemon, and a UI that is a client of it."
 readme = "README.md"
 requires-python = ">=3.10"
