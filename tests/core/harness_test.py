@@ -357,6 +357,28 @@ def test_grep_reports_no_matches_without_erroring(rt: Runtime[HarnessContext], r
     assert not result.is_error and "No matches" in result.content
 
 
+def test_bundled_search_works_without_a_system_binary_or_activated_environment(
+    rt: Runtime[HarnessContext], run: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = rt.context.cwd
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    (root / "café.py").write_text("message = 'héllo'\n", encoding="utf-8")
+    (root / "ignored.py").write_text("message = 'héllo'\n", encoding="utf-8")
+    (root / "other.txt").write_text("héllo\n", encoding="utf-8")
+    # Invoking a virtualenv's Python directly does not activate its scripts directory.
+    monkeypatch.setenv("PATH", "")
+
+    hits = run(grep.invoke({"pattern": "héllo", "type": "py", "output_mode": "content"}, rt))
+    assert not hits.is_error
+    assert "café.py:1:message = 'héllo'" in hits.content
+    assert "ignored.py" not in hits.content and "other.txt" not in hits.content
+
+    files = run(glob.invoke({"pattern": "**/*.py"}, rt))
+    assert not files.is_error
+    assert "café.py" in files.content and "other.txt" not in files.content
+
+
 def test_ls_marks_directories_and_skips_noise(rt: Runtime[HarnessContext], run: Any) -> None:
     (rt.context.cwd / "src").mkdir()
     (rt.context.cwd / "__pycache__").mkdir()

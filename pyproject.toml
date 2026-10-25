@@ -1,6 +1,6 @@
 [project]
 name = "stcode"
-version = "0.0.1a0"
+version = "0.0.1a1"
 description = "A coding agent that lives in a daemon, and a UI that is a client of it."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,7 +30,7 @@ dependencies = [
     "openai>=3.0.0",
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.3",
-    "ripgrep>=15.1.0",
+    "ripgrep-bin>=15.2.0",
     "textual>=8.2.8",
     "tomli>=2.0.1; python_version < '3.11'",
     "tomli-w>=1.2.0",

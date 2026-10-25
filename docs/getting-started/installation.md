@@ -26,8 +26,9 @@ pip install stcode
 stcode --version
 ```
 
-The package includes the search dependency; you do not need to install ripgrep
-separately.
+Search is included through `ripgrep-bin`, which supplies prebuilt binaries for
+common Linux and macOS systems. You do not need a separate ripgrep installation
+or a Rust compiler on those platforms.
 
 ## Run from source
 

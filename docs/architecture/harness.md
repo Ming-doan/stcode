@@ -118,7 +118,7 @@ tool. A call may narrow what it claims, never widen it.
 | `bash` | `bash(command, timeout=120, background=False, cwd="", description="")` | **each call is a fresh process**, and the docstring says so |
 | `bash_output` | `bash_output(shell_id, kill=False)` | drains a background shell, new output only |
 | `glob` | `glob(pattern, path=".")` | `fd`, falling back to `rg --files`, then `pathlib` |
-| `grep` | `grep(pattern, path=".", ...)` | ripgrep. Do not hand-roll |
+| `grep` | `grep(pattern, path=".", ...)` | ripgrep, installed through `ripgrep-bin` |
 | `ls` | `ls(path)` | `.gitignore`-aware |
 | `todo_write` | `todo_write(items)` | not a real tool — a device to keep the plan in context. Keep it |
 | `ask_user_question` | `ask_user_question(question, options=None, header="", multi_select=False)` | fails clearly with no user attached, rather than hanging |

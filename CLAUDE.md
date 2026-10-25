@@ -187,7 +187,7 @@ Seven. Each exists because violating it produced a specific, known failure.
 | Schemas | `pydantic` v2 | Signature → JSON Schema for free |
 | CLI | `typer` | |
 | Config | `tomllib` (read) + `tomli-w` (write) | Stdlib is read-only; the UI writes config back |
-| Search | `ripgrep` (pip wheel), `fd` (optional) | The wheel drops `rg` next to the interpreter, so `grep` works on a fresh checkout |
+| Search | `ripgrep-bin` (pip wheel), `fd` (optional) | The wheel installs `rg` without a Rust build on common platforms |
 | Tool schemas | `docstring-parser` | Signature + `Args:` → JSON Schema, described once |
 | MCP | `mcp` (official SDK) | We adapt it; we never reimplement the protocol |
 | Tracing | Direct HTTP JSON with `httpx` | Langfuse and Phoenix; no tracing SDK |

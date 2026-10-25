@@ -21,7 +21,7 @@
 FROM python:3.12-slim
 
 # git is not optional here: every role clones from /team/repo.git before writing code.
-# ripgrep arrives as a wheel with the package, so it is not installed twice.
+# ripgrep-bin supplies rg with the package, so it is not installed twice.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates \
     && rm -rf /var/lib/apt/lists/*

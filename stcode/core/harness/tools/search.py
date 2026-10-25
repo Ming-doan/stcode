@@ -6,9 +6,9 @@ semantics, binary detection, encoding recovery and PCRE2 are each a project's wo
 edge cases, and a Python reimplementation gets them wrong in ways that surface as an
 agent confidently reporting a symbol does not exist.
 
-`ripgrep` is a declared dependency (a wheel drops `rg` next to the interpreter). `fd`
-has no wheel, so `glob` degrades to `rg --files`, then to `pathlib`. A missing binary
-should cost speed, not the tool.
+`ripgrep-bin` supplies `rg` in the environment's scripts directory, with prebuilt
+wheels for common platforms. `fd` is optional, so `glob` degrades to `rg --files`,
+then to `pathlib`.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ async def run_capture(
 def find_binary(name: str) -> str | None:
     """Locate a helper binary on PATH, or next to the interpreter.
 
-    The second half is what makes the bundled ripgrep work: a wheel-installed binary
+    The second half is what makes ripgrep-bin work: a wheel-installed binary
     lands beside `python` in the virtualenv, which is on PATH when it is activated and
     not when something invokes `.venv/bin/python` directly.
     """
@@ -211,8 +211,8 @@ async def grep(
         raise ToolError(f"{target} does not exist.")
     if not _have("rg"):
         raise ToolError(
-            "ripgrep (`rg`) could not be found, though it is a declared dependency of "
-            "stcode. Reinstall the environment (`uv sync`), or put `rg` on PATH."
+            "ripgrep (`rg`) could not be found. Reinstall stcode's ripgrep-bin "
+            "dependency (`pip install --force-reinstall ripgrep-bin`), or put `rg` on PATH."
         )
 
     argv = [find_binary("rg") or "rg", "--no-messages"]
